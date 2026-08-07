@@ -250,6 +250,7 @@ async def test_browser_ref_uses_prior_snapshot_output() -> None:
         bundle.cleanup()
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "command",
     [
@@ -258,19 +259,11 @@ async def test_browser_ref_uses_prior_snapshot_output() -> None:
         "ls -la; rm -rf /workspace/app",
     ],
 )
-def test_separators_beyond_double_operators_are_compound(command: str) -> None:
+async def test_destructive_command_chained_to_a_read_command_is_blocked(command: str) -> None:
     plan = parse_command(command)
-
     assert plan.compound is True
     assert plan.read_only is False
 
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "command",
-    ["ls -la\nrm -rf /workspace/app", "ls & rm -rf /workspace/app"],
-)
-async def test_destructive_command_chained_to_a_read_command_is_blocked(command: str) -> None:
     bundle = await _compile(command)
     try:
         assert bundle.deterministic_allow is None
@@ -537,3 +530,97 @@ def test_mutating_http_requests_are_recognized(command: str, expected: str) -> N
 def test_passive_http_requests_are_not_flagged() -> None:
     assert parse_command("curl https://example.test/users").mutating_request is None
     assert parse_command("curl -X GET https://example.test/users").mutating_request is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('bash -c "rm -rf /workspace/app"', "destructive"),
+        ('sh -c "rm -rf /workspace/app"', "destructive"),
+        ('bash -lc "rm -rf /workspace/app"', "destructive"),
+        ('bash -c "agent-browser click @e3"', "Browser automation embedded"),
+    ],
+)
+async def test_shell_inline_source_is_parsed_not_just_stored(
+    command: str,
+    expected: str,
+) -> None:
+    """`-c` source is the obvious place to hide a command, so the inner string is parsed
+    and the same deterministic rules applied to it."""
+    bundle = await _compile(command)
+    try:
+        assert bundle.deterministic_block is not None
+        assert expected in bundle.deterministic_block
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_shell_inline_source_is_recorded_as_an_artifact() -> None:
+    bundle = await _compile('bash -c "echo hello"')
+    try:
+        [artifact] = bundle.packet["artifacts"]
+        assert artifact["path"] == "<inline>"
+        assert artifact["source"] == "echo hello"
+        assert artifact["inner_executable"] == "echo"
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_module_execution_cannot_be_resolved_to_a_script() -> None:
+    bundle = await _compile("python -m http.server")
+    try:
+        assert bundle.complete is False
+        assert any("-m execution" in reason for reason in bundle.incomplete_reasons)
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_dependency_count_limit_makes_evidence_incomplete() -> None:
+    bundle = await compile_evidence(
+        case_id="case-dependency-limit",
+        ctx=_ctx(
+            {
+                "/workspace/run.py": "import first\nimport second\n",
+                "/workspace/first.py": "value = 1\n",
+                "/workspace/second.py": "value = 2\n",
+            }
+        ),
+        arguments={"cmd": "python /workspace/run.py"},
+        mode="guarded",
+        scope={},
+        user_instruction="",
+        settings=SafetySettings(max_dependencies=1),
+    )
+    try:
+        assert bundle.complete is False
+        assert any("dependency count" in reason for reason in bundle.incomplete_reasons)
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_oversized_dependency_closure_makes_evidence_incomplete() -> None:
+    filler = "#" * 8000
+    bundle = await compile_evidence(
+        case_id="case-byte-limit",
+        ctx=_ctx(
+            {
+                "/workspace/run.py": f"import first\n{filler}",
+                "/workspace/first.py": filler,
+            }
+        ),
+        arguments={"cmd": "python /workspace/run.py"},
+        mode="guarded",
+        scope={},
+        user_instruction="",
+        settings=SafetySettings(max_total_artifact_bytes=10_000),
+    )
+    try:
+        assert bundle.complete is False
+        assert any("total byte limit" in reason for reason in bundle.incomplete_reasons)
+    finally:
+        bundle.cleanup()

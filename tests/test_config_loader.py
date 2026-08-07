@@ -168,25 +168,11 @@ def test_aliases_for_no_alias() -> None:
 def test_apply_override_and_load_settings_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "cli-config.json"
     path.write_text(
-        json.dumps({"env": {"STRIX_LLM": "round-trip-model", "PERPLEXITY_API_KEY": "pk"}}),
-        encoding="utf-8",
-    )
-
-    loader.apply_config_override(path)
-    settings = loader.load_settings()
-
-    assert settings.llm.model == "round-trip-model"
-    assert settings.integrations.perplexity_api_key == "pk"
-    # Second call is memoized -> same object.
-    assert loader.load_settings() is settings
-
-
-def test_safety_settings_load_from_config(tmp_path: Path) -> None:
-    path = tmp_path / "cli-config.json"
-    path.write_text(
         json.dumps(
             {
                 "env": {
+                    "STRIX_LLM": "round-trip-model",
+                    "PERPLEXITY_API_KEY": "pk",
                     "STRIX_SAFETY_MODE": "guarded",
                     "STRIX_SAFETY_MODEL": "openai/safety-model",
                     "STRIX_SAFETY_TIMEOUT": "12",
@@ -197,11 +183,15 @@ def test_safety_settings_load_from_config(tmp_path: Path) -> None:
     )
 
     loader.apply_config_override(path)
-    settings = loader.load_settings().safety
+    settings = loader.load_settings()
 
-    assert settings.mode == "guarded"
-    assert settings.model == "openai/safety-model"
-    assert settings.timeout == 12
+    assert settings.llm.model == "round-trip-model"
+    assert settings.integrations.perplexity_api_key == "pk"
+    assert settings.safety.mode == "guarded"
+    assert settings.safety.model == "openai/safety-model"
+    assert settings.safety.timeout == 12
+    # Second call is memoized -> same object.
+    assert loader.load_settings() is settings
 
 
 def test_apply_config_override_invalidates_cache(tmp_path: Path) -> None:

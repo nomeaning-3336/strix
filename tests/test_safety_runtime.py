@@ -19,9 +19,43 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+_SNAPSHOT_HISTORY: list[dict[str, Any]] = [
+    {
+        "type": "function_call",
+        "name": "exec_command",
+        "call_id": "snapshot-1",
+        "arguments": '{"cmd":"agent-browser snapshot -i"}',
+    },
+    {
+        "type": "function_call_output",
+        "call_id": "snapshot-1",
+        "output": '@e3 [button type="submit"] "Search"',
+    },
+]
+
+
 class _InspectionRunner:
     async def run(self, *, evidence_dir: str, script: str) -> str:
         return f"unused: {evidence_dir} {script}"
+
+
+class _StubReviewer:
+    """Stands in for the model review so a decision's source can be asserted."""
+
+    def __init__(self, on_review: Any = None) -> None:
+        self.on_review = on_review
+        self.calls = 0
+
+    async def review(self, bundle: Any) -> SafetyDecision:
+        self.calls += 1
+        if self.on_review is not None:
+            await self.on_review()
+        return SafetyDecision(
+            allowed=True,
+            source="reviewer",
+            reason="allowed",
+            case_id=bundle.case_id,
+        )
 
 
 def _runtime(tmp_path: Path, mode: str) -> SafetyRuntime:
@@ -37,11 +71,11 @@ def _runtime(tmp_path: Path, mode: str) -> SafetyRuntime:
     )
 
 
-def _ctx() -> Any:
+def _ctx(*, agent_id: str = "agent-1", turn_input: list[dict[str, Any]] | None = None) -> Any:
     return SimpleNamespace(
-        context={"agent_id": "agent-1", "sandbox_session": object()},
+        context={"agent_id": agent_id, "sandbox_session": object()},
         tool_call_id="call-1",
-        turn_input=[],
+        turn_input=turn_input or [],
     )
 
 
@@ -64,25 +98,37 @@ async def test_known_read_command_executes_without_model_review(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_direct_browser_command_gets_per_agent_session(tmp_path: Path) -> None:
+async def test_browser_sessions_are_disjoint_per_agent(tmp_path: Path) -> None:
     seen: list[str] = []
 
     async def invoke(_ctx: Any, raw_input: str) -> str:
         seen.append(json.loads(raw_input)["cmd"])
         return "snapshot"
 
-    result = await _runtime(tmp_path, "guarded").invoke_exec(
-        ctx=_ctx(),
-        arguments={"cmd": "agent-browser snapshot -i"},
-        invoke_tool=invoke,
-    )
+    runtime = _runtime(tmp_path, "guarded")
+    for agent_id in ("agent-1", "agent-2"):
+        result = await runtime.invoke_exec(
+            ctx=_ctx(agent_id=agent_id),
+            arguments={"cmd": "agent-browser snapshot -i"},
+            invoke_tool=invoke,
+        )
+        assert result == "snapshot"
 
-    assert result == "snapshot"
-    assert seen == ["AGENT_BROWSER_SESSION=strix-scan-1-agent-1 agent-browser snapshot -i"]
+    assert seen == [
+        "AGENT_BROWSER_SESSION=strix-scan-1-agent-1 agent-browser snapshot -i",
+        "AGENT_BROWSER_SESSION=strix-scan-1-agent-2 agent-browser snapshot -i",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_observe_mode_blocks_browser_click(tmp_path: Path) -> None:
+async def test_observe_mode_blocks_a_browser_click_against_a_fresh_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Without the snapshot the click blocks as incomplete evidence in every mode, so the
+    observe-mode rule itself would never be exercised."""
+    runtime = _runtime(tmp_path, "observe")
+    reviewer = _StubReviewer()
+    runtime._reviewer = reviewer
     invoked = False
 
     async def invoke(_ctx: Any, _raw_input: str) -> str:
@@ -90,15 +136,33 @@ async def test_observe_mode_blocks_browser_click(tmp_path: Path) -> None:
         invoked = True
         return "bad"
 
-    result = await _runtime(tmp_path, "observe").invoke_exec(
-        ctx=_ctx(),
+    result = await runtime.invoke_exec(
+        ctx=_ctx(turn_input=_SNAPSHOT_HISTORY),
         arguments={"cmd": "agent-browser click @e3"},
         invoke_tool=invoke,
     )
 
     payload = json.loads(result)
     assert payload["status"] == "blocked"
+    assert payload["safety"]["source"] == "deterministic"
+    assert payload["safety"]["categories"] == ["target_mutation"]
+    assert "not passive" in payload["safety"]["reason"]
+    assert reviewer.calls == 0
     assert invoked is False
+
+
+@pytest.mark.asyncio
+async def test_observe_mode_allows_a_passive_browser_read(tmp_path: Path) -> None:
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        return "snapshot"
+
+    result = await _runtime(tmp_path, "observe").invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "agent-browser snapshot -i"},
+        invoke_tool=invoke,
+    )
+
+    assert result == "snapshot"
 
 
 @pytest.mark.asyncio
@@ -131,23 +195,6 @@ def _script_ctx() -> Any:
         tool_call_id="call-1",
         turn_input=[],
     )
-
-
-class _StubReviewer:
-    def __init__(self, on_review: Any = None) -> None:
-        self.on_review = on_review
-        self.calls = 0
-
-    async def review(self, bundle: Any) -> SafetyDecision:
-        self.calls += 1
-        if self.on_review is not None:
-            await self.on_review()
-        return SafetyDecision(
-            allowed=True,
-            source="reviewer",
-            reason="allowed",
-            case_id=bundle.case_id,
-        )
 
 
 @pytest.mark.asyncio
@@ -301,3 +348,132 @@ async def test_unchanged_workspace_executes_after_review(tmp_path: Path) -> None
     )
 
     assert result == "ran"
+
+
+@pytest.mark.asyncio
+async def test_observe_mode_blocks_a_workspace_patch(tmp_path: Path) -> None:
+    invoked = False
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        nonlocal invoked
+        invoked = True
+        return "bad"
+
+    result = await _runtime(tmp_path, "observe").invoke_mutating_tool(
+        ctx=_ctx(),
+        tool_name="apply_patch",
+        raw_input="{}",
+        invoke_tool=invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert payload["safety"]["categories"] == ["state_mutation"]
+    assert invoked is False
+
+
+@pytest.mark.asyncio
+async def test_mutating_tool_is_untouched_when_safety_is_off(tmp_path: Path) -> None:
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        return "patched"
+
+    result = await _runtime(tmp_path, "off").invoke_mutating_tool(
+        ctx=_ctx(),
+        tool_name="apply_patch",
+        raw_input="{}",
+        invoke_tool=invoke,
+    )
+
+    assert result == "patched"
+
+
+@pytest.mark.asyncio
+async def test_guarded_patch_runs_and_advances_the_workspace_epoch(tmp_path: Path) -> None:
+    """The epoch is what makes a script decision go stale, so the write that invalidates
+    inspected sources has to advance it."""
+    runtime = _runtime(tmp_path, "guarded")
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        return "patched"
+
+    before = runtime._workspace_epoch
+    result = await runtime.invoke_mutating_tool(
+        ctx=_ctx(),
+        tool_name="apply_patch",
+        raw_input="{}",
+        invoke_tool=invoke,
+    )
+    after = runtime._workspace_epoch
+
+    assert result == "patched"
+    assert after > before
+
+
+@pytest.mark.asyncio
+async def test_a_patch_during_review_invalidates_a_script_decision(tmp_path: Path) -> None:
+    """End-to-end pairing of the two halves: apply_patch bumps the epoch, and a decision
+    compiled before it is refused rather than executed against changed sources."""
+    runtime = _runtime(tmp_path, "guarded")
+
+    async def patch_during_review() -> None:
+        await runtime.invoke_mutating_tool(
+            ctx=_ctx(agent_id="agent-2"),
+            tool_name="apply_patch",
+            raw_input="{}",
+            invoke_tool=_noop_invoke,
+        )
+
+    runtime._reviewer = _StubReviewer(patch_during_review)
+    invoked = False
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        nonlocal invoked
+        invoked = True
+        return "bad"
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(),
+        arguments={"cmd": "python /workspace/app.py"},
+        invoke_tool=invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["safety"]["categories"] == ["stale_evidence"]
+    assert invoked is False
+
+
+async def _noop_invoke(_ctx: Any, _raw_input: str) -> str:
+    return "patched"
+
+
+@pytest.mark.asyncio
+async def test_a_workspace_command_advances_the_epoch(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    runtime._reviewer = _StubReviewer()
+
+    before = runtime._workspace_epoch
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(),
+        arguments={"cmd": "python /workspace/app.py"},
+        invoke_tool=_noop_invoke,
+    )
+    after = runtime._workspace_epoch
+
+    assert result == "patched"
+    assert after > before
+
+
+@pytest.mark.asyncio
+async def test_a_read_only_command_leaves_the_epoch_alone(tmp_path: Path) -> None:
+    """A read cannot invalidate another agent's inspected sources, so it must not bump the
+    epoch; if it did, concurrent reads would spuriously stale each other's decisions."""
+    runtime = _runtime(tmp_path, "guarded")
+
+    before = runtime._workspace_epoch
+    await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "ls /workspace"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert runtime._workspace_epoch == before
