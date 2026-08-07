@@ -45,6 +45,16 @@ func TestExecCommandHighlightsCommand(t *testing.T) {
 	}
 }
 
+func TestExecCommandRendersSafetyBlock(t *testing.T) {
+	out := Tool(tool(
+		"exec_command",
+		map[string]any{"cmd": "agent-browser click @e3"},
+		map[string]any{"safety": map[string]any{"reason": "form submission is disabled"}},
+		"blocked",
+	))
+	requireContains(t, out, "Blocked", "form submission is disabled")
+}
+
 func TestApplyPatchHighlightsCode(t *testing.T) {
 	out := Tool(tool("apply_patch", map[string]any{
 		"patch": "*** Update File: src/app.py\n-import os\n+import sys\n+def main():\n+    return sys.argv",

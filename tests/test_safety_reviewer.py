@@ -1,0 +1,184 @@
+"""The safety model may decide immediately or use one inspection call."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
+
+import pytest
+from agents.tool_context import ToolContext
+
+import strix.safety.reviewer as reviewer_module
+from strix.config.settings import SafetySettings
+from strix.safety.evidence import EvidenceBundle
+from strix.safety.reviewer import SafetyReviewer, run_inspection
+from strix.safety.types import InspectionContext, SafetyVerdict
+
+
+if TYPE_CHECKING:
+    from pytest import MonkeyPatch
+
+
+class _InspectionRunner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def run(self, *, evidence_dir: str, script: str) -> str:
+        self.calls += 1
+        return f"inspected {Path(evidence_dir).name}: {script}"
+
+
+class _Result:
+    def __init__(self, verdict: SafetyVerdict) -> None:
+        self._verdict = verdict
+        self.context_wrapper = SimpleNamespace(usage=SimpleNamespace())
+
+    def final_output_as(self, _cls: type[Any], *, raise_if_incorrect_type: bool) -> SafetyVerdict:
+        assert raise_if_incorrect_type is True
+        return self._verdict
+
+
+def _settings() -> Any:
+    return SimpleNamespace(
+        safety=SafetySettings(model="test-model"),
+        llm=SimpleNamespace(
+            model="main-model",
+            extra_headers=None,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_reviewer_is_capped_at_two_turns_and_zero_retries(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run(agent: Any, *, input: str, context: Any, max_turns: int) -> _Result:  # noqa: A002
+        captured.update(agent=agent, input=input, context=context, max_turns=max_turns)
+        return _Result(
+            SafetyVerdict(
+                decision="allow",
+                risk="low",
+                categories=[],
+                reason="read only",
+                confidence=0.99,
+            )
+        )
+
+    monkeypatch.setattr(reviewer_module, "load_settings", _settings)
+    monkeypatch.setattr(reviewer_module, "configure_sdk_model_defaults", lambda _settings: None)
+    monkeypatch.setattr(
+        reviewer_module.StrixProvider, "get_model", lambda _self, _name: "test-model"
+    )
+    monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
+    monkeypatch.setattr(reviewer_module, "get_global_report_state", lambda: None)
+    bundle = EvidenceBundle(
+        case_id="case-1",
+        root=tmp_path,
+        packet={"completeness": {"status": "complete"}},
+        complete=True,
+        incomplete_reasons=[],
+    )
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(bundle)
+
+    assert decision.allowed is True
+    assert captured["max_turns"] == 2
+    assert [tool.name for tool in captured["agent"].tools] == ["run_inspection"]
+    assert captured["agent"].model_settings.retry.max_retries == 0
+    # The cap also covers reasoning tokens; a verdict-sized budget would truncate the
+    # structured output on a reasoning model and fail every review closed.
+    assert captured["agent"].model_settings.max_tokens == SafetySettings().max_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_review_budget_covers_both_turns_and_the_inspection(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_wait_for(awaitable: Any, *, timeout: float) -> Any:
+        captured["timeout"] = timeout
+        return await awaitable
+
+    async def fake_run(_agent: Any, **_kwargs: Any) -> _Result:
+        return _Result(
+            SafetyVerdict(
+                decision="allow",
+                risk="low",
+                categories=[],
+                reason="read only",
+                confidence=0.99,
+            )
+        )
+
+    monkeypatch.setattr(reviewer_module, "load_settings", _settings)
+    monkeypatch.setattr(reviewer_module, "configure_sdk_model_defaults", lambda _settings: None)
+    monkeypatch.setattr(
+        reviewer_module.StrixProvider, "get_model", lambda _self, _name: "test-model"
+    )
+    monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
+    monkeypatch.setattr(reviewer_module, "get_global_report_state", lambda: None)
+    monkeypatch.setattr(reviewer_module.asyncio, "wait_for", fake_wait_for)
+    bundle = EvidenceBundle(
+        case_id="case-budget",
+        root=tmp_path,
+        packet={"completeness": {"status": "complete"}},
+        complete=True,
+        incomplete_reasons=[],
+    )
+
+    await SafetyReviewer(inspection_runner=_InspectionRunner()).review(bundle)
+
+    safety = SafetySettings()
+    assert captured["timeout"] == 2 * safety.timeout + safety.inspection_timeout
+
+
+@pytest.mark.asyncio
+async def test_inspection_tool_can_only_run_once(tmp_path: Path) -> None:
+    runner = _InspectionRunner()
+    state = InspectionContext(evidence_dir=str(tmp_path), runner=runner)
+    ctx = ToolContext(
+        context=state,
+        tool_name="run_inspection",
+        tool_call_id="inspect-1",
+        tool_arguments="{}",
+    )
+    raw = json.dumps({"reason": "correlate files", "script": "print('ok')"})
+
+    first = await run_inspection.on_invoke_tool(ctx, raw)
+    second = await run_inspection.on_invoke_tool(ctx, raw)
+
+    assert "inspected" in first
+    assert "already used" in second
+    assert runner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reviewer_failure_blocks(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    async def fail(*_args: Any, **_kwargs: Any) -> Any:
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(reviewer_module, "load_settings", _settings)
+    monkeypatch.setattr(reviewer_module, "configure_sdk_model_defaults", lambda _settings: None)
+    monkeypatch.setattr(
+        reviewer_module.StrixProvider, "get_model", lambda _self, _name: "test-model"
+    )
+    monkeypatch.setattr(reviewer_module.Runner, "run", fail)
+    bundle = EvidenceBundle(
+        case_id="case-2",
+        root=tmp_path,
+        packet={"completeness": {"status": "complete"}},
+        complete=True,
+        incomplete_reasons=[],
+    )
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(bundle)
+
+    assert decision.allowed is False
+    assert decision.source == "review_error"

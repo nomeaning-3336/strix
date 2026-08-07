@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from strix.agents.prompt import render_system_prompt
 from strix.config import load_settings
+from strix.safety.runtime import safety_runtime_from_context
 from strix.tools.agents_graph.tools import (
     agent_finish,
     create_agent,
@@ -140,6 +141,30 @@ def _with_bounded_result(tool: FunctionTool) -> FunctionTool:
 
     tool.on_invoke_tool = invoke
     tool._strix_bounded = True  # type: ignore[attr-defined]
+    return tool
+
+
+def _with_safety_guard(tool: FunctionTool) -> FunctionTool:
+    """Guard effectful static function tools before their implementation runs."""
+    if getattr(tool, "_strix_safety_guarded", False):
+        return tool
+    if tool.name not in {"apply_patch", "repeat_request"}:
+        return tool
+    invoke_tool = tool.on_invoke_tool
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        runtime = safety_runtime_from_context(ctx)
+        if runtime is None:
+            return await invoke_tool(ctx, raw_input)
+        return await runtime.invoke_mutating_tool(
+            ctx=ctx,
+            tool_name=tool.name,
+            raw_input=raw_input,
+            invoke_tool=invoke_tool,
+        )
+
+    tool.on_invoke_tool = invoke
+    tool._strix_safety_guarded = True  # type: ignore[attr-defined]
     return tool
 
 
@@ -277,7 +302,17 @@ def _bound_custom_tool(tool: CustomTool) -> CustomTool:
     invoke_tool = tool.on_invoke_tool
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
-        return await _bound_result(await invoke_tool(ctx, raw_input))
+        runtime = safety_runtime_from_context(ctx)
+        if runtime is not None and tool.name == "apply_patch":
+            result = await runtime.invoke_mutating_tool(
+                ctx=ctx,
+                tool_name=tool.name,
+                raw_input=raw_input,
+                invoke_tool=invoke_tool,
+            )
+        else:
+            result = await invoke_tool(ctx, raw_input)
+        return await _bound_result(result)
 
     tool.on_invoke_tool = invoke
     return tool
@@ -287,15 +322,23 @@ def _configure_filesystem_tools(toolset: Any, *, chat_completions: bool) -> None
     for name, tool in vars(toolset).items():
         if chat_completions:
             if isinstance(tool, CustomTool):
-                setattr(toolset, name, _custom_tool_as_function_tool(tool))
+                setattr(toolset, name, _with_safety_guard(_custom_tool_as_function_tool(tool)))
             elif isinstance(tool, FunctionTool):
                 setattr(
-                    toolset, name, _function_tool_with_error_result(_with_coerced_arguments(tool))
+                    toolset,
+                    name,
+                    _function_tool_with_error_result(
+                        _with_safety_guard(_with_coerced_arguments(tool))
+                    ),
                 )
         elif isinstance(tool, CustomTool):
             setattr(toolset, name, _bound_custom_tool(tool))
         elif isinstance(tool, FunctionTool):
-            setattr(toolset, name, _with_bounded_result(_with_coerced_arguments(tool)))
+            setattr(
+                toolset,
+                name,
+                _with_safety_guard(_with_bounded_result(_with_coerced_arguments(tool))),
+            )
 
 
 def _make_filesystem_configurator(*, chat_completions: bool) -> Any:
@@ -367,6 +410,13 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
             _apply_shell_output_cap(parsed)
             raw_input = json.dumps(parsed)
         try:
+            runtime = safety_runtime_from_context(ctx)
+            if runtime is not None and isinstance(parsed, dict):
+                return await runtime.invoke_exec(
+                    ctx=ctx,
+                    arguments=parsed,
+                    invoke_tool=invoke_tool,
+                )
             return await invoke_tool(ctx, raw_input)
         except ValidationError as exc:
             return _format_validation_error(tool.name, exc)
@@ -396,6 +446,15 @@ def _wrap_write_stdin(tool: FunctionTool) -> FunctionTool:
             _apply_shell_output_cap(parsed)
             raw_input = json.dumps(parsed)
         try:
+            # A session opened by an approved exec_command would otherwise be an
+            # unreviewed second command channel into the same sandbox.
+            runtime = safety_runtime_from_context(ctx)
+            if runtime is not None and isinstance(parsed, dict):
+                return await runtime.invoke_write_stdin(
+                    ctx=ctx,
+                    arguments=parsed,
+                    invoke_tool=invoke_tool,
+                )
             return await invoke_tool(ctx, raw_input)
         except ValidationError as exc:
             return _format_validation_error(tool.name, exc)
@@ -602,7 +661,7 @@ def build_strix_agent(
         tools = [*_BASE_TOOLS, *agent_tools, agent_finish]
     _ensure_unique_tool_names(tools)
     tools = [
-        _with_bounded_result(_with_coerced_arguments(tool))
+        _with_safety_guard(_with_bounded_result(_with_coerced_arguments(tool)))
         if isinstance(tool, FunctionTool)
         else tool
         for tool in tools

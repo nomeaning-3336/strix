@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from strix.config import apply_config_override
-from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.config import apply_config_override, load_settings
+from strix.config.settings import DEFAULT_MAX_TURNS, SAFETY_MODES
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.interface.scan_setup import attach_workspace_mount, build_targets_info
 from strix.interface.update_check import self_update
@@ -188,6 +188,17 @@ Examples:
     )
 
     parser.add_argument(
+        "--safety-mode",
+        choices=SAFETY_MODES,
+        default=None,
+        help=(
+            "Action safety policy: 'off' preserves current behavior, 'guarded' allows "
+            "non-destructive interaction after contextual review, and 'observe' permits "
+            "only passive target interaction. Defaults to STRIX_SAFETY_MODE or off."
+        ),
+    )
+
+    parser.add_argument(
         "--diff-base",
         type=str,
         help=(
@@ -249,6 +260,10 @@ Examples:
 
     if args.config:
         apply_config_override(validate_config_file(args.config))
+
+    args.safety_mode_explicit = args.safety_mode is not None
+    if args.safety_mode is None:
+        args.safety_mode = load_settings().safety.mode
 
     if args.update:
         sys.exit(0 if self_update() else 1)
@@ -377,3 +392,22 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
     persisted_scan_mode = state.get("scan_mode")
     if persisted_scan_mode and args.scan_mode == "deep":
         args.scan_mode = persisted_scan_mode
+    persisted_safety_mode = state.get("safety_mode", "off")
+    if persisted_safety_mode not in SAFETY_MODES:
+        parser.error(
+            f"--resume {args.resume}: run.json has invalid safety_mode {persisted_safety_mode!r}"
+        )
+    if args.safety_mode_explicit and args.safety_mode != persisted_safety_mode:
+        parser.error(
+            f"--resume {args.resume}: cannot change safety mode from "
+            f"{persisted_safety_mode!r} to {args.safety_mode!r}"
+        )
+    args.safety_mode = persisted_safety_mode
+    if persisted_safety_mode != "off":
+        persisted_sources = state.get("local_sources") or []
+        if persisted_sources and all(
+            isinstance(source, dict)
+            and Path(str(source.get("source_path") or "")).expanduser().is_dir()
+            for source in persisted_sources
+        ):
+            args.local_sources = persisted_sources

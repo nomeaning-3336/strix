@@ -33,6 +33,10 @@ _LLM_ENV_KEYS = [
     # RuntimeSettings
     "STRIX_IMAGE",
     "STRIX_RUNTIME_BACKEND",
+    # SafetySettings
+    "STRIX_SAFETY_MODE",
+    "STRIX_SAFETY_MODEL",
+    "STRIX_SAFETY_TIMEOUT",
     # TelemetrySettings
     "STRIX_TELEMETRY",
 ]
@@ -175,6 +179,29 @@ def test_apply_override_and_load_settings_round_trip(tmp_path: Path) -> None:
     assert settings.integrations.perplexity_api_key == "pk"
     # Second call is memoized -> same object.
     assert loader.load_settings() is settings
+
+
+def test_safety_settings_load_from_config(tmp_path: Path) -> None:
+    path = tmp_path / "cli-config.json"
+    path.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "STRIX_SAFETY_MODE": "guarded",
+                    "STRIX_SAFETY_MODEL": "openai/safety-model",
+                    "STRIX_SAFETY_TIMEOUT": "12",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loader.apply_config_override(path)
+    settings = loader.load_settings().safety
+
+    assert settings.mode == "guarded"
+    assert settings.model == "openai/safety-model"
+    assert settings.timeout == 12
 
 
 def test_apply_config_override_invalidates_cache(tmp_path: Path) -> None:

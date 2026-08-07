@@ -6,6 +6,14 @@ description: agent-browser CLI for headless Chrome via shell. Snapshot-and-ref w
 
 # agent-browser core
 
+When an action safety mode is active, issue browser interactions as individual
+direct `agent-browser` commands. Do not hide browser automation in Python,
+shell scripts, command chains, aliases, or subprocess wrappers: embedded
+browser control is blocked so each action can be reviewed against the current
+snapshot. If a referenced action is blocked as stale, run a new snapshot and
+retry the direct command. Strix assigns the live browser session automatically;
+do not override `--session`, `--profile`, or CDP connection flags.
+
 Fast browser automation CLI for AI agents. Chrome/Chromium via CDP, no
 Playwright or Puppeteer dependency. Accessibility-tree snapshots with compact
 `@eN` refs let agents interact with pages in ~200-400 tokens instead of

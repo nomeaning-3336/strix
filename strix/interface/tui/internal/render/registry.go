@@ -16,6 +16,8 @@ func statusIcon(status string) (string, lipgloss.Style) {
 		return "✓ Done", Col(Green)
 	case "failed":
 		return "✗ Failed", Col(SevCrit)
+	case "blocked":
+		return "■ Blocked by safety policy", Col(AmberY)
 	case "error":
 		return "✗ Error", Col(SevCrit)
 	}
@@ -29,7 +31,7 @@ func renderGenericTool(name string, args map[string]any, result any, status stri
 	for _, k := range SortedKeys(args) {
 		b.WriteString("  " + Dim().Render(k) + ": " + StringValue(args[k]) + "\n")
 	}
-	if (status == "completed" || status == "failed" || status == "error") && result != nil {
+	if (status == "completed" || status == "failed" || status == "blocked" || status == "error") && result != nil {
 		b.WriteString(lipgloss.NewStyle().Bold(true).Render("Result: ") + StringValue(result))
 	} else {
 		icon, style := statusIcon(status)

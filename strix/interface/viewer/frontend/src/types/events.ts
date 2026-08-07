@@ -67,7 +67,7 @@ export interface ToolExecution {
   toolName: string;
   args: Record<string, unknown>;
   result: unknown;
-  status: "running" | "completed" | "failed" | "error";
+  status: "running" | "completed" | "failed" | "blocked" | "error";
   startedAt: string;
   completedAt: string | null;
 }
@@ -98,5 +98,5 @@ export interface ToolRendererProps {
   toolName: string;
   args: Record<string, unknown>;
   result: unknown;
-  status: "running" | "completed" | "failed" | "error";
+  status: "running" | "completed" | "failed" | "blocked" | "error";
 }

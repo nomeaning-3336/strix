@@ -23,7 +23,7 @@ from strix.config.models import (
     configure_sdk_model_defaults,
     uses_chat_completions_tool_schema,
 )
-from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.config.settings import DEFAULT_MAX_TURNS, SAFETY_MODES, SafetyMode
 from strix.core.agents import AgentCoordinator
 from strix.core.execution import (
     respawn_subagents,
@@ -42,6 +42,8 @@ from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
+from strix.runtime.local_dir_staging import materialize_isolated_sources
+from strix.safety.runtime import SafetyRuntime
 from strix.telemetry.logging import set_scan_id, setup_scan_logging
 from strix.tools.output_store import (
     WORKSPACE_SPILL_DIR,
@@ -59,6 +61,13 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 StreamEventSink = Callable[[str, Any], None]
+
+
+def _safety_mode(scan_config: dict[str, Any]) -> SafetyMode:
+    raw = str(scan_config.get("safety_mode") or "off")
+    if raw not in SAFETY_MODES:
+        raise ValueError(f"Unsupported safety mode: {raw!r}")
+    return raw
 
 
 def _merge_root_prompt_context(
@@ -162,6 +171,7 @@ async def run_strix_scan(
     )
 
     settings = load_settings()
+    safety_mode = _safety_mode(scan_config)
     configure_sdk_model_defaults(settings)
     resolved_model = (model or settings.llm.model or "").strip()
     if not resolved_model:
@@ -222,11 +232,19 @@ async def run_strix_scan(
     else:
         root_id = uuid.uuid4().hex[:8]
 
+    effective_local_sources = list(local_sources or scan_config.get("local_sources") or [])
+    if safety_mode != "off":
+        effective_local_sources = materialize_isolated_sources(
+            effective_local_sources,
+            run_dir=run_dir,
+        )
+        scan_config["local_sources"] = effective_local_sources
+
     logger.info("Bringing up sandbox session for scan %s", scan_id)
     bundle = await session_manager.create_or_reuse(
         scan_id,
         image=image,
-        local_sources=local_sources or [],
+        local_sources=effective_local_sources,
         status_sink=status_sink,
     )
     report("Waiting for the first model response")
@@ -282,6 +300,22 @@ async def run_strix_scan(
             coordinator.set_budget_extender(hooks.extend_budget)
 
         scope_context = build_scope_context(scan_config)
+        if safety_mode != "off":
+            scope_context["safety_mode"] = safety_mode
+            scope_context["workspace_isolation"] = True
+        safety_runtime = (
+            SafetyRuntime(
+                scan_id=scan_id,
+                mode=safety_mode,
+                scope=scope_context,
+                user_instruction=str(scan_config.get("user_instructions") or ""),
+                settings=settings.safety,
+                run_dir=run_dir,
+                sandbox_image=image,
+            )
+            if safety_mode != "off"
+            else None
+        )
         root_context = _merge_root_prompt_context(scope_context, extra_system_prompt_context)
         root_instructions = _compose_root_instructions_override(
             root_instructions_override,
@@ -345,6 +379,8 @@ async def run_strix_scan(
             "spawn_child_agent": spawn_child_agent,
             "max_context_images": settings.runtime.max_context_images,
         }
+        if safety_runtime is not None:
+            context["safety_runtime"] = safety_runtime
 
         root_session = open_agent_session(root_id, agents_db)
         sessions_to_close.append(root_session)

@@ -1,0 +1,116 @@
+---
+title: "Safety Modes"
+description: "Control state-changing actions during a scan"
+---
+
+Safety mode is independent of scan depth. `quick`, `standard`, and `deep`
+control coverage; safety mode controls which effects may be executed.
+
+```bash
+strix --target https://example.test --safety-mode guarded
+```
+
+## Modes
+
+| Mode | Behavior |
+| --- | --- |
+| `off` | Current autonomous behavior. Local directories are mounted live and writable. |
+| `guarded` | Allows non-destructive interaction after contextual review. Persistent or destructive target actions are blocked. |
+| `observe` | Passive target interaction only. Form submission, authentication, uploads, mutating requests, and state-changing controls are blocked. |
+
+`off` is the default for backward compatibility. Configure a default with
+`STRIX_SAFETY_MODE` or select a mode for one run with `--safety-mode`.
+
+## Contextual Review
+
+Before an ambiguous shell or browser action executes, Strix compiles a frozen
+evidence packet containing the effective command, target scope, relevant script
+source and imports, prior tool-call evidence, browser snapshot context, and
+workspace persistence details.
+
+The safety model may decide immediately or make exactly one `run_inspection`
+tool call. That call runs a Python standard-library analysis script in a
+separate networkless, read-only container over the frozen evidence. If the tool
+is used, the model's next response must be the final decision.
+
+The review is bounded to at most two model turns and one optional inspection
+call. Timeouts, malformed decisions, a second tool call, incomplete evidence,
+or low-confidence approval fail closed.
+
+## Deterministic Rules
+
+Some outcomes never reach the model. Destructive commands, environment
+overrides that change which code an interpreter loads (`PYTHONPATH`,
+`LD_PRELOAD`, `AGENT_BROWSER_SESSION`, and similar), blocked browser actions,
+and mutating requests in `observe` mode are refused outright. A small set of
+read-only commands is allowed outright, but only when its options are also
+read-only: `rg --pre` and anything else that hands the command another program
+to run goes to review instead.
+
+Commands that wrap another program (`sudo`, `timeout`, `xargs`, `nohup`, and
+similar) and interactive `write_stdin` payloads cannot be resolved to a single
+effective action before dispatch, so they are blocked. Issue the command as its
+own `exec_command` call.
+
+## Scripts
+
+When a command executes a script, Strix reads the current entrypoint and local
+Python imports without importing or running them. Inline `python -c` source is
+analyzed the same way. Absolute imports resolve against the entrypoint's
+directory and relative imports against the importing module's package, so the
+whole local closure is inspected. Decisions bind to content hashes. Dynamic
+code execution, import-path mutation, unresolved generated commands, oversized
+dependency closures, entrypoints outside `/workspace`, and unsupported evidence
+block the action.
+
+Browser automation inside scripts is blocked in safety modes. Issue browser
+operations as individual raw `agent-browser` commands so each action can be
+reviewed against the current snapshot and element references.
+
+Commands that create and execute code in one shell expression should be split
+into separate creation and execution calls.
+
+## Browser Commands
+
+Strix continues to use the raw `agent-browser` CLI. In safety modes it assigns
+an isolated browser session per agent and rejects model-supplied session,
+profile, or CDP overrides.
+
+Interactions with element references require a prior recorded snapshot. A
+snapshot taken before a navigation or any other page-changing action is stale:
+the action is blocked and the agent must snapshot again.
+
+Composite operations such as `auth login`, arbitrary `eval`, browser state
+persistence, and uploads are blocked. Guarded login should use explicit fill
+and submit steps with credentials supplied in the initial user instruction.
+
+## Workspace Isolation
+
+For `guarded` and `observe`, user-owned local directories are copied into:
+
+```text
+strix_runs/<run>/.state/workspaces/<name>
+```
+
+The copy is mounted writable, while the original source remains unchanged.
+`.git`, `.agents`, and `.codex` inside the copy stay read-only: they carry
+repository and agent-instruction state that survives `--resume`. Copies are
+retained for resume. Repository targets are already cloned into a disposable
+location and do not need another copy.
+
+In-tree symlinks are materialized. Dangling, cyclic, device, and out-of-tree
+symlinks are omitted. Files are copied rather than hard-linked.
+
+## Limitations
+
+Contextual review reduces accidental harmful actions; it is not a complete
+network containment boundary. Arbitrary dynamic programs, raw sockets, or
+processes that ignore proxy settings cannot always be predicted statically.
+Unresolvable behavior blocks in safety modes.
+
+Deterministic rules cover the cases listed above. Every other command is judged
+by the safety model against compiled evidence, so a tool whose effects are not
+statically recognizable — a scanner or exploit framework that mutates the
+target through its own protocol, for example — rests on that judgment rather
+than on a rule. Strong containment additionally requires externally enforced
+egress policy and reduced sandbox privileges.
