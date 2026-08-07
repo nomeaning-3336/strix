@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import io
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -9,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from strix.config.settings import SafetySettings
-from strix.safety.evidence import compile_evidence, parse_command
+from strix.safety.evidence import _PythonFacts, compile_evidence, parse_command
 
 
 if TYPE_CHECKING:
@@ -31,6 +32,12 @@ class _Sandbox:
         if self.files[key] == _UNREADABLE:
             raise PermissionError(key)
         return io.BytesIO(self.files[key].encode())
+
+
+def _facts(source: str) -> _PythonFacts:
+    facts = _PythonFacts()
+    facts.visit(ast.parse(source))
+    return facts
 
 
 def _ctx(files: dict[str, str], *, turn_input: list[Any] | None = None) -> Any:
@@ -624,3 +631,169 @@ async def test_oversized_dependency_closure_makes_evidence_incomplete() -> None:
         assert any("total byte limit" in reason for reason in bundle.incomplete_reasons)
     finally:
         bundle.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("command", "action", "subcommand"),
+    [
+        ("agent-browser tab new https://example.test/admin", "tab", "new"),
+        ("agent-browser tab close 2", "tab", "close"),
+        ("agent-browser session clear", "session", "clear"),
+    ],
+)
+async def test_grouped_browser_verbs_are_not_passive(
+    command: str,
+    action: str,
+    subcommand: str,
+) -> None:
+    """`tab new <url>` navigates and `tab close` destroys page state, so the bare verb
+    must not be enough to earn the observation fast path."""
+    plan = parse_command(command)
+    assert plan.browser_action == action
+    assert plan.browser_subcommand == subcommand
+    assert plan.read_only is False
+
+    bundle = await _compile(command)
+    try:
+        assert bundle.deterministic_allow is None
+        assert bundle.packet["browser"]["passive"] is False
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["agent-browser tab", "agent-browser snapshot -i"])
+async def test_bare_listing_verbs_keep_the_observation_fast_path(command: str) -> None:
+    bundle = await _compile(command)
+    try:
+        assert bundle.deterministic_allow is not None
+        assert bundle.packet["browser"]["passive"] is True
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_grouped_blocked_verbs_still_match_on_the_verb() -> None:
+    """The blocked list keys off the bare verb, so qualifying the action must not stop
+    `auth login` from matching `auth`."""
+    bundle = await _compile("agent-browser auth login my-app")
+    try:
+        assert bundle.deterministic_block is not None
+        assert "auth" in bundle.deterministic_block
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3.12 /workspace/run.py",
+        "/usr/bin/python3.12 /workspace/run.py",
+        "pypy3 /workspace/run.py",
+    ],
+)
+async def test_versioned_interpreters_are_inspected(command: str) -> None:
+    bundle = await _compile(
+        command,
+        {"/workspace/run.py": "import helper\n", "/workspace/helper.py": "value = 1\n"},
+    )
+    try:
+        paths = {item["path"] for item in bundle.packet["artifacts"]}
+        assert paths == {"/workspace/run.py", "/workspace/helper.py"}
+        assert bundle.complete is True
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_non_python_interpreter_source_is_inspected() -> None:
+    bundle = await _compile(
+        "php /workspace/app.php",
+        {"/workspace/app.php": "<?php unlink('/workspace/data'); ?>\n"},
+    )
+    try:
+        [artifact] = bundle.packet["artifacts"]
+        assert artifact["path"] == "/workspace/app.php"
+        assert "unlink" in artifact["source"]
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python3.12",
+        "node",
+        "mystery-runner /workspace/run.py",
+        "./vendored-tool /workspace/run.sh",
+    ],
+)
+async def test_unresolvable_code_execution_fails_closed(command: str) -> None:
+    """A packet with no artifacts must never be stamped complete just because the
+    executable fell outside the interpreter set."""
+    bundle = await _compile(command, {"/workspace/run.py": "import os\n"})
+    try:
+        assert bundle.complete is False
+        assert bundle.packet["artifacts"] == []
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("command", ["nmap -sV example.test", "ls /workspace", "whoami"])
+async def test_commands_without_a_script_are_not_forced_incomplete(command: str) -> None:
+    """Fail-closed on unresolved script execution must not swallow ordinary tools."""
+    bundle = await _compile(command)
+    try:
+        assert bundle.complete is True
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_absolute_submodule_import_is_collected() -> None:
+    """`from pkg import payload` may name a submodule, not an attribute of the package."""
+    bundle = await _compile(
+        "python /workspace/main.py",
+        {
+            "/workspace/main.py": "from pkg import payload\npayload.go()\n",
+            "/workspace/pkg/__init__.py": "",
+            "/workspace/pkg/payload.py": "import shutil\n\n\ndef go():\n    shutil.rmtree('/x')\n",
+        },
+    )
+    try:
+        paths = {item["path"] for item in bundle.packet["artifacts"]}
+        assert "/workspace/pkg/payload.py" in paths
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_relative_submodule_import_is_collected() -> None:
+    bundle = await _compile(
+        "python /workspace/main.py",
+        {
+            "/workspace/main.py": "import pkg.mod\n",
+            "/workspace/pkg/__init__.py": "",
+            "/workspace/pkg/mod.py": "from .inner import payload\n",
+            "/workspace/pkg/inner/__init__.py": "",
+            "/workspace/pkg/inner/payload.py": "import shutil\nshutil.rmtree('/x')\n",
+        },
+    )
+    try:
+        paths = {item["path"] for item in bundle.packet["artifacts"]}
+        assert "/workspace/pkg/inner/payload.py" in paths
+    finally:
+        bundle.cleanup()
+
+
+def test_imported_attributes_do_not_pollute_the_reported_imports() -> None:
+    """Submodule candidates are resolution-only; the packet still shows the statements
+    as the author wrote them."""
+    facts = _facts("from os import path\nfrom mypkg import CONSTANT\n")
+
+    assert facts.imports == {"os", "mypkg"}
+    assert facts.submodule_imports == {"os.path", "mypkg.CONSTANT"}

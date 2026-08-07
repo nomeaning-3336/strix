@@ -477,3 +477,71 @@ async def test_a_read_only_command_leaves_the_epoch_alone(tmp_path: Path) -> Non
     )
 
     assert runtime._workspace_epoch == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "command",
+    [
+        "agent-browser tab new https://example.test/admin",
+        "agent-browser tab close 2",
+        "agent-browser session clear",
+    ],
+)
+async def test_observe_mode_blocks_grouped_browser_verbs(tmp_path: Path, command: str) -> None:
+    """The bare verb sits in the passive set, so these are the commands that would slip
+    through if passivity were decided on the verb alone."""
+    runtime = _runtime(tmp_path, "observe")
+    reviewer = _StubReviewer()
+    runtime._reviewer = reviewer
+    invoked = False
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        nonlocal invoked
+        invoked = True
+        return "bad"
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": command},
+        invoke_tool=invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert payload["safety"]["categories"] == ["target_mutation"]
+    assert reviewer.calls == 0
+    assert invoked is False
+
+
+@pytest.mark.asyncio
+async def test_guarded_grouped_browser_verb_reaches_the_reviewer(tmp_path: Path) -> None:
+    """In guarded mode it loses only the fast path; the reviewer still gets to decide."""
+    runtime = _runtime(tmp_path, "guarded")
+    reviewer = _StubReviewer()
+    runtime._reviewer = reviewer
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "agent-browser tab new https://example.test/admin"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert result == "patched"
+    assert reviewer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_bare_tab_listing_keeps_the_fast_path(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "observe")
+    reviewer = _StubReviewer()
+    runtime._reviewer = reviewer
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "agent-browser tab"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert result == "patched"
+    assert reviewer.calls == 0

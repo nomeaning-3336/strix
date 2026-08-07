@@ -28,14 +28,41 @@ _URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 _SHELL_OPERATOR_CHARS = frozenset(";&|\n\r<>")
 _SHELL_SEPARATOR_CHARS = frozenset(";&|\n\r")
 _SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".rb", ".pl")
-_INTERPRETERS = {
-    "python",
-    "python3",
-    "bash",
-    "sh",
-    "node",
-    "ruby",
-    "perl",
+_INTERPRETERS = frozenset(
+    {
+        "awk",
+        "bash",
+        "bun",
+        "dash",
+        "deno",
+        "fish",
+        "gawk",
+        "ksh",
+        "lua",
+        "node",
+        "osascript",
+        "perl",
+        "php",
+        "pwsh",
+        "python",
+        "python3",
+        "ruby",
+        "Rscript",
+        "sh",
+        "tclsh",
+        "zsh",
+    }
+)
+# Versioned names (`python3.12`, `node20`) are the same interpreters. Matching them here
+# rather than enumerating versions keeps a new point release from silently becoming an
+# unrecognized executable whose script is never inspected.
+_VERSIONED_INTERPRETER_RE = re.compile(
+    r"^(?:python|node|ruby|perl|php|lua|bash|sh|deno|bun|pypy)[\d.]*$"
+)
+# Interpreters that take a subcommand before the script path.
+_INTERPRETER_SUBCOMMANDS: dict[str, frozenset[str]] = {
+    "deno": frozenset({"run"}),
+    "bun": frozenset({"run"}),
 }
 # Commands that run another command supplied in their own arguments. Resolving the
 # effective program through them is not attempted; they fail closed instead.
@@ -107,6 +134,10 @@ _BROWSER_MARKERS = (
     "remote-debugging-port",
 )
 _BROWSER_READ_ACTIONS = frozenset({"snapshot", "get", "is", "tab", "session", "cookies", "storage"})
+# Reading stored credentials is not something to wave through on the verb alone.
+_BROWSER_PASSIVE_ACTIONS = _BROWSER_READ_ACTIONS - {"cookies", "storage"}
+# Verbs whose subcommands are not all reads, so the verb alone does not settle passivity.
+_BROWSER_GROUPED_VERBS = frozenset({"tab", "session"})
 _BROWSER_BLOCKED_ACTIONS = frozenset(
     {"eval", "upload", "drag", "auth", "state", "pushstate", "dialog", "network"}
 )
@@ -526,6 +557,7 @@ class CommandPlan:
     compound: bool = False
     browser: bool = False
     browser_action: str | None = None
+    browser_subcommand: str | None = None
     script_path: str | None = None
     inline_source: str | None = None
     inline_python: bool = False
@@ -553,6 +585,27 @@ class EvidenceBundle:
         if self._tmp is not None:
             self._tmp.cleanup()
             self._tmp = None
+
+
+def _is_interpreter(executable: str) -> bool:
+    return executable in _INTERPRETERS or bool(_VERSIONED_INTERPRETER_RE.match(executable))
+
+
+def _unresolved_execution(executable: str, args: list[str]) -> str | None:
+    """Report a command that runs code no artifact in the packet would describe.
+
+    Without this, an executable outside the interpreter set produces a packet that is
+    empty but still stamped complete — the exact shape the reviewer is told it may allow.
+    """
+    if _is_interpreter(executable):
+        return f"{executable} was given no script or inline source that can be inspected"
+    scripts = [arg for arg in args if arg.endswith(_SCRIPT_SUFFIXES)]
+    if scripts:
+        return (
+            f"{executable} is not a recognized interpreter, so the script it is given "
+            f"({scripts[0]}) cannot be resolved for inspection"
+        )
+    return None
 
 
 def _is_env_assignment(token: str) -> bool:
@@ -598,6 +651,10 @@ def _skip_env_prefix(plan: CommandPlan, tokens: list[str]) -> int:
 
 
 def _parse_interpreter(plan: CommandPlan, executable: str, args: list[str]) -> None:
+    # `deno run x.ts` names the script one token later than every other interpreter, so
+    # without this the subcommand itself is read as the entrypoint.
+    if args[:1] and args[0] in _INTERPRETER_SUBCOMMANDS.get(executable, frozenset()):
+        args = args[1:]
     for position, arg in enumerate(args):
         if not arg.startswith("-") or arg == "-":
             plan.script_path = arg
@@ -685,13 +742,17 @@ def parse_command(command: str) -> CommandPlan:
         return plan
     if executable == "agent-browser":
         plan.browser = True
-        plan.browser_action, plan.parse_error = _browser_action(args)
-        plan.read_only = plan.parse_error is None and plan.browser_action in _BROWSER_READ_ACTIONS
+        plan.browser_action, plan.browser_subcommand, plan.parse_error = _browser_action(args)
+        plan.read_only = plan.parse_error is None and _browser_is_passive(
+            plan.browser_action, plan.browser_subcommand
+        )
         return plan
-    if executable in _INTERPRETERS:
+    if _is_interpreter(executable):
         _parse_interpreter(plan, executable, args)
     elif executable.endswith(_SCRIPT_SUFFIXES):
         plan.script_path = tokens[index]
+    if plan.script_path is None and plan.inline_source is None and plan.parse_error is None:
+        plan.parse_error = _unresolved_execution(executable, args)
 
     plan.mutating_request = _mutating_request(executable, args)
     plan.read_only = (
@@ -702,8 +763,8 @@ def parse_command(command: str) -> CommandPlan:
     return plan
 
 
-def _browser_action(args: list[str]) -> tuple[str | None, str | None]:
-    """Return the action word, or the reason the argument vector is unreadable.
+def _browser_action(args: list[str]) -> tuple[str | None, str | None, str | None]:
+    """Return ``(action, subcommand, error)`` for an agent-browser argument vector.
 
     An unknown option may or may not consume the token after it, so guessing would
     let an option value stand in for the action and defeat the blocked-action list.
@@ -712,19 +773,40 @@ def _browser_action(args: list[str]) -> tuple[str | None, str | None]:
     while index < len(args):
         option = args[index]
         if option == "--":
-            return (args[index + 1] if index + 1 < len(args) else None), None
+            index += 1
+            break
         if not option.startswith("-") or option == "-":
-            return option, None
+            break
         name, separator, _ = option.partition("=")
         if name not in _BROWSER_VALUE_OPTIONS and name not in _BROWSER_FLAG_OPTIONS:
-            return None, f"unrecognized agent-browser option {name} before the action"
+            return None, None, f"unrecognized agent-browser option {name} before the action"
         index += 1 if separator or name in _BROWSER_FLAG_OPTIONS else 2
-    return None, None
+    if index >= len(args):
+        return None, None, None
+    subcommand = args[index + 1] if index + 1 < len(args) else None
+    if subcommand is not None and subcommand.startswith("-"):
+        subcommand = None
+    return args[index], subcommand, None
+
+
+def _browser_is_passive(action: str | None, subcommand: str | None) -> bool:
+    """Whether an action only observes the page.
+
+    A grouped verb is passive only in its bare listing form: `tab` lists tabs, but
+    `tab new <url>` navigates and `tab close 2` destroys page state, and both would
+    otherwise be waved through on the strength of the verb alone.
+    """
+    if action not in _BROWSER_PASSIVE_ACTIONS:
+        return False
+    return not (action in _BROWSER_GROUPED_VERBS and subcommand is not None)
 
 
 class _PythonFacts(ast.NodeVisitor):
     def __init__(self) -> None:
         self.imports: set[str] = set()
+        # Resolution-only candidates; kept apart from `imports` so the packet still shows
+        # the reviewer the import statements as written.
+        self.submodule_imports: set[str] = set()
         self.relative_imports: set[tuple[int, str]] = set()
         self.calls: list[dict[str, Any]] = []
         self.urls: set[str] = set()
@@ -751,12 +833,18 @@ class _PythonFacts(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
+        # An imported name may be a submodule rather than an attribute, so `from pkg import
+        # payload` has to resolve `pkg/payload.py` as well as the package initializer.
         module = node.module or ""
+        names = tuple(alias.name for alias in node.names if alias.name != "*")
         if node.level:
-            names = (module,) if module else tuple(alias.name for alias in node.names)
-            self.relative_imports.update((node.level, name) for name in names if name)
+            targets = (module,) if module else names
+            self.relative_imports.update((node.level, name) for name in targets if name)
+            if module:
+                self.relative_imports.update((node.level, f"{module}.{name}") for name in names)
         elif module:
             self.imports.add(module)
+            self.submodule_imports.update(f"{module}.{name}" for name in names)
         self._note_browser(module)
         self.generic_visit(node)
 
@@ -826,7 +914,7 @@ def _script_posix_path(script_path: str, workdir: str | None) -> PurePosixPath:
 
 
 def _import_targets(facts: _PythonFacts) -> list[tuple[int, str]]:
-    absolute = [(0, module) for module in sorted(facts.imports)]
+    absolute = [(0, module) for module in sorted(facts.imports | facts.submodule_imports)]
     return absolute + sorted(facts.relative_imports)
 
 
@@ -1050,15 +1138,24 @@ def _browser_rules(
     block: str | None = None
     allow: str | None = None
     action = plan.browser_action
+    passive = _browser_is_passive(action, plan.browser_subcommand)
     packet["pending_action"]["browser_action"] = action
+    packet["pending_action"]["browser_subcommand"] = plan.browser_subcommand
     if any(word.partition("=")[0] in _BROWSER_OVERRIDE_OPTIONS for word in plan.tokens):
         block = "Browser session/profile/CDP overrides are blocked in safety modes."
-    if action in _BROWSER_READ_ACTIONS and action not in {"cookies", "storage"}:
+    if passive:
         allow = f"Known browser observation command: {action}."
     if action in _BROWSER_BLOCKED_ACTIONS:
         block = f"Composite or privileged browser action {action!r} is blocked."
     snapshot = _latest_browser_snapshot(list(getattr(ctx, "turn_input", []) or []))
-    packet["browser"] = {"action": action, "latest_snapshot": snapshot}
+    # `passive` is the single source of truth for observe mode too, so the two modes
+    # cannot drift into disagreeing about what counts as an observation.
+    packet["browser"] = {
+        "action": action,
+        "subcommand": plan.browser_subcommand,
+        "passive": passive,
+        "latest_snapshot": snapshot,
+    }
     if action in _BROWSER_CONTEXT_ACTIONS:
         if snapshot is None:
             incomplete.append("browser interaction has no matching prior snapshot evidence")

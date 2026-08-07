@@ -77,3 +77,40 @@ def test_isolated_copy_drops_out_of_tree_symlink(tmp_path: Path) -> None:
     )
 
     assert not (Path(staged["source_path"]) / "escape").exists()
+
+
+def test_repeated_materialization_preserves_the_true_origin(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("code\n", encoding="utf-8")
+    run_dir = tmp_path / "runs" / "scan"
+    sources = [{"source_path": str(source), "workspace_subdir": "source", "protect_metadata": True}]
+
+    # Staging runs in prepare_run and again in run_strix_scan on the same entries.
+    staged = materialize_isolated_sources(sources, run_dir=run_dir)
+    [restaged] = materialize_isolated_sources(staged, run_dir=run_dir)
+
+    assert restaged["original_source_path"] == str(source.resolve())
+    assert restaged["source_path"] == staged[0]["source_path"]
+    assert restaged["source_path"] != restaged["original_source_path"]
+
+
+def test_restaging_without_a_completion_marker_recopies_the_source(tmp_path: Path) -> None:
+    """A second pass that treats the copy as its own origin clears the destination and
+    then reads it back empty, silently handing the agent an empty workspace."""
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "app.py").write_text("code\n", encoding="utf-8")
+    run_dir = tmp_path / "runs" / "scan"
+
+    [staged] = materialize_isolated_sources(
+        [{"source_path": str(source), "workspace_subdir": "source", "protect_metadata": True}],
+        run_dir=run_dir,
+    )
+    destination = Path(staged["source_path"])
+    (destination.parent / f".{destination.name}.complete").unlink()
+
+    [restaged] = materialize_isolated_sources([staged], run_dir=run_dir)
+
+    assert (Path(restaged["source_path"]) / "app.py").read_text(encoding="utf-8") == "code\n"
+    assert restaged["original_source_path"] == str(source.resolve())

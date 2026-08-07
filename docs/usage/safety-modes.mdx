@@ -47,6 +47,11 @@ read-only commands is allowed outright, but only when its options are also
 read-only: `rg --pre` and anything else that hands the command another program
 to run goes to review instead.
 
+Browser observation commands are allowed outright only in the form that just
+reads: `tab` lists tabs, but `tab new <url>` navigates and `tab close` discards
+page state, so a grouped verb with a subcommand goes to review and is blocked
+in `observe`.
+
 Commands that wrap another program (`sudo`, `timeout`, `xargs`, `nohup`, and
 similar) and interactive `write_stdin` payloads cannot be resolved to a single
 effective action before dispatch, so they are blocked. Issue the command as its
@@ -57,11 +62,16 @@ own `exec_command` call.
 When a command executes a script, Strix reads the current entrypoint and local
 Python imports without importing or running them. Inline `python -c` source is
 analyzed the same way. Absolute imports resolve against the entrypoint's
-directory and relative imports against the importing module's package, so the
-whole local closure is inspected. Decisions bind to content hashes. Dynamic
-code execution, import-path mutation, unresolved generated commands, oversized
+directory and relative imports against the importing module's package, and an
+imported name is followed as a submodule as well as an attribute, so the whole
+local closure is inspected. Decisions bind to content hashes. Dynamic code
+execution, import-path mutation, unresolved generated commands, oversized
 dependency closures, entrypoints outside `/workspace`, and unsupported evidence
 block the action.
+
+A command that runs code Strix cannot resolve to an inspectable script — an
+unrecognized interpreter, or an interpreter given no script — is blocked rather
+than reviewed against an empty evidence packet.
 
 Browser automation inside scripts is blocked in safety modes. Issue browser
 operations as individual raw `agent-browser` commands so each action can be

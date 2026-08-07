@@ -75,7 +75,16 @@ def materialize_isolated_sources(
         if not item.get("protect_metadata"):
             result.append(item)
             continue
-        source_path = Path(str(item.get("source_path") or "")).expanduser().resolve()
+        # Staging runs once in `prepare_run` and again in `run_strix_scan`, and `--resume`
+        # rehydrates already-staged entries, so the origin is read back from
+        # `original_source_path` once set. Taking it from `source_path` every time would
+        # make the copy its own origin on the second pass: a re-copy would then read the
+        # destination it had just cleared and leave an empty workspace behind.
+        origin = (
+            Path(str(item.get("original_source_path") or item.get("source_path") or ""))
+            .expanduser()
+            .resolve()
+        )
         subdir = str(item.get("workspace_subdir") or "workspace")
         destination = (workspace_root / subdir).resolve()
         complete_marker = workspace_root / f".{subdir}.complete"
@@ -84,19 +93,19 @@ def materialize_isolated_sources(
         if not destination.exists():
             try:
                 _copy_tree(
-                    source_path,
+                    origin,
                     destination,
-                    root=source_path,
+                    root=origin,
                     excluded=(run_dir.resolve(), destination),
-                    seen=frozenset({source_path}),
+                    seen=frozenset({origin}),
                 )
             except Exception:
                 shutil.rmtree(destination, ignore_errors=True)
                 complete_marker.unlink(missing_ok=True)
                 raise
-            complete_marker.write_text(str(source_path), encoding="utf-8")
-            logger.info("materialized isolated workspace %s -> %s", source_path, destination)
-        item["original_source_path"] = str(source_path)
+            complete_marker.write_text(str(origin), encoding="utf-8")
+            logger.info("materialized isolated workspace %s -> %s", origin, destination)
+        item["original_source_path"] = str(origin)
         item["source_path"] = str(destination)
         item["workspace_mode"] = "isolated_copy"
         # `protect_metadata` is deliberately preserved: the copy's `.git`, `.agents`, and

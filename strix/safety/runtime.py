@@ -31,7 +31,6 @@ if TYPE_CHECKING:
 
 InvokeTool = Callable[[Any, str], Awaitable[Any]]
 
-_PASSIVE_BROWSER_ACTIONS = frozenset({"snapshot", "get", "is", "tab", "session"})
 # ETX only: it discards the terminal's line buffer instead of submitting it, so it
 # cannot smuggle a command through a session that was approved for something else.
 _INTERRUPT_CHARS = frozenset({"\x03"})
@@ -310,9 +309,12 @@ class SafetyRuntime:
     @staticmethod
     def _observe_mode_block(bundle: EvidenceBundle, case_id: str) -> SafetyDecision | None:
         """Enforce the passive-only contract without relying on the model reviewer."""
-        if bundle.packet.get("browser") is not None:
-            action = bundle.packet.get("pending_action", {}).get("browser_action")
-            if action not in _PASSIVE_BROWSER_ACTIONS:
+        browser = bundle.packet.get("browser")
+        if browser is not None:
+            if not browser.get("passive"):
+                action = " ".join(
+                    part for part in (browser.get("action"), browser.get("subcommand")) if part
+                )
                 return SafetyDecision(
                     allowed=False,
                     source="deterministic",
