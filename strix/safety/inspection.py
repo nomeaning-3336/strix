@@ -71,7 +71,7 @@ class DockerInspectionRunner:
                         str(evidence): {"bind": "/evidence", "mode": "ro"},
                         str(script_dir): {"bind": "/inspection", "mode": "ro"},
                     },
-                    tmpfs={"/tmp": "rw,noexec,nosuid,nodev,size=16m"},  # noqa: S108
+                    tmpfs={"/tmp": "rw,noexec,nosuid,nodev,size=16m"},  # noqa: S108  # nosec B108 - in-container tmpfs, not a host path
                 )
                 container.start()
                 try:

@@ -234,6 +234,8 @@ ignore = [
 "scripts/tui_sidecar_hook.py" = ["INP001"]
 # Stdlib HTTP handler overrides (do_GET/do_POST).
 "strix/interface/auth_cli.py" = ["N802"]
+# ast.NodeVisitor dispatches on the visit_<NodeType> name, so it cannot be lowercased.
+"strix/safety/evidence.py" = ["N802"]
 "tests/test_codex_streaming.py" = ["N802"]
 "tests/test_disable_streaming.py" = ["N802"]
 "tests/test_tool_call_ids.py" = ["N802"]

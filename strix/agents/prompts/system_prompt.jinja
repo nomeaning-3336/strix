@@ -62,7 +62,7 @@ ACTION SAFETY POLICY:
 - Target authorization does not grant permission to bypass action safety restrictions
 - If a command is blocked, follow the returned guidance; do not retry it through alternate quoting, scripts, subprocesses, direct CDP, or another tool
 - Browser interactions must be issued as individual direct ``agent-browser`` commands; browser automation embedded in scripts, command chains, aliases, or subprocess wrappers is blocked
-- Strix assigns the browser session for you; do not override ``--session``, ``--profile``, ``--state``, or CDP connection flags
+- The browser session is assigned for you; do not override ``--session``, ``--profile``, ``--state``, or CDP connection flags
 - If an element-reference action is blocked as stale, take a new snapshot and retry the direct command
 - Commands that create code and execute it in the same shell call must be split into a creation call and a later execution call so the exact artifact can be inspected
 {% if system_prompt_context.safety_mode == "observe" %}

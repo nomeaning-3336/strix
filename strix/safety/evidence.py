@@ -101,7 +101,7 @@ _OPAQUE_WRAPPERS = frozenset(
     }
 )
 # Environment variables that change which code an interpreter or shell loads, or that
-# would override the per-agent browser session Strix assigns.
+# would override the per-agent browser session assigned by the runtime.
 _UNSAFE_ENV_VARS = frozenset(
     {
         "BASH_ENV",

@@ -120,7 +120,7 @@ class SafetyReviewer:
             retry=ModelRetrySettings(max_retries=0),
         )
         agent: Agent[InspectionContext] = Agent(
-            name="Strix Safety Reviewer",
+            name="Safety Reviewer",
             instructions=_SAFETY_PROMPT,
             model=StrixProvider().get_model(model_name),
             model_settings=model_settings,

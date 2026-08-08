@@ -65,9 +65,12 @@ StreamEventSink = Callable[[str, Any], None]
 
 def _safety_mode(scan_config: dict[str, Any]) -> SafetyMode:
     raw = str(scan_config.get("safety_mode") or "off")
-    if raw not in SAFETY_MODES:
-        raise ValueError(f"Unsupported safety mode: {raw!r}")
-    return raw
+    # Returning the matched element narrows to SafetyMode on every mypy version; a
+    # membership test against the tuple does not.
+    for mode in SAFETY_MODES:
+        if raw == mode:
+            return mode
+    raise ValueError(f"Unsupported safety mode: {raw!r}")
 
 
 def _merge_root_prompt_context(
