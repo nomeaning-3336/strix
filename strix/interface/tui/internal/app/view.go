@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -159,9 +160,35 @@ func wrapBlock(value string, width int) string {
 			out = append(out, line)
 			continue
 		}
-		out = append(out, strings.Split(ansi.Wrap(line, width, " -"), "\n")...)
+		out = append(out, carryStyle(strings.Split(ansi.Wrap(line, width, " -"), "\n"))...)
 	}
 	return strings.Join(out, "\n")
+}
+
+var sgrPattern = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+// carryStyle re-opens the active foreground/attribute style on each continuation
+// line of a wrapped logical line. ansi.Wrap emits the opening SGR only on the first
+// line and the reset only on the last, so a wrapped colored line (a blocked-safety
+// reason, a long error) would otherwise show color on its first row alone.
+func carryStyle(lines []string) []string {
+	active := ""
+	for i, line := range lines {
+		if active != "" {
+			lines[i] = active + line
+		}
+		for _, seq := range sgrPattern.FindAllString(line, -1) {
+			if seq == "\x1b[0m" || seq == "\x1b[m" {
+				active = ""
+			} else {
+				active = seq
+			}
+		}
+		if active != "" && i < len(lines)-1 {
+			lines[i] += "\x1b[0m"
+		}
+	}
+	return lines
 }
 
 // scrollbarThumb brightens the bar being dragged so the grab reads as taking
