@@ -898,3 +898,21 @@ async def test_oversize_input_file_is_attached_truncated() -> None:
         assert inp["bytes"] <= settings.max_artifact_bytes
     finally:
         bundle.cleanup()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl -sS https://example.test/js/app.js -o /dev/null",
+        "wget https://example.test/main.bundle.js -O out.js",
+        "rg -n 'pattern' /workspace/app.py",
+        "sed -n '1,20p' /workspace/probe.py",
+        "cat /workspace/onboarding.py",
+        "cp /workspace/a.sh /workspace/b.sh",
+        "awk '{print $1}' /workspace/hosts.py",
+    ],
+)
+def test_data_tools_reading_script_named_files_are_not_execution(command: str) -> None:
+    """A read/transfer/text tool takes a script-named file as data, not as a program to
+    run, so it must not trip the unresolved-execution guard."""
+    assert parse_command(command).parse_error is None

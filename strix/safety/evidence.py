@@ -34,15 +34,15 @@ _REDIRECT_INPUT_RE = re.compile(
     r"""(?<![<])\d?<(?![<(])\s*(?P<file>"[^"]+"|'[^']+'|[^\s;|&<>()]+)""",
 )
 _SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".rb", ".pl")
+# `awk` is intentionally absent: its program is an inline positional argument, not a
+# `-c`/script-file the entrypoint reader can resolve, so it belongs with the data tools.
 _INTERPRETERS = frozenset(
     {
-        "awk",
         "bash",
         "bun",
         "dash",
         "deno",
         "fish",
-        "gawk",
         "ksh",
         "lua",
         "node",
@@ -57,6 +57,54 @@ _INTERPRETERS = frozenset(
         "sh",
         "tclsh",
         "zsh",
+    }
+)
+# Commands that take a file argument as data to read or transform, never as a program to
+# execute. They must not trip the unresolved-execution guard when handed a script-named
+# file (a `.js` asset fetched by curl, a `.py` grepped by rg, a file edited by sed).
+_DATA_COMMANDS = frozenset(
+    {
+        "awk",
+        "base64",
+        "bunzip2",
+        "bzip2",
+        "cmp",
+        "column",
+        "comm",
+        "cp",
+        "csplit",
+        "cut",
+        "dd",
+        "diff",
+        "fmt",
+        "fold",
+        "gawk",
+        "gunzip",
+        "gzip",
+        "jq",
+        "join",
+        "ln",
+        "md5sum",
+        "mv",
+        "nl",
+        "od",
+        "paste",
+        "sed",
+        "sha1sum",
+        "sha256sum",
+        "sort",
+        "split",
+        "strings",
+        "tac",
+        "tar",
+        "tee",
+        "tr",
+        "uniq",
+        "unxz",
+        "xxd",
+        "xz",
+        "yq",
+        "zcat",
     }
 )
 # Versioned names (`python3.12`, `node20`) are the same interpreters. Matching them here
@@ -613,9 +661,19 @@ def _unresolved_execution(executable: str, args: list[str]) -> str | None:
 
     Without this, an executable outside the interpreter set produces a packet that is
     empty but still stamped complete — the exact shape the reviewer is told it may allow.
+    A file argument only counts as unresolved execution for an *unknown* executable:
+    read, transfer, and text tools take a `.py`/`.js`/`.sh` file as data, not as a program
+    to run, so `curl …/app.js`, `rg pat file.py`, or `sed … file.sh` are not execution.
     """
     if _is_interpreter(executable):
         return f"{executable} was given no script or inline source that can be inspected"
+    if (
+        executable in _KNOWN_READ_COMMANDS
+        or executable in _HTTP_CLIENTS
+        or executable in _DATA_COMMANDS
+        or executable in _DESTRUCTIVE_COMMANDS
+    ):
+        return None
     scripts = [arg for arg in args if arg.endswith(_SCRIPT_SUFFIXES)]
     if scripts:
         return (
