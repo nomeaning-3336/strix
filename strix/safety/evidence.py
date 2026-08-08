@@ -1267,18 +1267,51 @@ def _latest_browser_snapshot(turn_input: list[Any]) -> dict[str, Any] | None:
     return latest
 
 
+_SPLIT_REASON = (
+    "Commands that create code and execute it, or pipe input into an interpreter, must be "
+    "split into separate calls so the exact code that runs can be inspected."
+)
+
+
+def _writes_script_file(plan: CommandPlan) -> bool:
+    """Whether the command writes a script-suffixed file it could then run.
+
+    A `> x.py` redirect or a `-o x.py` download is code creation; pairing it with an
+    interpreter in the same expression is the create-then-run shape whose run target may
+    differ from anything inspected. Writing non-code output (`> out.json`) is not.
+    """
+    if re.search(r">>?\s*\"?[^\s;|&<>()\"]+\.(?:py|sh|bash|js|mjs|rb|pl)\b", plan.command):
+        return True
+    for index, token in enumerate(plan.tokens):
+        name, separator, inline = token.partition("=")
+        if name in {"-o", "-O", "--output", "--output-document"}:
+            value = (
+                inline
+                if separator
+                else (plan.tokens[index + 1] if index + 1 < len(plan.tokens) else "")
+            )
+            if value.endswith(_SCRIPT_SUFFIXES):
+                return True
+    return False
+
+
 def _compound_command_rules(plan: CommandPlan) -> str | None:
-    executables = [parse_command(segment).executable for segment in _shell_segments(plan.command)]
-    destructive = sorted({name for name in executables if name in _DESTRUCTIVE_COMMANDS})
+    segments = [parse_command(segment) for segment in _shell_segments(plan.command)]
+    destructive = sorted(
+        {seg.executable for seg in segments if seg.executable in _DESTRUCTIVE_COMMANDS}
+    )
     if destructive:
         return f"{', '.join(destructive)} is destructive and is blocked by safety mode."
-    if any(name in _INTERPRETERS or name.endswith(_SCRIPT_SUFFIXES) for name in executables) or any(
-        word.endswith(_SCRIPT_SUFFIXES) for word in plan.tokens[1:]
-    ):
-        return (
-            "Commands that combine code creation, pipelines, or other shell actions with "
-            "execution must be split into separate calls for stable inspection."
-        )
+    writes_code = _writes_script_file(plan)
+    for seg in segments:
+        if not (seg.executable in _INTERPRETERS or _is_interpreter(seg.executable)):
+            continue
+        # An interpreter with no resolvable script reads its code from a pipe, stdin, or
+        # heredoc — never a file, so nothing in the packet describes what runs. And an
+        # interpreter paired with code creation in the same expression is create-then-run.
+        reads_stdin = seg.script_path in (None, "-") and seg.inline_source is None
+        if reads_stdin or writes_code:
+            return _SPLIT_REASON
     return None
 
 
