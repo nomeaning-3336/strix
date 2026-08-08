@@ -176,7 +176,7 @@ def test_internal_turn_classifier_matches_every_injected_form() -> None:
         "[CRITICAL] Turn budget: 480/500 used (96%).",
         "== Inherited context from parent (background only) ==",
         "Your previous message ended a turn without a tool call.",
-        "Your previous response ended the autonomous Strix run without a lifecycle tool call.",
+        "Your previous response ended the autonomous run without a lifecycle tool call.",
     ):
         assert _is_internal_agent_turn(content), content
 
