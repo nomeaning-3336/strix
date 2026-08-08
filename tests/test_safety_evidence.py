@@ -838,3 +838,63 @@ async def test_shell_field_does_not_hide_a_genuine_bash_c_payload() -> None:
         assert "destructive" in bundle.deterministic_block
     finally:
         bundle.cleanup()
+
+
+def test_redirect_input_files_are_parsed_not_heredocs() -> None:
+    assert parse_command("cmd < in.txt").input_files == ["in.txt"]
+    assert parse_command('x < "my hosts.txt" > out.txt').input_files == ["my hosts.txt"]
+    # A heredoc and a process substitution are not files to read.
+    assert parse_command("cat <<EOF").input_files == []
+    assert parse_command("diff <(a) <(b)").input_files == []
+    # Output redirection is not an input.
+    assert parse_command("sort f > out.txt").input_files == []
+
+
+@pytest.mark.asyncio
+async def test_workspace_input_file_is_attached_for_scope_review() -> None:
+    """A host list read via `< file` is evidence the reviewer needs to judge scope, so
+    its contents ride in the packet instead of leaving the reviewer to block blind."""
+    bundle = await _compile(
+        'while read -r host; do dig +short "$host"; done < hosts.txt > out.txt',
+        {"/workspace/hosts.txt": "admin.fiuu.com\napi.fiuu.com\n"},
+        workdir="/workspace",
+    )
+    try:
+        inputs = [a for a in bundle.packet["artifacts"] if a.get("role") == "input"]
+        assert [a["path"] for a in inputs] == ["/workspace/hosts.txt"]
+        assert "admin.fiuu.com" in inputs[0]["source"]
+        assert inputs[0]["truncated"] is False
+        # Attaching contents is not itself a block; the reviewer judges scope.
+        assert bundle.deterministic_block is None
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_input_file_outside_the_workspace_is_not_read() -> None:
+    bundle = await _compile("cat < /etc/passwd", workdir="/workspace")
+    try:
+        assert [a for a in bundle.packet["artifacts"] if a.get("role") == "input"] == []
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_oversize_input_file_is_attached_truncated() -> None:
+    settings = SafetySettings()
+    big = "host.fiuu.com\n" * (settings.max_artifact_bytes // 10)
+    bundle = await compile_evidence(
+        case_id="case-big-input",
+        ctx=_ctx({"/workspace/hosts.txt": big}),
+        arguments={"cmd": "sort < hosts.txt > out.txt", "workdir": "/workspace"},
+        mode="guarded",
+        scope={},
+        user_instruction="",
+        settings=settings,
+    )
+    try:
+        [inp] = [a for a in bundle.packet["artifacts"] if a.get("role") == "input"]
+        assert inp["truncated"] is True
+        assert inp["bytes"] <= settings.max_artifact_bytes
+    finally:
+        bundle.cleanup()

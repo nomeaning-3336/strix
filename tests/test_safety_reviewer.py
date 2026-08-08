@@ -400,3 +400,9 @@ def test_prompt_judges_security_testing_by_effect_not_technique() -> None:
     assert 'Never allow when completeness.status is not "complete"' in prompt
     assert "Deterministic policy blocks cannot be overridden" in prompt
     assert "analysis.mutating_request is\nnever passive" in prompt
+
+
+def test_prompt_scopes_subdomains_and_input_files() -> None:
+    prompt = reviewer_module._SAFETY_PROMPT
+    assert "authorized domain covers its subdomains" in prompt
+    assert 'role "input"' in prompt or 'role "input"' in prompt

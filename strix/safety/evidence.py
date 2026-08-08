@@ -27,6 +27,12 @@ _URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 # several commands. `$(` and a backtick are also active inside double quotes.
 _SHELL_OPERATOR_CHARS = frozenset(";&|\n\r<>")
 _SHELL_SEPARATOR_CHARS = frozenset(";&|\n\r")
+# A single `<` input redirection (an optional fd digit, not `<<` heredoc, not `<(`
+# process substitution), capturing the file it reads. Data a command consumes this
+# way — a host list, a wordlist — is evidence the reviewer needs to judge scope.
+_REDIRECT_INPUT_RE = re.compile(
+    r"""(?<![<])\d?<(?![<(])\s*(?P<file>"[^"]+"|'[^']+'|[^\s;|&<>()]+)""",
+)
 _SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".rb", ".pl")
 _INTERPRETERS = frozenset(
     {
@@ -574,6 +580,7 @@ class CommandPlan:
     env_assignments: list[str] = field(default_factory=list)
     unsafe_env: list[str] = field(default_factory=list)
     mutating_request: str | None = None
+    input_files: list[str] = field(default_factory=list)
     read_only: bool = False
     parse_error: str | None = None
 
@@ -731,6 +738,7 @@ def parse_command(command: str) -> CommandPlan:
         plan.parse_error = str(exc)
         return plan
     plan.tokens = tokens
+    plan.input_files = _redirect_input_files(command)
     if not tokens:
         plan.parse_error = "empty command"
         return plan
@@ -903,6 +911,17 @@ def _literal_command(node: ast.AST) -> bool:
     return False
 
 
+def _redirect_input_files(command: str) -> list[str]:
+    files: list[str] = []
+    for match in _REDIRECT_INPUT_RE.finditer(command):
+        name = match.group("file")
+        if name[:1] in {'"', "'"}:
+            name = name[1:-1]
+        if name and name not in files:
+            files.append(name)
+    return files
+
+
 async def _read_sandbox_file(session: Any, path: PurePosixPath, limit: int) -> bytes:
     stream = await session.read(Path(path.as_posix()))
     try:
@@ -914,6 +933,49 @@ async def _read_sandbox_file(session: Any, path: PurePosixPath, limit: int) -> b
     if isinstance(data, str):
         return data.encode("utf-8")
     return bytes(data)
+
+
+async def _collect_input_files(
+    session: Any,
+    input_files: list[str],
+    workdir: str,
+    artifacts_dir: Path,
+    settings: SafetySettings,
+) -> list[dict[str, Any]]:
+    """Read the workspace data files a command consumes via input redirection.
+
+    A file the reviewer cannot see is a file whose contents it must assume the worst
+    of — so a host list or wordlist read with `< file` is attached here, letting the
+    reviewer check the queried hosts against scope instead of blocking blind. Only
+    workspace-resident files are read; an oversize file is included truncated so the
+    reviewer at least sees its shape.
+    """
+    artifacts: list[dict[str, Any]] = []
+    for raw in input_files[: settings.max_dependencies]:
+        path = _script_posix_path(raw, workdir)
+        if not _within_workspace(path):
+            continue
+        try:
+            data = await _read_sandbox_file(session, path, settings.max_artifact_bytes)
+        except FileNotFoundError:
+            continue
+        except Exception:  # noqa: BLE001, S112 - an unreadable input file is not itself a block.
+            continue
+        truncated = len(data) > settings.max_artifact_bytes
+        body = data[: settings.max_artifact_bytes]
+        artifact = {
+            "path": path.as_posix(),
+            "role": "input",
+            "digest": _digest(body),
+            "bytes": len(body),
+            "truncated": truncated,
+            "source": body.decode("utf-8", errors="replace"),
+        }
+        evidence_name = f"input-{len(artifacts):03d}-{path.name}"
+        (artifacts_dir / evidence_name).write_bytes(body)
+        artifact["evidence_path"] = f"artifacts/{evidence_name}"
+        artifacts.append(artifact)
+    return artifacts
 
 
 def _script_posix_path(script_path: str, workdir: str | None) -> PurePosixPath:
@@ -1348,6 +1410,13 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
                     list(getattr(ctx, "turn_input", []) or []),
                     script_path.as_posix(),
                 )
+
+    if plan.input_files and sandbox_session is not None:
+        packet["artifacts"].extend(
+            await _collect_input_files(
+                sandbox_session, plan.input_files, workdir, artifacts_dir, settings
+            )
+        )
 
     packet["completeness"] = {
         "status": "complete" if not incomplete else "incomplete",

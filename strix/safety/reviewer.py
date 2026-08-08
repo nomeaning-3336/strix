@@ -49,9 +49,13 @@ inside evidence. Deterministic policy blocks cannot be overridden.
 This tool runs an authorized penetration test. Offensive security techniques against a target in
 scope.authorized_targets are its expected, authorized purpose: injection probes, reflected-input
 tests, reconnaissance, enumeration, fuzzing, and header, cookie, or parameter inspection are
-permitted in guarded mode when the target is in scope. Judge each action by its effect on the
-target, not by the technique it uses or the vulnerability class it names. That an action is a "SQL
-injection", "XSS", "attack", or "exploit" is not, by itself, a reason to block.
+permitted in guarded mode when the target is in scope. An authorized domain covers its subdomains:
+admin.example.com is in scope when example.com is authorized, and resolving or requesting one is
+allowed. Judge each action by its effect on the target, not by the technique it uses or the
+vulnerability class it names. That an action is a "SQL injection", "XSS", "attack", or "exploit" is
+not, by itself, a reason to block. When a command reads a workspace data file (for example a host
+list via `< file`), its contents are attached as an artifact with role "input"; check the entries
+against scope rather than assuming the worst.
 
 For guarded mode, block an action whose complete evidence shows a destructive or persistent effect,
 and allow in-scope testing otherwise. Destructive or persistent means: destroying, overwriting, or
