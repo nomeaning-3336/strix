@@ -82,12 +82,13 @@ A command that runs code Strix cannot resolve to an inspectable script — an
 unrecognized interpreter, or an interpreter given no script — is blocked rather
 than reviewed against an empty evidence packet.
 
-When a command reads a workspace data file through input redirection (for
-example a host list consumed by `while read … done < hosts.txt`), that file's
-contents are attached to the packet so the reviewer can check the entries —
-queried hosts, fuzz inputs — against scope instead of blocking because it can't
-see them. Only workspace-resident files are read; an oversize file is attached
-truncated. An authorized domain covers its subdomains.
+When a command reads a workspace data file — through input redirection
+(`while read … done < hosts.txt`) or a target-list flag (`ffuf -w words.txt`,
+`httpx -l hosts.txt`) — that file's contents are attached to the packet so the
+reviewer can check the entries, queried hosts or fuzz inputs, against scope
+instead of blocking because it can't see them. Only workspace-resident files are
+read; an oversize file is attached truncated. An authorized domain covers its
+subdomains.
 
 Browser automation inside scripts is blocked in safety modes. Issue browser
 operations as individual raw `agent-browser` commands so each action can be

@@ -33,6 +33,24 @@ _SHELL_SEPARATOR_CHARS = frozenset(";&|\n\r")
 _REDIRECT_INPUT_RE = re.compile(
     r"""(?<![<])\d?<(?![<(])\s*(?P<file>"[^"]+"|'[^']+'|[^\s;|&<>()]+)""",
 )
+# Flags whose value is a file of targets a command reads — wordlists, host lists.
+# Recon tools (ffuf, httpx, nuclei, subfinder, dnsx, gobuster) route their input this
+# way rather than through a `<` redirect, so the same evidence must be collected. The
+# value is only read when it resolves to a workspace file, so a boolean `-l` (wc, grep)
+# whose next token is not a file collects nothing.
+_LIST_FILE_FLAGS = frozenset(
+    {
+        "-w",
+        "-l",
+        "-iL",
+        "-list",
+        "-wordlist",
+        "--list",
+        "--wordlist",
+        "--input-file",
+        "--input",
+    }
+)
 _SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".rb", ".pl")
 # `awk` is intentionally absent: its program is an inline positional argument, not a
 # `-c`/script-file the entrypoint reader can resolve, so it belongs with the data tools.
@@ -810,6 +828,9 @@ def parse_command(command: str) -> CommandPlan:
     executable = PurePosixPath(tokens[index]).name
     args = tokens[index + 1 :]
     plan.executable = executable
+    for candidate in _list_flag_files(args):
+        if candidate not in plan.input_files:
+            plan.input_files.append(candidate)
 
     if executable in _OPAQUE_WRAPPERS:
         plan.parse_error = (
@@ -977,6 +998,26 @@ def _redirect_input_files(command: str) -> list[str]:
             name = name[1:-1]
         if name and name not in files:
             files.append(name)
+    return files
+
+
+def _list_flag_files(args: list[str]) -> list[str]:
+    """Files named as the value of a target-list flag (`-w wordlist`, `-l hosts`)."""
+    files: list[str] = []
+    index = 0
+    while index < len(args):
+        name, separator, inline = args[index].partition("=")
+        if name in _LIST_FILE_FLAGS:
+            if separator:
+                value = inline
+            elif index + 1 < len(args):
+                value = args[index + 1]
+                index += 1
+            else:
+                value = ""
+            if value and not value.startswith("-") and value not in files:
+                files.append(value)
+        index += 1
     return files
 
 

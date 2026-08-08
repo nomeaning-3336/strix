@@ -916,3 +916,46 @@ def test_data_tools_reading_script_named_files_are_not_execution(command: str) -
     """A read/transfer/text tool takes a script-named file as data, not as a program to
     run, so it must not trip the unresolved-execution guard."""
     assert parse_command(command).parse_error is None
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("ffuf -w /workspace/words.txt -u https://x/FUZZ", ["/workspace/words.txt"]),
+        ("httpx -l hosts.txt -sc -title", ["hosts.txt"]),
+        ("nuclei --list targets.txt -severity high", ["targets.txt"]),
+        ("ffuf -w=words.txt -u https://x/FUZZ", ["words.txt"]),
+        ("subfinder -d x -o out.txt", []),  # -o is output, not a list input
+    ],
+)
+def test_list_flag_files_are_parsed(command: str, expected: list[str]) -> None:
+    assert parse_command(command).input_files == expected
+
+
+@pytest.mark.asyncio
+async def test_wordlist_flag_file_is_attached_for_scope_review() -> None:
+    """Recon tools route their target list through `-w`/`-l`, not a `<` redirect, so the
+    same evidence must be collected for the reviewer to check it against scope."""
+    bundle = await _compile(
+        "ffuf -w /workspace/paths.txt -u https://api.fiuu.com/FUZZ -mc all",
+        {"/workspace/paths.txt": "admin\napi\nlogin\n"},
+        workdir="/workspace",
+    )
+    try:
+        inputs = [a for a in bundle.packet["artifacts"] if a.get("role") == "input"]
+        assert [a["path"] for a in inputs] == ["/workspace/paths.txt"]
+        assert "admin" in inputs[0]["source"]
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_list_flag_value_that_is_not_a_workspace_file_collects_nothing() -> None:
+    """A boolean `-l` (grep, wc) whose next token is not a workspace file must not make
+    the packet incomplete or attach anything."""
+    bundle = await _compile("grep -l pattern /workspace/app.py", workdir="/workspace")
+    try:
+        assert [a for a in bundle.packet["artifacts"] if a.get("role") == "input"] == []
+        assert bundle.deterministic_block is None
+    finally:
+        bundle.cleanup()
