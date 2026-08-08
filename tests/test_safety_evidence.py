@@ -797,3 +797,44 @@ def test_imported_attributes_do_not_pollute_the_reported_imports() -> None:
 
     assert facts.imports == {"os", "mypkg"}
     assert facts.submodule_imports == {"os.path", "mypkg.CONSTANT"}
+
+
+@pytest.mark.asyncio
+async def test_harness_transport_keys_are_hidden_from_the_reviewer() -> None:
+    """The shell wrapper stamps `shell: bash` onto every command; surfacing it in the
+    packet made the reviewer read the transport default as the agent invoking a shell."""
+    bundle = await compile_evidence(
+        case_id="case-transport",
+        ctx=_ctx({}),
+        arguments={
+            "cmd": "curl -I \"https://example.test/login?u='+OR+'1'='1\"",
+            "shell": "bash",
+            "max_output_tokens": 8000,
+        },
+        mode="guarded",
+        scope={"authorized_targets": [{"value": "https://example.test"}]},
+        user_instruction="",
+        settings=SafetySettings(),
+    )
+    try:
+        original = bundle.packet["pending_action"]["original_arguments"]
+        assert "shell" not in original
+        assert "max_output_tokens" not in original
+        assert original["cmd"].startswith("curl")
+        # A GET probe with a boolean payload is not deterministically blocked; the reviewer
+        # judges it by effect.
+        assert bundle.deterministic_block is None
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_shell_field_does_not_hide_a_genuine_bash_c_payload() -> None:
+    """Stripping the transport `shell` key must not weaken parsing of an agent-authored
+    `bash -c`, which is carried in `cmd`, not the shell field."""
+    bundle = await _compile('bash -c "rm -rf /workspace/app"')
+    try:
+        assert bundle.deterministic_block is not None
+        assert "destructive" in bundle.deterministic_block
+    finally:
+        bundle.cleanup()

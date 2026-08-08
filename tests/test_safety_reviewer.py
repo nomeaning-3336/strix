@@ -377,3 +377,26 @@ async def test_inspection_failure_output_is_recognized(tmp_path: Path, output: s
     )
 
     assert state.incomplete is True
+
+
+def test_prompt_judges_security_testing_by_effect_not_technique() -> None:
+    """Pins the effect-based guardrails so a future edit cannot silently revert to
+    blocking in-scope offensive testing on the technique alone."""
+    prompt = reviewer_module._SAFETY_PROMPT
+
+    # Authorization framing and the effect-not-technique rule.
+    assert "authorized penetration test" in prompt
+    assert (
+        'That an action is a "SQL\ninjection"' in prompt
+        or "not, by itself, a reason to block" in prompt
+    )
+    # Read probes pass; writes and destruction block.
+    assert "OR 1=1" in prompt
+    for keyword in ("DROP", "DELETE", "INSERT", "TRUNCATE", "OUTFILE", "xp_cmdshell"):
+        assert keyword in prompt
+    # Fail-closed on ambiguity is preserved.
+    assert "does not settle whether the effect is destructive" in prompt
+    # Non-negotiable guardrails survive.
+    assert 'Never allow when completeness.status is not "complete"' in prompt
+    assert "Deterministic policy blocks cannot be overridden" in prompt
+    assert "analysis.mutating_request is\nnever passive" in prompt

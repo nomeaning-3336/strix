@@ -15,7 +15,7 @@ strix --target https://example.test --safety-mode guarded
 | Mode | Behavior |
 | --- | --- |
 | `off` | Current autonomous behavior. Local directories are mounted live and writable. |
-| `guarded` | Allows non-destructive interaction after contextual review. Persistent or destructive target actions are blocked. |
+| `guarded` | Allows non-destructive interaction after contextual review, including in-scope offensive testing — injection probes, recon, enumeration, fuzzing. Actions judged destructive or persistent (data or state change, account changes, file writes, stored payloads) are blocked. |
 | `observe` | Passive target interaction only. Form submission, authentication, uploads, mutating requests, and state-changing controls are blocked. |
 
 `off` is the default for backward compatibility. Configure a default with
@@ -36,6 +36,15 @@ is used, the model's next response must be the final decision.
 The review is bounded to at most two model turns and one optional inspection
 call. Timeouts, malformed decisions, a second tool call, incomplete evidence,
 or low-confidence approval fail closed.
+
+In guarded mode the reviewer judges an action by its effect on the target, not
+by the technique it uses. Offensive testing against an in-scope target is the
+authorized purpose of the tool, so a read-only injection probe (a boolean,
+`UNION SELECT`, or time-based payload), a reflected-input test, or recon passes;
+a payload that writes or destroys (`DROP`, `DELETE`, `INSERT`, `INTO OUTFILE`,
+stacked statements, command execution), a mutating request, or any persistent
+change is blocked. When complete evidence does not settle whether the effect is
+destructive, persistent, or in scope, the action is blocked.
 
 ## Deterministic Rules
 

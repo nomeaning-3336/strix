@@ -439,6 +439,16 @@ _DESTRUCTIVE_COMMANDS = frozenset(
 )
 
 
+# Keys the shell wrapper injects into every exec_command for execution plumbing. They
+# carry no safety signal beyond what parsing `cmd` already yields, and the reviewer has
+# read `shell: bash` — present on every command — as the agent invoking a shell.
+_HARNESS_TRANSPORT_KEYS = frozenset({"shell", "max_output_tokens"})
+
+
+def _reviewable_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in arguments.items() if k not in _HARNESS_TRANSPORT_KEYS}
+
+
 def _digest(data: bytes) -> str:
     return f"sha256:{hashlib.sha256(data).hexdigest()}"
 
@@ -1195,7 +1205,7 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
         },
         "pending_action": {
             "tool": "exec_command",
-            "original_arguments": _bounded(arguments),
+            "original_arguments": _bounded(_reviewable_arguments(arguments)),
             "command": command,
             "tokens": plan.tokens,
             "executable": plan.executable,
