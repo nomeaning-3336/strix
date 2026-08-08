@@ -259,3 +259,37 @@ func TestCollapseToolOnlyOutputHeavyTools(t *testing.T) {
 		t.Fatal("respond_to_user must never collapse")
 	}
 }
+
+func TestBlockedApplyPatchIsDistinguishableFromApplied(t *testing.T) {
+	blocked := map[string]any{
+		"success": false,
+		"status":  "blocked",
+		"error":   "Action blocked by safety policy",
+		"safety": map[string]any{
+			"reason": "apply_patch mutates state and is blocked in observe mode.",
+		},
+	}
+	args := map[string]any{"patch": "*** Update File: src/app.py\n-import os\n+import sys"}
+
+	out := Tool(tool("apply_patch", args, blocked, "blocked"))
+	applied := Tool(tool("apply_patch", args, map[string]any{"success": true}, "completed"))
+
+	if out == applied {
+		t.Fatal("a blocked patch renders identically to one that was applied")
+	}
+	requireContains(t, out, "Blocked", "blocked in observe mode")
+}
+
+func TestBlockedRepeatRequestShowsTheReason(t *testing.T) {
+	blocked := map[string]any{
+		"success": false,
+		"status":  "blocked",
+		"safety": map[string]any{
+			"reason": "repeat_request is blocked in guarded mode until the final effective method",
+		},
+	}
+
+	out := Tool(tool("repeat_request", map[string]any{"request_id": "7"}, blocked, "blocked"))
+
+	requireContains(t, out, "Blocked", "guarded mode")
+}

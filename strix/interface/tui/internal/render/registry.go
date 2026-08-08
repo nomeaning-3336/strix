@@ -135,3 +135,18 @@ func CollapseTool(full, name string, expanded bool) (string, bool) {
 	hint := Dim().Italic(true).Render(fmt.Sprintf("  … +%d line%s — click to expand", hidden, plural))
 	return preview + "\n" + hint, true
 }
+
+// safetyBlockLine renders the safety verdict for a tool call the safety runtime
+// refused. Every renderer that shows a result must call it: without it a blocked
+// call is indistinguishable from one that ran.
+func safetyBlockLine(result any) string {
+	reason := "Action blocked by safety policy"
+	if envelope, ok := result.(map[string]any); ok {
+		if safety, ok := envelope["safety"].(map[string]any); ok {
+			if value := StringValue(safety["reason"]); value != "" {
+				reason = value
+			}
+		}
+	}
+	return Col(AmberY).Render("■ Blocked: " + reason)
+}

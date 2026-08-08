@@ -155,15 +155,7 @@ func renderTerminal(prompt string, promptColor lipgloss.Color, command string, r
 		b.WriteString(Dim().Render("  " + meta))
 	}
 	if status == "blocked" {
-		reason := "Action blocked by safety policy"
-		if envelope, ok := result.(map[string]any); ok {
-			if safety, ok := envelope["safety"].(map[string]any); ok {
-				if value := StringValue(safety["reason"]); value != "" {
-					reason = value
-				}
-			}
-		}
-		b.WriteString("\n" + Col(AmberY).Render("■ Blocked: "+reason))
+		b.WriteString("\n" + safetyBlockLine(result))
 		return b.String()
 	}
 	if result != nil {
