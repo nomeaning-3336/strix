@@ -62,6 +62,41 @@ logger = logging.getLogger(__name__)
 
 StreamEventSink = Callable[[str, Any], None]
 
+# A scan runs many agents at once, each holding a sandbox session, a browser
+# session, a model client, and a SQLite handle. At the common 1024 soft limit
+# that closes the file-descriptor budget at a few dozen agents, surfacing as
+# "unable to open database file" once SQLite can no longer open agents.db.
+_MIN_OPEN_FILE_SOFT_LIMIT = 65536
+
+
+def raise_open_file_limit(minimum: int = _MIN_OPEN_FILE_SOFT_LIMIT) -> None:
+    """Raise the process open-file soft limit toward its hard cap.
+
+    Idempotent and best-effort: does nothing on non-POSIX platforms, when the
+    soft limit already suffices, or when the hard cap forbids the raise (which
+    needs a privileged operator to lift). Never fails a scan.
+    """
+    try:
+        import resource
+    except ImportError:
+        return  # non-POSIX (e.g. Windows) has no RLIMIT_NOFILE
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = minimum if hard == resource.RLIM_INFINITY else min(minimum, hard)
+        if soft >= target:
+            return
+        resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+        logger.info("raised open-file soft limit %d -> %d (hard=%s)", soft, target, hard)
+        if hard != resource.RLIM_INFINITY and hard < minimum:
+            logger.warning(
+                "open-file hard limit is %d, below the %d a large scan may need; "
+                "raise it (ulimit -Hn) to avoid file-descriptor exhaustion",
+                hard,
+                minimum,
+            )
+    except (ValueError, OSError):
+        logger.debug("could not raise open-file limit", exc_info=True)
+
 
 def _safety_mode(scan_config: dict[str, Any]) -> SafetyMode:
     raw = str(scan_config.get("safety_mode") or "off")
@@ -158,6 +193,7 @@ async def run_strix_scan(
     state_dir.mkdir(parents=True, exist_ok=True)
     teardown_logging = setup_scan_logging(run_dir)
     set_scan_id(scan_id)
+    raise_open_file_limit()
 
     agents_path = state_dir / "agents.json"
     agents_db = state_dir / "agents.db"
