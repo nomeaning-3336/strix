@@ -1352,8 +1352,7 @@ def _browser_rules(
     if action in _BROWSER_BLOCKED_ACTIONS:
         block = f"Composite or privileged browser action {action!r} is blocked."
     snapshot = _latest_browser_snapshot(list(getattr(ctx, "turn_input", []) or []))
-    # `passive` is the single source of truth for observe mode too, so the two modes
-    # cannot drift into disagreeing about what counts as an observation.
+    # Keep grouped verbs such as `tab new` off the passive browser-read fast path.
     packet["browser"] = {
         "action": action,
         "subcommand": plan.browser_subcommand,
@@ -1579,6 +1578,6 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
         deterministic_block=deterministic_block,
         deterministic_allow=deterministic_allow,
         mutating_request=plan.mutating_request,
-        workspace_evidence=bool(plan.script_path or plan.inline_python),
+        workspace_evidence=bool(plan.script_path or plan.inline_python or plan.input_files),
         _tmp=tmp,
     )

@@ -81,7 +81,7 @@ def build_root_task(scan_config: dict[str, Any]) -> str:
     targets = scan_config.get("targets", []) or []
     diff_scope = scan_config.get("diff_scope") or {}
     user_instructions = scan_config.get("user_instructions", "") or ""
-    isolated_workspace = scan_config.get("safety_mode", "off") != "off"
+    isolated_workspace = scan_config.get("safety_mode", "guarded") != "off"
 
     sections: dict[str, list[str]] = {
         "Repositories": [],

@@ -118,7 +118,7 @@ Examples:
         help="Target to test: URL, repository, local directory path, domain name, IP address, "
         "an API spec file (OpenAPI/Swagger .json/.yaml or a Postman collection export), or a "
         "Postman collection by id (postman://<collection-uuid>[?env=<environment-uuid>], needs "
-        "POSTMAN_API_KEY). Local directories are mounted into the sandbox writable. "
+        "POSTMAN_API_KEY). Local directories use an isolated writable copy by default. "
         "Can be specified multiple times for multi-target scans. "
         "Fresh runs require --target or --target-list.",
     )
@@ -188,15 +188,14 @@ Examples:
     )
 
     parser.add_argument(
-        "--safety-mode",
-        choices=SAFETY_MODES,
-        default=None,
+        "--dangerously-disable-safety",
+        action="store_true",
         help=(
-            "Action safety policy: 'off' preserves current behavior, 'guarded' allows "
-            "non-destructive interaction after contextual review, and 'observe' permits "
-            "only passive target interaction. Defaults to STRIX_SAFETY_MODE or off."
+            "Disable contextual action review and workspace isolation. This may allow "
+            "destructive actions and mounts local directories live and writable."
         ),
     )
+    parser.add_argument("--safety-mode", help=argparse.SUPPRESS)
 
     parser.add_argument(
         "--diff-base",
@@ -261,9 +260,16 @@ Examples:
     if args.config:
         apply_config_override(validate_config_file(args.config))
 
-    args.safety_mode_explicit = args.safety_mode is not None
-    if args.safety_mode is None:
-        args.safety_mode = load_settings().safety.mode
+    if args.safety_mode is not None:
+        parser.error(
+            "--safety-mode was removed. Safety now defaults to guarded; use "
+            "--dangerously-disable-safety to opt out."
+        )
+    try:
+        load_settings()
+    except ValueError as exc:
+        parser.error(str(exc))
+    args.safety_mode = "off" if args.dangerously_disable_safety else "guarded"
 
     if args.update:
         sys.exit(0 if self_update() else 1)
@@ -393,15 +399,22 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
     if persisted_scan_mode and args.scan_mode == "deep":
         args.scan_mode = persisted_scan_mode
     persisted_safety_mode = state.get("safety_mode", "off")
+    if persisted_safety_mode == "observe":
+        parser.error(
+            f"--resume {args.resume}: observe mode was removed and this run cannot be resumed"
+        )
     if persisted_safety_mode not in SAFETY_MODES:
         parser.error(
             f"--resume {args.resume}: run.json has invalid safety_mode {persisted_safety_mode!r}"
         )
-    if args.safety_mode_explicit and args.safety_mode != persisted_safety_mode:
-        parser.error(
-            f"--resume {args.resume}: cannot change safety mode from "
-            f"{persisted_safety_mode!r} to {args.safety_mode!r}"
-        )
+    requested_safety_mode = "off" if args.dangerously_disable_safety else "guarded"
+    if requested_safety_mode != persisted_safety_mode:
+        if persisted_safety_mode == "off":
+            parser.error(
+                f"--resume {args.resume}: this run was created with safety disabled; pass "
+                "--dangerously-disable-safety again to resume it"
+            )
+        parser.error(f"--resume {args.resume}: cannot disable safety for a guarded run")
     args.safety_mode = persisted_safety_mode
     if persisted_safety_mode != "off":
         persisted_sources = state.get("local_sources") or []

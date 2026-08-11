@@ -856,9 +856,8 @@ def test_redirect_input_files_are_parsed_not_heredocs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_input_file_is_attached_for_scope_review() -> None:
-    """A host list read via `< file` is evidence the reviewer needs to judge scope, so
-    its contents ride in the packet instead of leaving the reviewer to block blind."""
+async def test_workspace_input_file_is_attached_for_action_review() -> None:
+    """A host list read via `< file` is frozen with the action evidence."""
     bundle = await _compile(
         'while read -r host; do dig +short "$host"; done < hosts.txt > out.txt',
         {"/workspace/hosts.txt": "admin.fiuu.com\napi.fiuu.com\n"},
@@ -869,7 +868,8 @@ async def test_workspace_input_file_is_attached_for_scope_review() -> None:
         assert [a["path"] for a in inputs] == ["/workspace/hosts.txt"]
         assert "admin.fiuu.com" in inputs[0]["source"]
         assert inputs[0]["truncated"] is False
-        # Attaching contents is not itself a block; the reviewer judges scope.
+        assert bundle.workspace_evidence is True
+        # Attaching contents is not itself a block; the reviewer judges effects.
         assert bundle.deterministic_block is None
     finally:
         bundle.cleanup()
@@ -938,7 +938,7 @@ def test_list_flag_files_are_parsed(command: str, expected: list[str]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_wordlist_flag_file_is_attached_for_scope_review() -> None:
+async def test_wordlist_flag_file_is_attached_for_action_review() -> None:
     """Recon tools route their target list through `-w`/`-l`, not a `<` redirect, so the
     same evidence must be collected for the reviewer to check it against scope."""
     bundle = await _compile(
@@ -950,6 +950,7 @@ async def test_wordlist_flag_file_is_attached_for_scope_review() -> None:
         inputs = [a for a in bundle.packet["artifacts"] if a.get("role") == "input"]
         assert [a["path"] for a in inputs] == ["/workspace/paths.txt"]
         assert "admin" in inputs[0]["source"]
+        assert bundle.workspace_evidence is True
     finally:
         bundle.cleanup()
 

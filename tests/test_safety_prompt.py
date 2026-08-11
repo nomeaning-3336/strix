@@ -26,9 +26,8 @@ def test_safety_guidance_is_absent_without_a_safety_mode(
 
 
 @pytest.mark.parametrize("phrase", _SAFETY_ONLY_PHRASES)
-@pytest.mark.parametrize("mode", ["guarded", "observe"])
-def test_safety_guidance_is_present_in_a_safety_mode(phrase: str, mode: str) -> None:
-    assert phrase in render_system_prompt(system_prompt_context={"safety_mode": mode})
+def test_safety_guidance_is_present_in_guarded_mode(phrase: str) -> None:
+    assert phrase in render_system_prompt(system_prompt_context={"safety_mode": "guarded"})
 
 
 def test_browser_skill_carries_no_safety_prohibitions() -> None:
@@ -40,8 +39,46 @@ def test_browser_skill_carries_no_safety_prohibitions() -> None:
         assert phrase not in prompt
 
 
-def test_observe_mode_states_its_passive_only_contract() -> None:
-    prompt = render_system_prompt(system_prompt_context={"safety_mode": "observe"})
+def test_guarded_interactive_prompt_explains_human_deferral() -> None:
+    prompt = render_system_prompt(
+        interactive=True,
+        system_prompt_context={
+            "safety_mode": "guarded",
+            "human_approval_available": True,
+        },
+    )
 
-    assert "passive target interaction only" in prompt
-    assert "Guarded mode permits" not in prompt
+    assert "user approves or denies that action" in prompt
+    assert "only the guarded action-safety reviewer may pause" in prompt
+
+
+def test_guarded_autonomous_prompt_has_no_human_channel() -> None:
+    prompt = render_system_prompt(system_prompt_context={"safety_mode": "guarded"})
+
+    assert "No human approval channel exists" in prompt
+    assert "NEVER wait for approval or authorization" in prompt
+
+
+def test_interactive_without_approval_callback_still_fails_closed() -> None:
+    prompt = render_system_prompt(
+        interactive=True,
+        system_prompt_context={"safety_mode": "guarded"},
+    )
+
+    assert "No human approval channel exists" in prompt
+    assert "user approves or denies that action" not in prompt
+
+
+def test_scope_allows_passive_external_research_without_expanding_targets() -> None:
+    prompt = render_system_prompt(
+        system_prompt_context={
+            "authorized_targets": [{"type": "web", "value": "https://example.test"}],
+            "scope_source": "scan",
+            "authorization_source": "user",
+        }
+    )
+
+    assert "certificate transparency services such as crt.sh" in prompt
+    assert "does not make that service a testing target" in prompt
+    assert "authorized domain includes its subdomains" in prompt
+    assert "NEVER actively scan, fuzz, authenticate to, exploit, or mutate" in prompt

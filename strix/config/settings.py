@@ -9,8 +9,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
-SafetyMode = Literal["off", "guarded", "observe"]
-SAFETY_MODES: tuple[SafetyMode, ...] = ("off", "guarded", "observe")
+SafetyMode = Literal["off", "guarded"]
+SAFETY_MODES: tuple[SafetyMode, ...] = ("off", "guarded")
 
 DEFAULT_MAX_TURNS = 500
 
@@ -121,7 +121,6 @@ class SafetySettings(BaseSettings):
 
     model_config = _BASE_CONFIG
 
-    mode: SafetyMode = Field(default="off", alias="STRIX_SAFETY_MODE")
     model: str | None = Field(default=None, alias="STRIX_SAFETY_MODEL")
     reasoning_effort: ReasoningEffort | None = Field(
         default="low",

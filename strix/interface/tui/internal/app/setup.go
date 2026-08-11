@@ -77,6 +77,19 @@ func (m *Model) answerMountConfirmation(approved bool) tea.Cmd {
 	return send(m.client, "setup.confirm_mount", map[string]any{"approved": approved})
 }
 
+// answerSafetyApproval replies with the exact ID currently projected by the
+// backend. The snapshot, rather than the local click, closes or advances it.
+func (m *Model) answerSafetyApproval(approved bool) tea.Cmd {
+	pending := m.snapshot.PendingApproval
+	if pending == nil || pending.RequestID == "" {
+		return nil
+	}
+	return send(m.client, "safety.resolve", map[string]any{
+		"request_id": pending.RequestID,
+		"approved":   approved,
+	})
+}
+
 func (m Model) hasTarget(candidate string) bool {
 	for _, target := range m.snapshot.Targets {
 		if target == candidate {
@@ -520,6 +533,25 @@ func (m *Model) syncMountPrompt() {
 	case m.snapshot.PendingMount != "" && m.modal != modalConfirmMount:
 		m.openModal(modalConfirmMount)
 	case m.snapshot.PendingMount == "" && m.modal == modalConfirmMount:
+		m.closeModal()
+	}
+}
+
+// syncSafetyApprovalPrompt follows backend state so the next queued request
+// appears after a resolution and starts from the fail-closed Deny choice.
+func (m *Model) syncSafetyApprovalPrompt() {
+	pending := m.snapshot.PendingApproval
+	if m.snapshot.PendingMount != "" {
+		return
+	}
+	switch {
+	case pending != nil && pending.RequestID != "" &&
+		(m.modal == modalNone || m.modal == modalSafetyApproval) &&
+		(m.modal != modalSafetyApproval || m.safetyApprovalID != pending.RequestID):
+		m.safetyApprovalID = pending.RequestID
+		m.openModal(modalSafetyApproval)
+	case (pending == nil || pending.RequestID == "") && m.modal == modalSafetyApproval:
+		m.safetyApprovalID = ""
 		m.closeModal()
 	}
 }

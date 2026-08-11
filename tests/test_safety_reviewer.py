@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 from agents.tool_context import ToolContext
@@ -234,9 +234,77 @@ async def test_low_confidence_allow_is_refused(tmp_path: Path, monkeypatch: Monk
     )
 
     assert decision.allowed is False
+    assert decision.deferred is False
     assert decision.source == "reviewer"
-    assert "below the 0.75 allow threshold" in decision.reason
+    assert "below the 0.75 threshold" in decision.reason
     assert decision.categories == ("target_mutation",)
+
+
+@pytest.mark.parametrize("model_decision", ["allow", "block"])
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_interactive_low_confidence_verdict_defers(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    model_decision: Literal["allow", "block"],
+) -> None:
+    monkeypatch.setattr(
+        reviewer_module.Runner,
+        "run",
+        _verdict_run(
+            SafetyVerdict(
+                decision=model_decision,
+                risk="medium",
+                categories=["ambiguous_effect"],
+                reason="effect is unclear",
+                confidence=0.5,
+            )
+        ),
+    )
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        _bundle(tmp_path, f"case-low-{model_decision}"),
+        human_approval_available=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.deferred is True
+    assert decision.risk == "medium"
+    assert "below the 0.75 threshold" in decision.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_explicit_defer_requires_an_approval_channel(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviewer_module.Runner,
+        "run",
+        _verdict_run(
+            SafetyVerdict(
+                decision="defer",
+                risk="high",
+                categories=["ambiguous_effect"],
+                reason="persistence depends on endpoint behavior",
+                confidence=0.9,
+            )
+        ),
+    )
+    reviewer = SafetyReviewer(inspection_runner=_InspectionRunner())
+
+    interactive = await reviewer.review(
+        _bundle(tmp_path, "case-explicit-interactive"),
+        human_approval_available=True,
+    )
+    noninteractive = await reviewer.review(_bundle(tmp_path, "case-explicit-headless"))
+
+    assert interactive.deferred is True
+    assert interactive.risk == "high"
+    assert noninteractive.allowed is False
+    assert noninteractive.deferred is False
+    assert "no human approval channel" in noninteractive.reason
 
 
 @pytest.mark.asyncio
@@ -289,6 +357,7 @@ async def test_block_verdict_is_returned_as_a_block(
     )
 
     assert decision.allowed is False
+    assert decision.deferred is False
     assert decision.source == "reviewer"
     assert decision.reason == "deletes a record"
 
@@ -318,9 +387,11 @@ async def test_missing_model_configuration_blocks(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_patched_sdk")
-async def test_allow_after_a_failed_inspection_is_refused(
+@pytest.mark.parametrize("model_decision", ["allow", "defer"])
+async def test_non_block_after_a_failed_inspection_is_refused(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
+    model_decision: Literal["allow", "defer"],
 ) -> None:
     """The reviewer decides from the inspection's own output, so an inspection that failed
     must not be able to underwrite an allow."""
@@ -329,7 +400,7 @@ async def test_allow_after_a_failed_inspection_is_refused(
         context.incomplete = True
         return _Result(
             SafetyVerdict(
-                decision="allow",
+                decision=model_decision,
                 risk="low",
                 categories=[],
                 reason="looked fine",
@@ -340,10 +411,12 @@ async def test_allow_after_a_failed_inspection_is_refused(
     monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
 
     decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
-        _bundle(tmp_path, "case-bad-inspection")
+        _bundle(tmp_path, "case-bad-inspection"),
+        human_approval_available=True,
     )
 
     assert decision.allowed is False
+    assert decision.deferred is False
     assert decision.categories == ("inspection_incomplete",)
 
 
@@ -383,26 +456,28 @@ def test_prompt_judges_security_testing_by_effect_not_technique() -> None:
     """Pins the effect-based guardrails so a future edit cannot silently revert to
     blocking in-scope offensive testing on the technique alone."""
     prompt = reviewer_module._SAFETY_PROMPT
+    normalized = " ".join(prompt.split())
 
     # Authorization framing and the effect-not-technique rule.
     assert "authorized penetration test" in prompt
-    assert (
-        'That an action is a "SQL\ninjection"' in prompt
-        or "not, by itself, a reason to block" in prompt
-    )
+    assert "not, by itself, a reason to block" in normalized
     # Read probes pass; writes and destruction block.
     assert "OR 1=1" in prompt
     for keyword in ("DROP", "DELETE", "INSERT", "TRUNCATE", "OUTFILE", "xp_cmdshell"):
         assert keyword in prompt
-    # Fail-closed on ambiguity is preserved.
-    assert "does not settle whether the effect is destructive" in prompt
+    # Scope enforcement belongs elsewhere, including for passive third-party services.
+    assert "Do not enforce authorization scope" in prompt
+    assert "crt.sh" in prompt
+    assert "solely because their hostname is outside" in prompt
+    # Ambiguity only reaches a human when an approval channel exists.
+    assert "Return defer only when approval is available" in prompt
+    assert "Without human approval, ambiguity must block" in prompt
     # Non-negotiable guardrails survive.
     assert 'Never allow when completeness.status is not "complete"' in prompt
     assert "Deterministic policy blocks cannot be overridden" in prompt
-    assert "analysis.mutating_request is\nnever passive" in prompt
+    assert "analysis.mutating_request" in prompt
 
 
-def test_prompt_scopes_subdomains_and_input_files() -> None:
-    prompt = reviewer_module._SAFETY_PROMPT
-    assert "authorized domain covers its subdomains" in prompt
-    assert 'role "input"' in prompt or 'role "input"' in prompt
+def test_prompt_explains_input_files() -> None:
+    prompt = " ".join(reviewer_module._SAFETY_PROMPT.split())
+    assert 'role "input"' in prompt

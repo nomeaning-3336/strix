@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ import pytest
 
 from strix.config.settings import SafetySettings
 from strix.safety.runtime import SafetyRuntime
-from strix.safety.types import SafetyDecision
+from strix.safety.types import SafetyApprovalCallback, SafetyApprovalRequest, SafetyDecision
 
 
 if TYPE_CHECKING:
@@ -42,14 +43,36 @@ class _InspectionRunner:
 class _StubReviewer:
     """Stands in for the model review so a decision's source can be asserted."""
 
-    def __init__(self, on_review: Any = None) -> None:
+    def __init__(
+        self,
+        on_review: Any = None,
+        decision: SafetyDecision | None = None,
+    ) -> None:
         self.on_review = on_review
+        self.decision = decision
         self.calls = 0
+        self.human_approval_available: list[bool] = []
 
-    async def review(self, bundle: Any) -> SafetyDecision:
+    async def review(
+        self,
+        bundle: Any,
+        *,
+        human_approval_available: bool = False,
+    ) -> SafetyDecision:
         self.calls += 1
+        self.human_approval_available.append(human_approval_available)
         if self.on_review is not None:
             await self.on_review()
+        if self.decision is not None:
+            return SafetyDecision(
+                allowed=self.decision.allowed,
+                source=self.decision.source,
+                reason=self.decision.reason,
+                categories=self.decision.categories,
+                case_id=bundle.case_id,
+                risk=self.decision.risk,
+                deferred=self.decision.deferred,
+            )
         return SafetyDecision(
             allowed=True,
             source="reviewer",
@@ -58,7 +81,11 @@ class _StubReviewer:
         )
 
 
-def _runtime(tmp_path: Path, mode: str) -> SafetyRuntime:
+def _runtime(
+    tmp_path: Path,
+    mode: str,
+    approval_callback: SafetyApprovalCallback | None = None,
+) -> SafetyRuntime:
     return SafetyRuntime(
         scan_id="scan-1",
         mode=mode,  # type: ignore[arg-type]
@@ -68,12 +95,32 @@ def _runtime(tmp_path: Path, mode: str) -> SafetyRuntime:
         run_dir=tmp_path,
         sandbox_image="image",
         inspection_runner=_InspectionRunner(),
+        approval_callback=approval_callback,
     )
 
 
-def _ctx(*, agent_id: str = "agent-1", turn_input: list[dict[str, Any]] | None = None) -> Any:
+def _deferred() -> SafetyDecision:
+    return SafetyDecision(
+        allowed=False,
+        source="reviewer",
+        reason="the endpoint effect is ambiguous",
+        categories=("ambiguous_effect",),
+        risk="medium",
+        deferred=True,
+    )
+
+
+def _ctx(
+    *,
+    agent_id: str = "agent-1",
+    turn_input: list[dict[str, Any]] | None = None,
+    coordinator: Any = None,
+) -> Any:
+    context = {"agent_id": agent_id, "sandbox_session": object()}
+    if coordinator is not None:
+        context["coordinator"] = coordinator
     return SimpleNamespace(
-        context={"agent_id": agent_id, "sandbox_session": object()},
+        context=context,
         tool_call_id="call-1",
         turn_input=turn_input or [],
     )
@@ -121,20 +168,15 @@ async def test_browser_sessions_are_disjoint_per_agent(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_observe_mode_blocks_a_browser_click_against_a_fresh_snapshot(
+async def test_active_browser_action_reaches_the_reviewer(
     tmp_path: Path,
 ) -> None:
-    """Without the snapshot the click blocks as incomplete evidence in every mode, so the
-    observe-mode rule itself would never be exercised."""
-    runtime = _runtime(tmp_path, "observe")
+    runtime = _runtime(tmp_path, "guarded")
     reviewer = _StubReviewer()
     runtime._reviewer = reviewer
-    invoked = False
 
     async def invoke(_ctx: Any, _raw_input: str) -> str:
-        nonlocal invoked
-        invoked = True
-        return "bad"
+        return "clicked"
 
     result = await runtime.invoke_exec(
         ctx=_ctx(turn_input=_SNAPSHOT_HISTORY),
@@ -142,27 +184,26 @@ async def test_observe_mode_blocks_a_browser_click_against_a_fresh_snapshot(
         invoke_tool=invoke,
     )
 
-    payload = json.loads(result)
-    assert payload["status"] == "blocked"
-    assert payload["safety"]["source"] == "deterministic"
-    assert payload["safety"]["categories"] == ["target_mutation"]
-    assert "not passive" in payload["safety"]["reason"]
-    assert reviewer.calls == 0
-    assert invoked is False
+    assert result == "clicked"
+    assert reviewer.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_observe_mode_allows_a_passive_browser_read(tmp_path: Path) -> None:
+async def test_passive_browser_read_keeps_the_fast_path(tmp_path: Path) -> None:
     async def invoke(_ctx: Any, _raw_input: str) -> str:
         return "snapshot"
 
-    result = await _runtime(tmp_path, "observe").invoke_exec(
+    runtime = _runtime(tmp_path, "guarded")
+    reviewer = _StubReviewer()
+    runtime._reviewer = reviewer
+    result = await runtime.invoke_exec(
         ctx=_ctx(),
         arguments={"cmd": "agent-browser snapshot -i"},
         invoke_tool=invoke,
     )
 
     assert result == "snapshot"
+    assert reviewer.calls == 0
 
 
 @pytest.mark.asyncio
@@ -247,12 +288,154 @@ async def test_write_stdin_is_untouched_when_safety_is_off(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_observe_mode_blocks_a_mutating_request_without_the_reviewer(
+async def test_mutating_request_is_evidence_for_the_reviewer(
     tmp_path: Path,
 ) -> None:
-    runtime = _runtime(tmp_path, "observe")
+    runtime = _runtime(tmp_path, "guarded")
     reviewer = _StubReviewer()
     runtime._reviewer = reviewer
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        return "reviewed"
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "curl -X DELETE https://example.test/v1/users/1042"},
+        invoke_tool=invoke,
+    )
+
+    assert result == "reviewed"
+    assert reviewer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_deferred_action_waits_for_human_and_executes_the_original_call(
+    tmp_path: Path,
+) -> None:
+    requests: list[SafetyApprovalRequest] = []
+    approval_started = asyncio.Event()
+    release_approval = asyncio.Event()
+
+    async def approve(request: SafetyApprovalRequest) -> bool:
+        requests.append(request)
+        approval_started.set()
+        await release_approval.wait()
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    reviewer = _StubReviewer(decision=_deferred())
+    runtime._reviewer = reviewer
+    arguments = {"cmd": "nmap -sV example.test", "workdir": "/workspace"}
+    original_arguments = dict(arguments)
+    invoked: list[dict[str, Any]] = []
+
+    async def invoke(_ctx: Any, raw_input: str) -> str:
+        invoked.append(json.loads(raw_input))
+        return "scanned"
+
+    pending = asyncio.create_task(
+        runtime.invoke_exec(ctx=_ctx(), arguments=arguments, invoke_tool=invoke)
+    )
+    await approval_started.wait()
+
+    assert pending.done() is False
+    arguments["cmd"] = "rm -rf /workspace"
+    release_approval.set()
+
+    assert await pending == "scanned"
+    assert invoked == [original_arguments]
+    assert reviewer.human_approval_available == [True]
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.agent_id == "agent-1"
+    assert request.request_id == request.case_id
+    assert request.tool_call_id == "call-1"
+    assert request.tool_name == "exec_command"
+    assert request.action == '{"cmd":"nmap -sV example.test","workdir":"/workspace"}'
+    assert request.digest == hashlib.sha256(request.action.encode()).hexdigest()
+    assert request.reason == "the endpoint effect is ambiguous"
+    assert request.categories == ("ambiguous_effect",)
+    assert request.risk == "medium"
+
+    audit_path = tmp_path / ".state" / "safety-audit.jsonl"
+    entries = [json.loads(line) for line in audit_path.read_text().splitlines()]
+    assert any(
+        entry["decision_source"] == "reviewer"
+        and entry["summary"].get("approval", {}).get("status") == "requested"
+        for entry in entries
+    )
+    assert any(
+        entry["decision_source"] == "human"
+        and entry["summary"].get("approval", {}).get("status") == "approved"
+        for entry in entries
+    )
+
+
+@pytest.mark.asyncio
+async def test_approval_cannot_execute_after_requesting_agent_stops(tmp_path: Path) -> None:
+    class Coordinator:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def graph_snapshot(self) -> tuple[dict[str, str], dict[str, str], dict, dict]:
+            self.calls += 1
+            status = "running" if self.calls == 1 else "stopped"
+            return {}, {"agent-1": status}, {}, {}
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+    invoked = False
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        nonlocal invoked
+        invoked = True
+        return "bad"
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(coordinator=Coordinator()),
+        arguments={"cmd": "nmap example.test"},
+        invoke_tool=invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert payload["safety"]["source"] == "system"
+    assert payload["safety"]["categories"][-1] == "agent_inactive"
+    assert invoked is False
+
+
+@pytest.mark.asyncio
+async def test_oversized_action_cannot_be_deferred_to_human(tmp_path: Path) -> None:
+    approval_called = False
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        nonlocal approval_called
+        approval_called = True
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "nmap " + "a" * 600},
+        invoke_tool=_noop_invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["safety"]["categories"] == ["approval_action_too_large"]
+    assert approval_called is False
+
+
+@pytest.mark.asyncio
+async def test_human_denial_returns_a_human_sourced_block(tmp_path: Path) -> None:
+    async def deny(_request: SafetyApprovalRequest) -> bool:
+        return False
+
+    runtime = _runtime(tmp_path, "guarded", deny)
+    runtime._reviewer = _StubReviewer(decision=_deferred())
     invoked = False
 
     async def invoke(_ctx: Any, _raw_input: str) -> str:
@@ -262,16 +445,124 @@ async def test_observe_mode_blocks_a_mutating_request_without_the_reviewer(
 
     result = await runtime.invoke_exec(
         ctx=_ctx(),
-        arguments={"cmd": "curl -X DELETE https://example.test/v1/users/1042"},
+        arguments={"cmd": "nmap -sV example.test"},
         invoke_tool=invoke,
     )
 
     payload = json.loads(result)
     assert payload["status"] == "blocked"
-    assert payload["safety"]["source"] == "deterministic"
-    assert "DELETE" in payload["safety"]["reason"]
-    assert reviewer.calls == 0
+    assert payload["safety"]["source"] == "human"
+    assert payload["safety"]["risk"] == "medium"
+    assert "Human denied" in payload["safety"]["reason"]
     assert invoked is False
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_cancellation_is_not_recorded_as_human_denial(tmp_path: Path) -> None:
+    async def cancel(_request: SafetyApprovalRequest) -> str:
+        return "cancelled"
+
+    runtime = _runtime(tmp_path, "guarded", cancel)  # type: ignore[arg-type]
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "nmap example.test"},
+        invoke_tool=_noop_invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["safety"]["source"] == "system"
+    assert payload["safety"]["categories"][-1] == "approval_cancelled"
+    assert "cancelled" in payload["safety"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_defer_without_an_approval_channel_blocks(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "nmap -sV example.test"},
+        invoke_tool=_noop_invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert payload["safety"]["source"] == "reviewer"
+    assert "no human approval channel" in payload["safety"]["reason"]
+
+
+@pytest.mark.parametrize("command", ["rm -rf /workspace", ""])
+@pytest.mark.asyncio
+async def test_deterministic_and_incomplete_blocks_never_request_approval(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    approval_calls = 0
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        nonlocal approval_calls
+        approval_calls += 1
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    reviewer = _StubReviewer(decision=_deferred())
+    runtime._reviewer = reviewer
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": command},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert json.loads(result)["status"] == "blocked"
+    assert reviewer.calls == 0
+    assert approval_calls == 0
+
+
+@pytest.mark.parametrize(
+    "decision",
+    [
+        SafetyDecision(
+            allowed=False,
+            source="review_error",
+            reason="provider failed",
+            categories=("review_error",),
+        ),
+        SafetyDecision(
+            allowed=False,
+            source="reviewer",
+            reason="confidently destructive",
+            categories=("destructive_effect",),
+            risk="high",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_reviewer_errors_and_confident_blocks_never_request_approval(
+    tmp_path: Path,
+    decision: SafetyDecision,
+) -> None:
+    approval_calls = 0
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        nonlocal approval_calls
+        approval_calls += 1
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    runtime._reviewer = _StubReviewer(decision=decision)
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": "nmap -sV example.test"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert json.loads(result)["status"] == "blocked"
+    assert approval_calls == 0
 
 
 @pytest.mark.asyncio
@@ -334,6 +625,37 @@ async def test_workspace_change_during_review_invalidates_the_decision(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_workspace_change_during_human_approval_invalidates_the_decision(
+    tmp_path: Path,
+) -> None:
+    runtime: SafetyRuntime
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        runtime._workspace_epoch += 1
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+    invoked = False
+
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        nonlocal invoked
+        invoked = True
+        return "bad"
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(),
+        arguments={"cmd": "python /workspace/app.py"},
+        invoke_tool=invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert payload["safety"]["categories"] == ["stale_evidence"]
+    assert invoked is False
+
+
+@pytest.mark.asyncio
 async def test_unchanged_workspace_executes_after_review(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path, "guarded")
     runtime._reviewer = _StubReviewer()
@@ -348,28 +670,6 @@ async def test_unchanged_workspace_executes_after_review(tmp_path: Path) -> None
     )
 
     assert result == "ran"
-
-
-@pytest.mark.asyncio
-async def test_observe_mode_blocks_a_workspace_patch(tmp_path: Path) -> None:
-    invoked = False
-
-    async def invoke(_ctx: Any, _raw_input: str) -> str:
-        nonlocal invoked
-        invoked = True
-        return "bad"
-
-    result = await _runtime(tmp_path, "observe").invoke_mutating_tool(
-        ctx=_ctx(),
-        tool_name="apply_patch",
-        raw_input="{}",
-        invoke_tool=invoke,
-    )
-
-    payload = json.loads(result)
-    assert payload["status"] == "blocked"
-    assert payload["safety"]["categories"] == ["state_mutation"]
-    assert invoked is False
 
 
 @pytest.mark.asyncio
@@ -488,18 +788,15 @@ async def test_a_read_only_command_leaves_the_epoch_alone(tmp_path: Path) -> Non
         "agent-browser session clear",
     ],
 )
-async def test_observe_mode_blocks_grouped_browser_verbs(tmp_path: Path, command: str) -> None:
+async def test_grouped_browser_verbs_reach_the_reviewer(tmp_path: Path, command: str) -> None:
     """The bare verb sits in the passive set, so these are the commands that would slip
     through if passivity were decided on the verb alone."""
-    runtime = _runtime(tmp_path, "observe")
+    runtime = _runtime(tmp_path, "guarded")
     reviewer = _StubReviewer()
     runtime._reviewer = reviewer
-    invoked = False
 
     async def invoke(_ctx: Any, _raw_input: str) -> str:
-        nonlocal invoked
-        invoked = True
-        return "bad"
+        return "reviewed"
 
     result = await runtime.invoke_exec(
         ctx=_ctx(),
@@ -507,33 +804,13 @@ async def test_observe_mode_blocks_grouped_browser_verbs(tmp_path: Path, command
         invoke_tool=invoke,
     )
 
-    payload = json.loads(result)
-    assert payload["status"] == "blocked"
-    assert payload["safety"]["categories"] == ["target_mutation"]
-    assert reviewer.calls == 0
-    assert invoked is False
-
-
-@pytest.mark.asyncio
-async def test_guarded_grouped_browser_verb_reaches_the_reviewer(tmp_path: Path) -> None:
-    """In guarded mode it loses only the fast path; the reviewer still gets to decide."""
-    runtime = _runtime(tmp_path, "guarded")
-    reviewer = _StubReviewer()
-    runtime._reviewer = reviewer
-
-    result = await runtime.invoke_exec(
-        ctx=_ctx(),
-        arguments={"cmd": "agent-browser tab new https://example.test/admin"},
-        invoke_tool=_noop_invoke,
-    )
-
-    assert result == "patched"
+    assert result == "reviewed"
     assert reviewer.calls == 1
 
 
 @pytest.mark.asyncio
 async def test_bare_tab_listing_keeps_the_fast_path(tmp_path: Path) -> None:
-    runtime = _runtime(tmp_path, "observe")
+    runtime = _runtime(tmp_path, "guarded")
     reviewer = _StubReviewer()
     runtime._reviewer = reviewer
 

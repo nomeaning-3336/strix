@@ -474,6 +474,19 @@ func (m Model) updateModalMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m.modalChoice = 1
 			return m.updateModal(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	case modalConfirmMount, modalSafetyApproval:
+		confirmLabel, cancelLabel := "Confirm", "Cancel"
+		if m.modal == modalSafetyApproval {
+			confirmLabel, cancelLabel = "Approve", "Deny"
+		}
+		if m.cornerLabelHit(view, confirmLabel, msg.X, msg.Y) {
+			m.modalChoice = 0
+			return m.updateModal(tea.KeyMsg{Type: tea.KeyEnter})
+		}
+		if m.cornerLabelHit(view, cancelLabel, msg.X, msg.Y) {
+			m.modalChoice = 1
+			return m.updateModal(tea.KeyMsg{Type: tea.KeyEnter})
+		}
 	case modalVulnerability:
 		for _, button := range m.reportButtons() {
 			if button == reportCopy || button == reportDone {
@@ -507,6 +520,20 @@ func (m Model) centeredViewBounds(view string) (left, top, width, height int) {
 
 func (m Model) centeredLabelHit(view, label string, x, y int) bool {
 	left, top, _, _ := m.centeredViewBounds(view)
+	for row, line := range strings.Split(view, "\n") {
+		plain := ansi.Strip(line)
+		index := strings.Index(plain, label)
+		if index < 0 || y != top+row {
+			continue
+		}
+		start := left + ansi.StringWidth(plain[:index])
+		return x >= start-1 && x < start+ansi.StringWidth(label)+1
+	}
+	return false
+}
+
+func (m Model) cornerLabelHit(view, label string, x, y int) bool {
+	left, top, _, _ := m.cornerViewBounds(view)
 	for row, line := range strings.Split(view, "\n") {
 		plain := ansi.Strip(line)
 		index := strings.Index(plain, label)
@@ -590,13 +617,35 @@ func (m Model) updateModal(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	switch key.String() {
+	case "ctrl+c", "ctrl+q":
+		if m.modal == modalSafetyApproval {
+			m.modalChoice = 1
+			m.openModal(modalQuit)
+			return m, nil
+		}
 	case "esc":
 		if m.modal == modalConfirmMount {
 			// The backend is waiting on an answer; escape declines it.
 			return m, m.answerMountConfirmation(false)
 		}
+		if m.modal == modalSafetyApproval {
+			return m, m.answerSafetyApproval(false)
+		}
 		m.closeModal()
+		m.syncSafetyApprovalPrompt()
 		return m, nil
+	case "a", "y":
+		if m.modal == modalSafetyApproval {
+			if !m.safetyApprovalFits() {
+				m.errorText = "Resize the terminal to inspect the complete action before approving"
+				return m, nil
+			}
+			return m, m.answerSafetyApproval(true)
+		}
+	case "d", "n":
+		if m.modal == modalSafetyApproval {
+			return m, m.answerSafetyApproval(false)
+		}
 	case "left", "right", "up", "down", "tab":
 		m.modalChoice = 1 - m.modalChoice
 		return m, nil
@@ -606,8 +655,16 @@ func (m Model) updateModal(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// The snapshot closes this prompt once the backend has the answer.
 			return m, m.answerMountConfirmation(choice == 0)
 		}
+		if modal == modalSafetyApproval {
+			if choice == 0 && !m.safetyApprovalFits() {
+				m.errorText = "Resize the terminal to inspect the complete action before approving"
+				return m, nil
+			}
+			return m, m.answerSafetyApproval(choice == 0)
+		}
 		m.closeModal()
 		if choice == 1 {
+			m.syncSafetyApprovalPrompt()
 			return m, nil
 		}
 		if modal == modalQuit {
@@ -625,7 +682,7 @@ func (m Model) updateModal(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m *Model) openModal(mode modalMode) {
 	m.modal = mode
 	m.input.Blur()
-	if mode == modalConfirmMount {
+	if mode == modalConfirmMount || mode == modalSafetyApproval {
 		// A consent prompt defaults to declining.
 		m.modalChoice = 1
 	}

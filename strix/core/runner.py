@@ -41,6 +41,7 @@ from strix.core.inputs import (
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
 from strix.report.state import get_global_report_state
+from strix.report.writer import read_run_record
 from strix.runtime import session_manager
 from strix.runtime.local_dir_staging import materialize_isolated_sources
 from strix.safety.runtime import SafetyRuntime
@@ -56,6 +57,7 @@ if TYPE_CHECKING:
     from agents.result import RunResultBase
 
     from strix.runtime.status import StatusSink
+    from strix.safety.types import SafetyApprovalCallback
 
 
 logger = logging.getLogger(__name__)
@@ -99,13 +101,30 @@ def raise_open_file_limit(minimum: int = _MIN_OPEN_FILE_SOFT_LIMIT) -> None:
 
 
 def _safety_mode(scan_config: dict[str, Any]) -> SafetyMode:
-    raw = str(scan_config.get("safety_mode") or "off")
+    raw = str(scan_config.get("safety_mode") or "guarded")
     # Returning the matched element narrows to SafetyMode on every mypy version; a
     # membership test against the tuple does not.
     for mode in SAFETY_MODES:
         if raw == mode:
             return mode
     raise ValueError(f"Unsupported safety mode: {raw!r}")
+
+
+def _validate_resume_safety_mode(run_dir: Path, requested: SafetyMode) -> None:
+    record = read_run_record(run_dir)
+    raw_persisted: object = record.get("safety_mode", "off")
+    if not isinstance(raw_persisted, str) or not raw_persisted:
+        raise ValueError(f"Cannot resume run with invalid safety mode: {raw_persisted!r}")
+    persisted = raw_persisted
+    if persisted == "observe":
+        raise ValueError("Cannot resume an observe-mode run because observe mode was removed")
+    if persisted not in SAFETY_MODES:
+        raise ValueError(f"Cannot resume run with invalid safety mode: {persisted!r}")
+    if persisted != requested:
+        raise ValueError(
+            f"Cannot change safety mode while resuming: run uses {persisted!r}, "
+            f"request uses {requested!r}"
+        )
 
 
 def _merge_root_prompt_context(
@@ -170,6 +189,7 @@ async def run_strix_scan(
     root_instructions_override: str | None = None,
     extra_system_prompt_context: dict[str, Any] | None = None,
     status_sink: StatusSink | None = None,
+    safety_approval_callback: SafetyApprovalCallback | None = None,
 ) -> RunResultBase | None:
     """Run or resume one Strix scan against a sandbox.
 
@@ -211,6 +231,8 @@ async def run_strix_scan(
 
     settings = load_settings()
     safety_mode = _safety_mode(scan_config)
+    if is_resume:
+        _validate_resume_safety_mode(run_dir, safety_mode)
     configure_sdk_model_defaults(settings)
     resolved_model = (model or settings.llm.model or "").strip()
     if not resolved_model:
@@ -342,6 +364,9 @@ async def run_strix_scan(
         if safety_mode != "off":
             scope_context["safety_mode"] = safety_mode
             scope_context["workspace_isolation"] = True
+            scope_context["human_approval_available"] = bool(
+                interactive and safety_approval_callback is not None
+            )
         safety_runtime = (
             SafetyRuntime(
                 scan_id=scan_id,
@@ -351,6 +376,7 @@ async def run_strix_scan(
                 settings=settings.safety,
                 run_dir=run_dir,
                 sandbox_image=image,
+                approval_callback=safety_approval_callback if interactive else None,
             )
             if safety_mode != "off"
             else None

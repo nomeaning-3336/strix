@@ -266,7 +266,7 @@ func TestBlockedApplyPatchIsDistinguishableFromApplied(t *testing.T) {
 		"status":  "blocked",
 		"error":   "Action blocked by safety policy",
 		"safety": map[string]any{
-			"reason": "apply_patch mutates state and is blocked in observe mode.",
+			"reason": "action blocked by safety policy.",
 		},
 	}
 	args := map[string]any{"patch": "*** Update File: src/app.py\n-import os\n+import sys"}
@@ -277,7 +277,7 @@ func TestBlockedApplyPatchIsDistinguishableFromApplied(t *testing.T) {
 	if out == applied {
 		t.Fatal("a blocked patch renders identically to one that was applied")
 	}
-	requireContains(t, out, "Blocked", "blocked in observe mode")
+	requireContains(t, out, "Blocked", "blocked by safety policy")
 }
 
 func TestBlockedRepeatRequestShowsTheReason(t *testing.T) {

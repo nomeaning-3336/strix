@@ -39,6 +39,8 @@ class SafetyAudit:
             "decision_source": decision.source,
             "reason": decision.reason,
             "categories": list(decision.categories),
+            "risk": decision.risk,
+            "deferred": decision.deferred,
             "execution_status": execution_status,
             "summary": summary,
         }

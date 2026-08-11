@@ -286,7 +286,7 @@ func (m Model) viewInner() string {
 	if m.snapshot.SetupMode {
 		main = m.setupView()
 	}
-	if m.modal == modalConfirmMount {
+	if m.modal == modalConfirmMount || m.modal == modalSafetyApproval {
 		// A corner prompt, not a dialog: it sits out of the way in the live view
 		// while the scan waits on the answer.
 		main = m.cornerOverlay(main, m.modalView())
@@ -306,18 +306,7 @@ func (m Model) cornerOverlay(view, panel string) string {
 	}
 	fg := strings.Split(panel, "\n")
 	bg := strings.Split(view, "\n")
-	panelWidth := lipgloss.Width(panel)
-	// Right edge of the chat column, so it lines up with the composer rather
-	// than covering the sidebar.
-	_, _, chatWidth, _ := m.layout()
-	left := max(0, min(chatWidth, m.width)-panelWidth)
-	// Bottom row sits just above the composer, clearing the status line so the
-	// scan state and quit hint stay readable.
-	statusH := 0
-	if m.statusVisible() {
-		statusH = 1
-	}
-	top := max(0, m.inputTop()-statusH-len(fg))
+	left, top, _, _ := m.cornerViewBounds(panel)
 	for row := top; row < min(len(bg), top+len(fg)); row++ {
 		fgLine := ansi.Truncate(fg[row-top], max(0, m.width-left), "")
 		rightStart := left + lipgloss.Width(fgLine)
@@ -329,6 +318,25 @@ func (m Model) cornerOverlay(view, panel string) string {
 		bg[row] = leftPart + fgLine + rightPart
 	}
 	return strings.Join(bg, "\n")
+}
+
+// cornerViewBounds is shared by rendering and mouse hit testing for compact
+// mount and safety prompts.
+func (m Model) cornerViewBounds(panel string) (left, top, width, height int) {
+	width = lipgloss.Width(panel)
+	height = strings.Count(panel, "\n") + 1
+	// Right edge of the chat column, so it lines up with the composer rather
+	// than covering the sidebar.
+	_, _, chatWidth, _ := m.layout()
+	left = max(0, min(chatWidth, m.width)-width)
+	// Bottom row sits just above the composer, clearing the status line so the
+	// scan state and quit hint stay readable.
+	statusH := 0
+	if m.statusVisible() {
+		statusH = 1
+	}
+	top = max(0, m.inputTop()-statusH-height)
+	return
 }
 
 // toastOverlay splices a transient notification into the bottom-right corner,

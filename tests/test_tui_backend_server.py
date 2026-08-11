@@ -124,7 +124,7 @@ async def test_server_requires_ready_before_state_or_commands() -> None:
     try:
         hello = await receive_message(child)
         assert hello == {
-            "version": 3,
+            "version": PROTOCOL_VERSION,
             "type": "hello",
             "payload": {"capabilities": list(PROTOCOL_CAPABILITIES)},
         }
@@ -135,7 +135,7 @@ async def test_server_requires_ready_before_state_or_commands() -> None:
         await send_message(
             child,
             {
-                "version": 3,
+                "version": PROTOCOL_VERSION,
                 "type": "ready",
                 "payload": {"capabilities": list(PROTOCOL_CAPABILITIES)},
             },
@@ -154,7 +154,7 @@ async def test_server_requires_ready_before_state_or_commands() -> None:
     ("version", "capabilities"),
     [
         (2, list(PROTOCOL_CAPABILITIES)),
-        (3, ["state-revisions"]),
+        (PROTOCOL_VERSION, ["state-revisions"]),
     ],
 )
 async def test_server_rejects_handshake_mismatch(version: int, capabilities: list[str]) -> None:
@@ -186,7 +186,7 @@ async def test_server_command_round_trip_over_inherited_socket() -> None:
         await send_message(
             child,
             {
-                "version": 3,
+                "version": PROTOCOL_VERSION,
                 "type": "setup.add_target",
                 "request_id": "test-1",
                 "payload": {"target": "example.com"},
@@ -252,7 +252,7 @@ async def test_persistence_error_does_not_kill_command_reader(
             await send_message(
                 child,
                 {
-                    "version": 3,
+                    "version": PROTOCOL_VERSION,
                     "type": "setup.select_model",
                     "request_id": request_id,
                     "payload": {"provider": "openai", "model": "openai/gpt-5"},
@@ -295,7 +295,7 @@ async def test_invalid_version_error_is_correlated_and_next_command_succeeds() -
         await send_message(
             child,
             {
-                "version": 3,
+                "version": PROTOCOL_VERSION,
                 "type": "setup.add_target",
                 "request_id": "after-error",
                 "payload": {"target": "example.com"},
@@ -408,7 +408,7 @@ async def test_agents_collection_has_no_state_cap_and_sends_delete_and_resync() 
         await send_message(
             child,
             {
-                "version": 3,
+                "version": PROTOCOL_VERSION,
                 "type": "collection.resync",
                 "request_id": "resync-agents",
                 "payload": {"collection": "agents"},

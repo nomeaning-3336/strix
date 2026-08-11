@@ -1,25 +1,32 @@
 ---
-title: "Safety Modes"
-description: "Control state-changing actions during a scan"
+title: "Action Safety"
+description: "Review potentially dangerous actions before they execute"
 ---
 
-Safety mode is independent of scan depth. `quick`, `standard`, and `deep`
-control coverage; safety mode controls which effects may be executed.
+Action safety is enabled by default and is independent of scan depth. `quick`,
+`standard`, and `deep` control coverage; guarded review controls which effects
+may be executed.
 
 ```bash
-strix --target https://example.test --safety-mode guarded
+strix --target https://example.test
 ```
 
-## Modes
+Guarded review permits non-destructive interaction after contextual review,
+including injection probes, reconnaissance, enumeration, and fuzzing. Actions
+judged destructive or persistent are blocked.
 
-| Mode | Behavior |
-| --- | --- |
-| `off` | Current autonomous behavior. Local directories are mounted live and writable. |
-| `guarded` | Allows non-destructive interaction after contextual review, including in-scope offensive testing — injection probes, recon, enumeration, fuzzing. Actions judged destructive or persistent (data or state change, account changes, file writes, stored payloads) are blocked. |
-| `observe` | Passive target interaction only. Form submission, authentication, uploads, mutating requests, and state-changing controls are blocked. |
+## Disabling Safety
 
-`off` is the default for backward compatibility. Configure a default with
-`STRIX_SAFETY_MODE` or select a mode for one run with `--safety-mode`.
+Use the explicit dangerous opt-out only when external containment makes it
+necessary:
+
+```bash
+strix --target https://example.test --dangerously-disable-safety
+```
+
+This disables both action review and workspace isolation. Local directories are
+mounted live and writable. A run created with safety disabled requires the flag
+again when resumed; a guarded run cannot be downgraded while resuming.
 
 ## Contextual Review
 
@@ -35,31 +42,47 @@ is used, the model's next response must be the final decision.
 
 The review is bounded to at most two model turns and one optional inspection
 call. Timeouts, malformed decisions, a second tool call, incomplete evidence,
-or low-confidence approval fail closed.
+and reviewer failures fail closed.
 
-In guarded mode the reviewer judges an action by its effect on the target, not
-by the technique it uses. Offensive testing against an in-scope target is the
-authorized purpose of the tool, so a read-only injection probe (a boolean,
+In the interactive TUI, the reviewer can defer when complete evidence still
+leaves genuine ambiguity about whether an exact action is dangerous. Strix then
+pauses that tool call and asks the user to approve or deny it. Denial is selected
+by default, Escape denies, and the request waits until it is answered, the agent
+is stopped, or Strix exits. Approval applies only to the frozen call shown in
+the prompt; actions too large to display exactly must be split into smaller
+tool calls. Deterministic blocks, incomplete evidence, review errors, and
+actions confidently judged dangerous cannot be overridden.
+
+Non-interactive runs have no human approval channel. Ambiguity and
+low-confidence decisions continue to block, preserving fail-closed autonomous
+behavior.
+
+The reviewer judges an action by its effect, not by the technique it uses or by
+whether a hostname appears in target scope. A read-only injection probe (a boolean,
 `UNION SELECT`, or time-based payload), a reflected-input test, or recon passes;
 a payload that writes or destroys (`DROP`, `DELETE`, `INSERT`, `INTO OUTFILE`,
 stacked statements, command execution), a mutating request, or any persistent
-change is blocked. When complete evidence does not settle whether the effect is
-destructive, persistent, or in scope, the action is blocked.
+change is blocked or, in the TUI, deferred when its effect is genuinely ambiguous.
+
+Scope still controls what Strix actively tests, but the safety reviewer is not a
+scope enforcement layer. Ordinary passive requests to research services such as
+`crt.sh`, DNS and WHOIS, package registries, search, and public documentation are
+allowed when they support an authorized target. Those services do not become
+targets for scanning or exploitation.
 
 ## Deterministic Rules
 
 Some outcomes never reach the model. Destructive commands, environment
 overrides that change which code an interpreter loads (`PYTHONPATH`,
-`LD_PRELOAD`, `AGENT_BROWSER_SESSION`, and similar), blocked browser actions,
-and mutating requests in `observe` mode are refused outright. A small set of
+`LD_PRELOAD`, `AGENT_BROWSER_SESSION`, and similar), and blocked browser actions
+are refused outright. A small set of
 read-only commands is allowed outright, but only when its options are also
 read-only: `rg --pre` and anything else that hands the command another program
 to run goes to review instead.
 
 Browser observation commands are allowed outright only in the form that just
 reads: `tab` lists tabs, but `tab new <url>` navigates and `tab close` discards
-page state, so a grouped verb with a subcommand goes to review and is blocked
-in `observe`.
+page state, so a grouped verb with a subcommand goes to review.
 
 Commands that wrap another program (`sudo`, `timeout`, `xargs`, `nohup`, and
 similar) and interactive `write_stdin` payloads cannot be resolved to a single
@@ -85,10 +108,10 @@ than reviewed against an empty evidence packet.
 When a command reads a workspace data file — through input redirection
 (`while read … done < hosts.txt`) or a target-list flag (`ffuf -w words.txt`,
 `httpx -l hosts.txt`) — that file's contents are attached to the packet so the
-reviewer can check the entries, queried hosts or fuzz inputs, against scope
-instead of blocking because it can't see them. Only workspace-resident files are
-read; an oversize file is attached truncated. An authorized domain covers its
-subdomains.
+reviewer can assess the exact entries, queried hosts, or fuzz inputs instead of
+blocking because it cannot see them. Only workspace-resident files are read; an
+oversize file is attached truncated. Any workspace change while the action is
+under review or awaiting approval invalidates the decision.
 
 Browser automation inside scripts is blocked in safety modes. Issue browser
 operations as individual raw `agent-browser` commands so each action can be
@@ -113,7 +136,7 @@ and submit steps with credentials supplied in the initial user instruction.
 
 ## Workspace Isolation
 
-For `guarded` and `observe`, user-owned local directories are copied into:
+By default, user-owned local directories are copied into:
 
 ```text
 strix_runs/<run>/.state/workspaces/<name>

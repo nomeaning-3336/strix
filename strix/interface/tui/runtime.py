@@ -79,7 +79,7 @@ class GoTuiRuntime:
             "run_name": self.args.run_name,
             "diff_scope": self.args.diff_scope,
             "scan_mode": self.args.scan_mode,
-            "safety_mode": getattr(self.args, "safety_mode", "off"),
+            "safety_mode": getattr(self.args, "safety_mode", "guarded"),
             "non_interactive": False,
             "local_sources": self.args.local_sources or [],
             "scope_mode": self.args.scope_mode,
@@ -183,6 +183,7 @@ class GoTuiRuntime:
                 max_turns=self.args.max_turns,
                 max_budget_usd=self.args.max_budget_usd,
                 event_sink=self.capture_event,
+                safety_approval_callback=self.controller.safety_approval_callback,
             )
             await self._sync_agent_state()
             if self.controller.scan_state == "running":
@@ -236,6 +237,13 @@ class GoTuiRuntime:
         changed = self.live_view.flush_user_instruction() or changed
 
         roots = [agent_id for agent_id, parent_id in parent_of.items() if parent_id is None]
+        active_agents = {
+            agent_id
+            for agent_id, status in statuses.items()
+            if status in {"running", "waiting", "budget_paused"}
+        }
+        approval_agents = await self.controller.safety_approval_agent_ids()
+        await self.controller.deny_safety_approvals_for_agents(approval_agents - active_agents)
         root_id = roots[0] if roots else None
         root_status = statuses.get(root_id) if root_id is not None else None
         report_status = (
@@ -298,6 +306,7 @@ class GoTuiRuntime:
 
     async def quit(self) -> None:
         self.controller.close_viewer()
+        await self.controller.cancel_pending_safety_approvals()
         self.coordinator.mark_shutting_down()
         scan_task = self.scan_task
         if scan_task is not None:

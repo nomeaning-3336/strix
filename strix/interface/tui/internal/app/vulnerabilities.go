@@ -207,6 +207,8 @@ func (m Model) modalView() string {
 		return m.confirmView("🛑 Stop '"+name+"'?", 30, mid, mid)
 	case modalConfirmMount:
 		return m.mountConfirmView()
+	case modalSafetyApproval:
+		return m.safetyApprovalView()
 	case modalVulnerability:
 		if len(m.snapshot.Vulnerabilities) == 0 {
 			return ""
@@ -234,6 +236,54 @@ func (m Model) mountConfirmView() string {
 	body := render.Col(white).Render(truncatePath(dir, width-4)) + "\n" +
 		render.Dim().Render("writable in the sandbox")
 	return m.cornerPrompt(title, body, width, "Confirm", "Cancel")
+}
+
+// safetyApprovalView keeps the blocking choice visible without obscuring the
+// live trace. Both untrusted display fields have already been sanitized by the
+// backend and are clipped again to preserve the compact prompt.
+func (m Model) safetyApprovalPanel() string {
+	pending := m.snapshot.PendingApproval
+	if pending == nil {
+		return ""
+	}
+	width := min(64, max(28, m.width-4))
+	contentWidth := max(1, width-4)
+	action := wrapBlock(pending.Action, contentWidth)
+	reason := wrapBlock(pending.Reason, contentWidth)
+	title := render.Bold(amber).Render("△ Safety approval required")
+	metadata := strings.TrimSpace(strings.Join([]string{pending.AgentID, pending.ToolName, pending.Risk}, " "))
+	body := ""
+	if metadata != "" {
+		body = render.Dim().Render(truncate(metadata, contentWidth)) + "\n"
+	}
+	body += render.Bold(white).Render(action)
+	if reason != "" {
+		body += "\n" + render.Dim().Render(reason)
+	}
+	if pending.Digest != "" {
+		body += "\n" + render.Dim().Render("call "+truncate(pending.Digest, 16))
+	}
+	return m.cornerPrompt(title, body, width, "Approve", "Deny")
+}
+
+func (m Model) safetyApprovalFits() bool {
+	panel := m.safetyApprovalPanel()
+	if panel == "" || m.width <= 0 || m.height <= 0 {
+		return false
+	}
+	_, top, width, height := m.cornerViewBounds(panel)
+	return width <= m.width && top+height <= m.inputTop()
+}
+
+func (m Model) safetyApprovalView() string {
+	panel := m.safetyApprovalPanel()
+	if panel == "" || m.safetyApprovalFits() {
+		return panel
+	}
+	width := min(64, max(28, m.width-4))
+	title := render.Bold(amber).Render("△ Safety approval required")
+	body := render.Dim().Render("Resize the terminal to inspect the complete action.\nApproval is disabled; denial remains available.")
+	return m.cornerPrompt(title, body, width, "Approve", "Deny")
 }
 
 // truncatePath keeps the tail of a path visible, which is the part that

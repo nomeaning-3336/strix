@@ -113,6 +113,7 @@ def test_resume_restores_a_target_less_workspace_mount(
             "workspace_mount": str(work),
             "instruction": "audit the auth flow",
             "scan_mode": "deep",
+            "safety_mode": "guarded",
         },
     )
     monkeypatch.setattr(sys, "argv", ["strix", "--resume", "pentest_abcd"])

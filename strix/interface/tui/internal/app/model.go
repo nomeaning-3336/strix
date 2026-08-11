@@ -63,6 +63,7 @@ const (
 	modalQuit
 	modalStop
 	modalConfirmMount
+	modalSafetyApproval
 	modalVulnerability
 )
 
@@ -131,6 +132,7 @@ type Model struct {
 	seenMessages           map[string]bool
 	vulnerabilityCopied    bool
 	vulnerabilityCopyError string
+	safetyApprovalID       string
 }
 
 var (

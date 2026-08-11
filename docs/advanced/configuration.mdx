@@ -76,9 +76,9 @@ affecting the agents that do the actual testing.
 
 ## Safety Review
 
-<ParamField path="STRIX_SAFETY_MODE" default="off" type="string">
-  Default action policy. Valid values: `off`, `guarded`, and `observe`.
-</ParamField>
+Action review and isolated workspaces are enabled by default. There is no
+persistent configuration switch for disabling them. Use
+`--dangerously-disable-safety` explicitly for each run that must bypass safety.
 
 <ParamField path="STRIX_SAFETY_MODEL" type="string">
   Optional model used for contextual action review. Falls back to `STRIX_LLM`.
