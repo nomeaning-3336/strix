@@ -567,18 +567,21 @@ async def test_interactive_incomplete_evidence_requires_the_inspection_call(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_patched_sdk")
-async def test_incomplete_allow_after_inspection_is_deferred_to_human(
+async def test_confident_allow_after_inspection_is_respected_despite_a_hard_gap(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
+    # Once the reviewer has inspected, a confident allow stands even with a hard
+    # gap — it judged the missing evidence irrelevant to the effect (e.g. an
+    # output file that does not exist yet).
     async def fake_run(_agent: Any, *, context: Any, **_kwargs: Any) -> _Result:
         context.used = True
         return _Result(
             SafetyVerdict(
                 decision="allow",
-                risk="medium",
-                categories=["incomplete_evidence"],
-                reason="available artifacts look non-destructive",
+                risk="low",
+                categories=["read_only_reconnaissance"],
+                reason="the missing file is an output the command creates, not an input",
                 confidence=0.95,
             )
         )
@@ -590,10 +593,41 @@ async def test_incomplete_allow_after_inspection_is_deferred_to_human(
         human_approval_available=True,
     )
 
+    assert decision.allowed is True
+    assert decision.deferred is False
+    assert "the missing file is an output the command creates" in decision.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_unsure_allow_on_a_hard_gap_still_defers_to_human(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    # The confidence gate is the backstop: an allow the reviewer is not confident
+    # in does not slip through on a hard gap, it defers.
+    async def fake_run(_agent: Any, *, context: Any, **_kwargs: Any) -> _Result:
+        context.used = True
+        return _Result(
+            SafetyVerdict(
+                decision="allow",
+                risk="medium",
+                categories=["incomplete_evidence"],
+                reason="probably fine but I am not sure",
+                confidence=0.5,
+            )
+        )
+
+    monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        _incomplete_bundle(tmp_path, "case-unsure"),
+        human_approval_available=True,
+    )
+
     assert decision.allowed is False
     assert decision.deferred is True
-    assert "dynamic network destination" in decision.reason
-    assert "available artifacts look non-destructive" in decision.reason
+    assert "0.75 threshold" in decision.reason
 
 
 @pytest.mark.asyncio
@@ -863,9 +897,12 @@ def test_prompt_judges_security_testing_by_effect_not_technique() -> None:
     # Ambiguity only reaches a human when an approval channel exists.
     assert "Return defer only when approval is available" in prompt
     assert "Without human approval, ambiguity must block" in normalized
-    assert "MUST use run_inspection exactly once" in prompt
+    assert "MUST use run_inspection exactly once" in normalized
+    # A hard gap is judged by relevance, not blocked outright.
+    assert "A hard gap is missing evidence, not proof of danger" in normalized
+    assert "do not block or defer merely because a gap remains" in normalized
+    assert "an output that does not exist yet" in normalized
     # Non-negotiable guardrails survive.
-    assert "Never allow when completeness.hard_gaps is non-empty" in prompt
     assert 'do not defer merely because completeness.status is "reviewable"' in normalized
     assert "Deterministic policy blocks cannot be overridden" in prompt
     assert "analysis.mutating_request" in prompt
