@@ -14,6 +14,7 @@ from strix.safety.evidence import (
     _deterministic_command_rules,
     _PythonFacts,
     compile_evidence,
+    compile_network_evidence,
     parse_command,
 )
 
@@ -1463,3 +1464,55 @@ def test_heredoc_interpreter_is_split_blocked() -> None:
     block = _deterministic_command_rules(parse_command("python3 - <<'PY'\nimport os\nPY"))
     assert block is not None
     assert "split" in block
+
+
+def test_compile_network_evidence_freezes_a_mutating_request() -> None:
+    bundle = compile_network_evidence(
+        case_id="net-1",
+        tool_name="repeat_request",
+        request_id="req-9",
+        modifications={"body": "id=1"},
+        effective={
+            "method": "post",
+            "url": "https://target.test/api/orders",
+            "headers": {"Content-Type": "application/json"},
+            "body": "id=1",
+        },
+        mode="guarded",
+        scope={"authorized_targets": [{"value": "https://target.test"}]},
+        user_instruction="",
+        settings=SafetySettings(),
+    )
+    try:
+        assert bundle.complete is True
+        assert bundle.incomplete_reasons == []
+        http = bundle.packet["pending_action"]["http_request"]
+        assert http["method"] == "POST"
+        assert http["url"] == "https://target.test/api/orders"
+        assert http["body"] == "id=1"
+        # A mutating verb is surfaced as the hint the reviewer keys off.
+        assert bundle.mutating_request == "HTTP POST"
+        assert bundle.packet["analysis"]["mutating_request"] == "HTTP POST"
+        assert bundle.workspace_evidence is False
+    finally:
+        bundle.cleanup()
+
+
+def test_compile_network_evidence_marks_a_read_only_get_non_mutating() -> None:
+    bundle = compile_network_evidence(
+        case_id="net-2",
+        tool_name="repeat_request",
+        request_id="req-2",
+        modifications={},
+        effective={"method": "GET", "url": "https://target.test/health", "headers": {}, "body": ""},
+        mode="guarded",
+        scope={},
+        user_instruction="",
+        settings=SafetySettings(),
+    )
+    try:
+        assert bundle.complete is True
+        assert bundle.mutating_request is None
+        assert bundle.packet["pending_action"]["mutating_request"] is None
+    finally:
+        bundle.cleanup()

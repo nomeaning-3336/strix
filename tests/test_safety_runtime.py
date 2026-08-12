@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import strix.tools.proxy.tools as proxy_tools
 from strix.config.settings import SafetySettings
 from strix.safety.evidence import EvidenceBundle
 from strix.safety.runtime import SafetyRuntime
@@ -210,7 +211,7 @@ async def test_passive_browser_read_keeps_the_fast_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_guarded_repeat_request_fails_closed(tmp_path: Path) -> None:
+async def test_repeat_request_without_id_fails_closed(tmp_path: Path) -> None:
     async def invoke(_ctx: Any, _raw_input: str) -> str:
         return "bad"
 
@@ -223,7 +224,138 @@ async def test_guarded_repeat_request_fails_closed(tmp_path: Path) -> None:
 
     payload = json.loads(result)
     assert payload["status"] == "blocked"
-    assert "effective method" in payload["safety"]["reason"]
+    assert "request_id" in payload["safety"]["reason"]
+
+
+def _patch_resolver(monkeypatch: pytest.MonkeyPatch, effective: dict[str, Any] | None) -> None:
+    async def _resolve(_ctx: Any, _request_id: str, _modifications: dict[str, Any]) -> Any:
+        return effective
+
+    monkeypatch.setattr(proxy_tools, "resolve_effective_request_for_ctx", _resolve)
+
+
+@pytest.mark.asyncio
+async def test_repeat_request_is_reviewed_and_sent_when_allowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_resolver(
+        monkeypatch,
+        {"method": "GET", "url": "https://target.test/health", "headers": {}, "body": ""},
+    )
+    runtime = _runtime(tmp_path, "guarded")
+    reviewer = _StubReviewer(
+        decision=SafetyDecision(allowed=True, source="reviewer", reason="read-only GET")
+    )
+    runtime._reviewer = reviewer
+    sent: list[str] = []
+
+    async def invoke(_ctx: Any, raw_input: str) -> str:
+        sent.append(raw_input)
+        return "response"
+
+    raw = json.dumps({"request_id": "req-1", "modifications": {}})
+    result = await runtime.invoke_mutating_tool(
+        ctx=_ctx(), tool_name="repeat_request", raw_input=raw, invoke_tool=invoke
+    )
+
+    assert result == "response"
+    assert sent == [raw]
+    assert reviewer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_repeat_request_blocked_by_reviewer_is_not_sent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_resolver(
+        monkeypatch,
+        {"method": "DELETE", "url": "https://target.test/api/users/1", "headers": {}, "body": ""},
+    )
+    runtime = _runtime(tmp_path, "guarded")
+    runtime._reviewer = _StubReviewer(
+        decision=SafetyDecision(
+            allowed=False, source="reviewer", reason="DELETE removes target state"
+        )
+    )
+    sent: list[str] = []
+
+    async def invoke(_ctx: Any, raw_input: str) -> str:
+        sent.append(raw_input)
+        return "response"
+
+    result = await runtime.invoke_mutating_tool(
+        ctx=_ctx(),
+        tool_name="repeat_request",
+        raw_input=json.dumps({"request_id": "req-1"}),
+        invoke_tool=invoke,
+    )
+
+    assert json.loads(result)["status"] == "blocked"
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_repeat_request_unresolvable_fails_closed_without_review(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_resolver(monkeypatch, None)
+    runtime = _runtime(tmp_path, "guarded")
+    reviewer = _StubReviewer(decision=SafetyDecision(allowed=True, source="reviewer", reason="x"))
+    runtime._reviewer = reviewer
+    sent: list[str] = []
+
+    async def invoke(_ctx: Any, raw_input: str) -> str:
+        sent.append(raw_input)
+        return "response"
+
+    result = await runtime.invoke_mutating_tool(
+        ctx=_ctx(),
+        tool_name="repeat_request",
+        raw_input=json.dumps({"request_id": "gone"}),
+        invoke_tool=invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert "could not be resolved" in payload["safety"]["reason"]
+    assert reviewer.calls == 0
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_deferred_repeat_request_prompts_with_its_own_tool_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _patch_resolver(
+        monkeypatch,
+        {"method": "POST", "url": "https://target.test/api/orders", "headers": {}, "body": "{}"},
+    )
+    requests: list[SafetyApprovalRequest] = []
+
+    async def approve(request: SafetyApprovalRequest) -> bool:
+        requests.append(request)
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+    sent: list[str] = []
+
+    async def invoke(_ctx: Any, raw_input: str) -> str:
+        sent.append(raw_input)
+        return "response"
+
+    result = await runtime.invoke_mutating_tool(
+        ctx=_ctx(),
+        tool_name="repeat_request",
+        raw_input=json.dumps({"request_id": "req-1"}),
+        invoke_tool=invoke,
+    )
+
+    assert result == "response"
+    assert sent  # approved, so it was sent
+    assert len(requests) == 1
+    assert requests[0].tool_name == "repeat_request"
+    assert requests[0].action == "POST https://target.test/api/orders"
 
 
 class _Sandbox:

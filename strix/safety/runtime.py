@@ -16,7 +16,12 @@ from uuid import uuid4
 
 from strix.core.paths import RUNTIME_STATE_DIR_NAME
 from strix.safety.audit import SafetyAudit
-from strix.safety.evidence import EvidenceBundle, compile_evidence, parse_command
+from strix.safety.evidence import (
+    EvidenceBundle,
+    compile_evidence,
+    compile_network_evidence,
+    parse_command,
+)
 from strix.safety.inspection import DockerInspectionRunner, InspectionRunner
 from strix.safety.reviewer import SafetyReviewer
 from strix.safety.types import SafetyApprovalCallback, SafetyApprovalRequest, SafetyDecision
@@ -49,6 +54,7 @@ class _ExecReview:
     workspace_evidence: bool
     evidence_fingerprint: str
     requested_workspace_paths: tuple[str, ...]
+    tool_name: str = "exec_command"
 
 
 class SafetyRuntime:
@@ -900,7 +906,7 @@ class SafetyRuntime:
             case_id=decision.case_id,
             tool_call_id=tool_call_id,
             agent_id=agent_id,
-            tool_name="exec_command",
+            tool_name=review.tool_name,
             action=review.action_preview,
             digest=str(review.summary["action_digest"]),
             reason=decision.reason,
@@ -915,7 +921,7 @@ class SafetyRuntime:
         await self._audit.record(
             agent_id=agent_id,
             tool_call_id=tool_call_id,
-            tool_name="exec_command",
+            tool_name=review.tool_name,
             decision=decision,
             summary=requested_summary,
         )
@@ -1016,23 +1022,194 @@ class SafetyRuntime:
             return await invoke_tool(ctx, raw_input)
         case_id = f"safety-{uuid4().hex[:12]}"
         if tool_name == "repeat_request":
-            decision = SafetyDecision(
-                allowed=False,
-                source="deterministic",
-                reason=(
-                    "repeat_request is blocked in guarded mode until the final effective method, "
-                    "destination, headers, and body can be compiled before dispatch."
-                ),
-                categories=("unresolved_network_mutation",),
-                case_id=case_id,
+            # The effective request is deterministic and immutable, so it is
+            # compiled and reviewed like any other network action rather than
+            # blocked outright.
+            return await self._review_repeat_request(
+                ctx=ctx, raw_input=raw_input, invoke_tool=invoke_tool, case_id=case_id
             )
-            return self.blocked_result(decision)
         async with self._workspace_lock:
             # Guarded workspaces are isolated copies; patches remain local to the run.
             try:
                 return await invoke_tool(ctx, raw_input)
             finally:
                 self._workspace_epoch += 1
+
+    async def _review_repeat_request(
+        self,
+        *,
+        ctx: Any,
+        raw_input: str,
+        invoke_tool: InvokeTool,
+        case_id: str,
+    ) -> Any:
+        agent_id = str(getattr(ctx, "context", {}).get("agent_id", "unknown"))
+        tool_call_id = str(getattr(ctx, "tool_call_id", "unknown"))
+        try:
+            arguments = json.loads(raw_input)
+        except (json.JSONDecodeError, TypeError):
+            arguments = None
+        request_id = arguments.get("request_id") if isinstance(arguments, dict) else None
+        raw_mods = arguments.get("modifications") if isinstance(arguments, dict) else None
+        modifications = raw_mods if isinstance(raw_mods, dict) else {}
+
+        if not isinstance(request_id, str) or not request_id:
+            return await self._block_network(
+                agent_id,
+                tool_call_id,
+                case_id,
+                "repeat_request did not name a request_id to resolve for review.",
+            )
+
+        effective = await self._resolve_repeat_request(ctx, request_id, modifications)
+        if effective is None:
+            return await self._block_network(
+                agent_id,
+                tool_call_id,
+                case_id,
+                "The captured request could not be resolved for review — the request id is "
+                "unknown or the proxy is unavailable.",
+            )
+
+        bundle = compile_network_evidence(
+            case_id=case_id,
+            tool_name="repeat_request",
+            request_id=request_id,
+            modifications=modifications,
+            effective=effective,
+            mode=self.mode,
+            scope=self.scope,
+            user_instruction=self.user_instruction,
+            settings=self.settings,
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+        )
+        try:
+            decision = await self._decide_bundle(bundle, case_id)
+            method = str(effective.get("method") or "").upper()
+            url = str(effective.get("url") or "")
+            canonical = json.dumps(
+                {
+                    "method": method,
+                    "url": url,
+                    "headers": effective.get("headers") or {},
+                    "body": effective.get("body") or "",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            summary: dict[str, Any] = {
+                "action_digest": self._command_digest(canonical),
+                "request_id_digest": self._command_digest(str(request_id)),
+                "http_method": method,
+                "mutating_request": bundle.mutating_request,
+                "complete": bundle.complete,
+            }
+            review = _ExecReview(
+                decision=decision,
+                summary=summary,
+                action_preview=self._network_action_preview(method, url),
+                workspace_epoch=0,
+                workspace_evidence=False,
+                evidence_fingerprint="",
+                requested_workspace_paths=(),
+                tool_name="repeat_request",
+            )
+        finally:
+            bundle.cleanup()
+
+        review = await self._resolve_approval(ctx=ctx, review=review)
+        await self._audit.record(
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="repeat_request",
+            decision=review.decision,
+            summary=review.summary,
+        )
+        if not review.decision.allowed:
+            return self.blocked_result(review.decision)
+        if review.decision.source == "human" and not await self._agent_is_active(ctx, agent_id):
+            inactive = SafetyDecision(
+                allowed=False,
+                source="system",
+                reason="Approved action was cancelled because the requesting agent stopped.",
+                categories=(*review.decision.categories, "agent_inactive"),
+                case_id=review.decision.case_id,
+                risk=review.decision.risk,
+            )
+            await self._audit.record(
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="repeat_request",
+                decision=inactive,
+                summary=review.summary,
+            )
+            return self.blocked_result(inactive)
+        # The tool re-resolves through the same resolver, so the request that is
+        # sent is byte-for-byte the one that was reviewed.
+        try:
+            result = await invoke_tool(ctx, raw_input)
+        except Exception:
+            await self._audit.record(
+                agent_id=agent_id,
+                tool_call_id=tool_call_id,
+                tool_name="repeat_request",
+                decision=review.decision,
+                summary=review.summary,
+                execution_status="failed",
+            )
+            raise
+        await self._audit.record(
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="repeat_request",
+            decision=review.decision,
+            summary=review.summary,
+            execution_status="succeeded",
+        )
+        return result
+
+    async def _resolve_repeat_request(
+        self, ctx: Any, request_id: str, modifications: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        # Lazy import keeps the safety package's import graph off the proxy/caido
+        # stack; the resolver is shared so the reviewed and sent bytes match.
+        from strix.tools.proxy.tools import (  # noqa: PLC0415
+            resolve_effective_request_for_ctx,
+        )
+
+        try:
+            return await resolve_effective_request_for_ctx(ctx, request_id, modifications)
+        except Exception:
+            logger.exception("could not resolve repeat_request for safety review")
+            return None
+
+    async def _block_network(
+        self, agent_id: str, tool_call_id: str, case_id: str, reason: str
+    ) -> str:
+        decision = SafetyDecision(
+            allowed=False,
+            source="deterministic",
+            reason=reason,
+            categories=("unresolved_network_mutation",),
+            case_id=case_id,
+        )
+        await self._audit.record(
+            agent_id=agent_id,
+            tool_call_id=tool_call_id,
+            tool_name="repeat_request",
+            decision=decision,
+            summary={"complete": False},
+        )
+        return self.blocked_result(decision)
+
+    @staticmethod
+    def _network_action_preview(method: str, url: str) -> str:
+        preview = f"{method} {url}".strip()
+        if len(preview) > _MAX_APPROVAL_ACTION_CHARS:
+            preview = preview[:_MAX_APPROVAL_ACTION_CHARS]
+        return preview
 
     @staticmethod
     def blocked_result(decision: SafetyDecision) -> str:
