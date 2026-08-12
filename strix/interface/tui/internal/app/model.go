@@ -133,6 +133,8 @@ type Model struct {
 	vulnerabilityCopied    bool
 	vulnerabilityCopyError string
 	safetyApprovalID       string
+	safetyApprovalExpanded bool
+	safetyApprovalScroll   int
 }
 
 var (
@@ -334,6 +336,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.resizeVulnerabilityViewport()
 		m.ensureAgentVisible()
 		m.ensureVulnerabilityVisible()
+		m.syncSafetyApprovalPrompt()
 	case wireErrMsg:
 		if !m.quitting {
 			m.errorText = "Backend disconnected: " + msg.err.Error()
@@ -390,6 +393,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.showSplash = false
 			return m, nil
+		}
+		if m.modal == modalSafetyApproval {
+			switch msg.String() {
+			case "tab", "shift+tab", "pgup", "pgdown", "home", "end":
+				updated, cmd := m.updateMain(msg)
+				next := updated.(Model)
+				next.syncSafetyApprovalPrompt()
+				return next, cmd
+			case "up", "down":
+				if m.focus == focusAgents {
+					updated, cmd := m.updateMain(msg)
+					next := updated.(Model)
+					next.syncSafetyApprovalPrompt()
+					return next, cmd
+				}
+			}
 		}
 		if m.modal != modalNone {
 			return m.updateModal(msg)

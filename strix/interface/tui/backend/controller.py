@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     import argparse
 
     from strix.report.state import ReportState
+    from strix.safety.runtime import SafetyRuntime
     from strix.safety.types import SafetyApprovalOutcome
 
 
@@ -129,6 +130,13 @@ class TuiController:
         self._safety_approval_by_id: dict[str, _PendingSafetyApproval] = {}
         self._safety_approval_request_ids: set[str] = set()
         self._safety_approvals_closed = False
+        # Set once the running scan hands back its SafetyRuntime, so an "approve
+        # all" can switch the whole scan to dangerous (unreviewed) behavior.
+        self._safety_runtime: SafetyRuntime | None = None
+        # Latches when the user chooses "approve all": every later review is
+        # auto-approved, covering any request already in flight when the runtime
+        # was disabled and any run that registers its runtime afterwards.
+        self._safety_disabled = False
 
     def set_change_callback(self, callback: ChangeCallback) -> None:
         self._on_change = callback
@@ -147,6 +155,16 @@ class TuiController:
             self.report_state = report_state
         if scan_loop is not None:
             self.scan_loop = scan_loop
+
+    def register_safety_runtime(self, runtime: SafetyRuntime | None) -> None:
+        """Receive the running scan's SafetyRuntime so it can be disabled later.
+
+        If the user already chose "approve all" (e.g. during a previous run that
+        this call is replacing), the new runtime starts disabled too.
+        """
+        self._safety_runtime = runtime
+        if runtime is not None and self._safety_disabled:
+            runtime.disable()
 
     def begin_preparation(self) -> None:
         """Mark a directly-launched run as preparing behind the live TUI."""
@@ -208,6 +226,11 @@ class TuiController:
 
     async def safety_approval_callback(self, request: Any) -> SafetyApprovalOutcome:
         """Queue one safety-core request and wait until the TUI answers it."""
+        # Once the user has approved everything, a review that was already past
+        # the runtime's mode check when it was disabled still lands here; approve
+        # it without prompting so dangerous mode stays consistent.
+        if self._safety_disabled:
+            return True
         request_id = self._safety_request_value(request, "request_id")
         if request_id is None:
             request_id = self._safety_request_value(request, "case_id")
@@ -234,7 +257,7 @@ class TuiController:
             "reason",
             fallback_names=("reviewer_reason", "rationale"),
             default="No reason provided.",
-            max_string=1024,
+            max_string=512,
         )
         agent_id = self._safety_request_text(
             request,
@@ -242,6 +265,8 @@ class TuiController:
             default="",
             max_string=128,
         )
+        if not agent_id:
+            raise ValueError("safety approval agent_id must be a non-empty string")
         tool_name = self._safety_request_text(
             request,
             "tool_name",
@@ -334,7 +359,6 @@ class TuiController:
             model_warning = (
                 f"{model} is not a recommended frontier model; pentest quality could be degraded"
             )
-        pending_approval = self._safety_approvals[0] if self._safety_approvals else None
         state = {
             "setup_mode": self.setup_mode,
             "scan_started": self.scan_started,
@@ -345,7 +369,7 @@ class TuiController:
             "target_count": len(self.targets),
             "working_dir": str(Path.cwd()),
             "pending_mount": self.pending_workspace_mount or "",
-            "pending_approval": (
+            "pending_approvals": [
                 {
                     "request_id": pending_approval.request_id,
                     "action": pending_approval.action,
@@ -355,9 +379,9 @@ class TuiController:
                     "digest": pending_approval.digest,
                     "risk": pending_approval.risk,
                 }
-                if pending_approval is not None
-                else None
-            ),
+                for pending_approval in self._safety_approvals
+            ],
+            "safety_disabled": self._safety_disabled,
             "instruction": terminal_projection(self.instruction, max_string=2 * 1024),
             "scan_mode": self.scan_mode,
             "max_budget_usd": self.max_budget_usd,
@@ -667,18 +691,44 @@ class TuiController:
         approved = payload.get("approved")
         if not isinstance(approved, bool):
             raise TypeError("approved must be a boolean")
+        approve_all = payload.get("approve_all", False)
+        if not isinstance(approve_all, bool):
+            raise TypeError("approve_all must be a boolean")
+        # "Approve all" only makes sense as an approval; a denial cannot also
+        # green-light everything else.
+        dangerous = approve_all and approved
         async with self._safety_approval_lock:
-            if not self._safety_approvals:
-                raise RuntimeError("No safety approval is pending")
-            pending = self._safety_approvals[0]
-            if pending.request_id != request_id:
+            pending = self._safety_approval_by_id.get(request_id)
+            if pending is None:
                 raise RuntimeError(f"Safety approval request is stale or unknown: {request_id}")
             if pending.future.done():
                 raise RuntimeError(f"Safety approval request was already resolved: {request_id}")
-            self._safety_approvals.popleft()
+            self._safety_approvals.remove(pending)
             del self._safety_approval_by_id[request_id]
             pending.future.set_result(approved)
-        return {"request_id": request_id, "approved": approved}
+            if dangerous:
+                self._enter_dangerous_mode_locked()
+        if dangerous:
+            self.add_message(
+                "Safety review disabled — approving every action for the rest of this run.",
+                level="warning",
+            )
+        return {"request_id": request_id, "approved": approved, "approve_all": dangerous}
+
+    def _enter_dangerous_mode_locked(self) -> None:
+        """Skip review for the rest of the run. Call while holding the approval lock.
+
+        Disabling the runtime stops new reviews from ever reaching a prompt, and
+        approving every queued request releases the ones already waiting here.
+        """
+        self._safety_disabled = True
+        if self._safety_runtime is not None:
+            self._safety_runtime.disable()
+        for other in list(self._safety_approvals):
+            if not other.future.done():
+                other.future.set_result(True)
+            self._safety_approval_by_id.pop(other.request_id, None)
+        self._safety_approvals.clear()
 
     @staticmethod
     def _required_string(payload: dict[str, Any], name: str) -> str:

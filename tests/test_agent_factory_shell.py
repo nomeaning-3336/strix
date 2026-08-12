@@ -123,6 +123,37 @@ def test_function_tools_are_result_bounded() -> None:
     assert getattr(by_name["think"], "_strix_bounded", False) is True
 
 
+def test_only_effectful_static_tools_are_safety_guarded() -> None:
+    # Pins the safety classification of the base tool set: the one effectful
+    # static function tool is guarded for pre-execution review, while internal
+    # bookkeeping and read-only tools run unreviewed. Guarding a read-only tool
+    # would serialize it on the workspace lock and churn other agents' review
+    # epochs, so a new effectful tool must be added to _MUTATING_STATIC_TOOLS.
+    agent = factory.build_strix_agent(is_root=True)
+    by_name = {t.name: t for t in agent.tools}
+
+    assert getattr(by_name["repeat_request"], "_strix_safety_guarded", False) is True
+    for name in ("think", "web_search", "list_requests", "create_note", "view_agent_graph"):
+        assert getattr(by_name[name], "_strix_safety_guarded", False) is False, name
+
+
+def test_safety_guard_honors_the_sdk_needs_approval_signal() -> None:
+    async def invoke(_ctx: Any, _raw: str) -> str:
+        return "ok"
+
+    future_tool = FunctionTool(
+        name="some_future_effectful_tool",
+        description="test tool",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke,
+        needs_approval=True,
+    )
+
+    guarded = factory._with_safety_guard(future_tool)
+
+    assert getattr(guarded, "_strix_safety_guarded", False) is True
+
+
 def _capturing_stdin_tool(captured: dict[str, str]) -> FunctionTool:
     async def invoke(_ctx: Any, raw_input: str) -> str:
         captured["raw_input"] = raw_input

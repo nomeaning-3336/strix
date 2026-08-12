@@ -17,6 +17,7 @@ from strix.config.models import (
     model_supports_reasoning,
     request_timeout_extra_args,
 )
+from strix.config.settings import DEFAULT_SAFETY_MODE
 from strix.core.sessions import scrub_images_from_items
 
 
@@ -81,7 +82,7 @@ def build_root_task(scan_config: dict[str, Any]) -> str:
     targets = scan_config.get("targets", []) or []
     diff_scope = scan_config.get("diff_scope") or {}
     user_instructions = scan_config.get("user_instructions", "") or ""
-    isolated_workspace = scan_config.get("safety_mode", "guarded") != "off"
+    isolated_workspace = scan_config.get("safety_mode", DEFAULT_SAFETY_MODE) != "off"
 
     sections: dict[str, list[str]] = {
         "Repositories": [],

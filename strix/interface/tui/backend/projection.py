@@ -151,14 +151,17 @@ def bounded_state_projection(state: dict[str, Any]) -> dict[str, Any]:
     state["model_warning"] = terminal_projection(state["model_warning"], max_string=256)
     state["caido_url"] = terminal_projection(state["caido_url"], max_string=256)
     state["viewer_url"] = terminal_projection(state["viewer_url"], max_string=256)
-    pending_approval = state.get("pending_approval")
-    if isinstance(pending_approval, dict):
-        pending_approval["action"] = terminal_projection(
-            pending_approval.get("action", ""), max_string=512
-        )
-        pending_approval["reason"] = terminal_projection(
-            pending_approval.get("reason", ""), max_string=512
-        )
+    pending_approvals = state.get("pending_approvals")
+    if isinstance(pending_approvals, list):
+        for pending_approval in pending_approvals:
+            if not isinstance(pending_approval, dict):
+                continue
+            pending_approval["action"] = terminal_projection(
+                pending_approval.get("action", ""), max_string=512
+            )
+            pending_approval["reason"] = terminal_projection(
+                pending_approval.get("reason", ""), max_string=512
+            )
     if encoded_size(state) <= STATE_TARGET_BYTES:
         return state
 
@@ -170,7 +173,8 @@ def bounded_state_projection(state: dict[str, Any]) -> dict[str, Any]:
         "scan_state": state["scan_state"],
         "targets": state["targets"][:4],
         "target_count": state["target_count"],
-        "pending_approval": state.get("pending_approval"),
+        "pending_approvals": state.get("pending_approvals", []),
+        "safety_disabled": state.get("safety_disabled", False),
         "instruction": terminal_projection(state["instruction"], max_string=128),
         "scan_mode": state["scan_mode"],
         "max_budget_usd": state["max_budget_usd"],

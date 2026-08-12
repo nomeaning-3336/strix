@@ -128,7 +128,7 @@ func (c *Client) Read() (protocol.Envelope, error) {
 	if err != nil {
 		return protocol.Envelope{}, err
 	}
-	if envelope.Type != "collection_bootstrap" && envelope.Type != "collection_delta" && size > maxCommandBytes {
+	if envelope.Type != "collection_bootstrap" && envelope.Type != "collection_delta" && envelope.Type != "state" && size > maxCommandBytes {
 		return protocol.Envelope{}, fmt.Errorf("TUI control message exceeds %d bytes", maxCommandBytes)
 	}
 	return envelope, nil

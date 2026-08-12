@@ -27,31 +27,34 @@ _URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.IGNORECASE)
 # several commands. `$(` and a backtick are also active inside double quotes.
 _SHELL_OPERATOR_CHARS = frozenset(";&|\n\r<>")
 _SHELL_SEPARATOR_CHARS = frozenset(";&|\n\r")
-# A single `<` input redirection (an optional fd digit, not `<<` heredoc, not `<(`
-# process substitution), capturing the file it reads. Data a command consumes this
-# way — a host list, a wordlist — is evidence the reviewer needs to judge scope.
-_REDIRECT_INPUT_RE = re.compile(
-    r"""(?<![<])\d?<(?![<(])\s*(?P<file>"[^"]+"|'[^']+'|[^\s;|&<>()]+)""",
-)
 # Flags whose value is a file of targets a command reads — wordlists, host lists.
 # Recon tools (ffuf, httpx, nuclei, subfinder, dnsx, gobuster) route their input this
 # way rather than through a `<` redirect, so the same evidence must be collected. The
 # value is only read when it resolves to a workspace file, so a boolean `-l` (wc, grep)
 # whose next token is not a file collects nothing.
-_LIST_FILE_FLAGS = frozenset(
-    {
-        "-w",
-        "-l",
-        "-iL",
-        "-list",
-        "-wordlist",
-        "--list",
-        "--wordlist",
-        "--input-file",
-        "--input",
-    }
-)
+_LIST_FILE_FLAGS: dict[str, frozenset[str]] = {
+    "dnsx": frozenset({"-l", "-list", "--list"}),
+    "ffuf": frozenset({"-w", "-wordlist", "--wordlist"}),
+    "gobuster": frozenset({"-w", "--wordlist"}),
+    "httpx": frozenset({"-l", "-list", "--list", "--input-file"}),
+    "masscan": frozenset({"-iL"}),
+    "naabu": frozenset({"-l", "-list", "--list"}),
+    "nmap": frozenset({"-iL"}),
+    "nuclei": frozenset({"-l", "-list", "--list", "--input"}),
+    "subfinder": frozenset({"-dL"}),
+}
 _SCRIPT_SUFFIXES = (".py", ".sh", ".bash", ".js", ".mjs", ".rb", ".pl")
+_INPUT_FILE_SUFFIXES = (
+    ".csv",
+    ".html",
+    ".json",
+    ".jsonl",
+    ".list",
+    ".txt",
+    ".xml",
+    ".yaml",
+    ".yml",
+)
 # `awk` is intentionally absent: its program is an inline positional argument, not a
 # `-c`/script-file the entrypoint reader can resolve, so it belongs with the data tools.
 _INTERPRETERS = frozenset(
@@ -124,6 +127,9 @@ _DATA_COMMANDS = frozenset(
         "yq",
         "zcat",
     }
+)
+_POSITIONAL_INPUT_COMMANDS = frozenset(
+    {"awk", "cat", "cut", "head", "jq", "sort", "tail", "uniq", "wc", "yq"}
 )
 # Versioned names (`python3.12`, `node20`) are the same interpreters. Matching them here
 # rather than enumerating versions keeps a new point release from silently becoming an
@@ -274,6 +280,48 @@ _REQUEST_BODY_OPTIONS = frozenset(
         "-F",
         "-T",
         "-d",
+    }
+)
+_REQUEST_DIRECT_FILE_OPTIONS = frozenset({"--post-file", "--upload-file", "-T"})
+_REQUEST_AT_FILE_OPTIONS = frozenset(
+    {"--data", "--data-ascii", "--data-binary", "--data-urlencode", "--json", "-d"}
+)
+_REQUEST_FORM_OPTIONS = frozenset({"--form", "-F"})
+_NETWORK_CALL_METHODS = frozenset(
+    {
+        "delete",
+        "get",
+        "head",
+        "open",
+        "options",
+        "patch",
+        "post",
+        "put",
+        "request",
+        "send",
+        "stream",
+        "urlopen",
+        "urlretrieve",
+    }
+)
+_SHELL_CONTROL_AND_BUILTINS = frozenset(
+    {
+        "case",
+        "cd",
+        "do",
+        "done",
+        "echo",
+        "elif",
+        "else",
+        "esac",
+        "fi",
+        "for",
+        "if",
+        "printf",
+        "set",
+        "then",
+        "until",
+        "while",
     }
 )
 # Options whose behavior is read-only for the specific command they belong to. The
@@ -608,6 +656,38 @@ def _shell_segments(command: str) -> list[str]:
     return [segment.strip() for segment in segments if segment.strip()]
 
 
+def _shell_separators(command: str) -> list[str]:
+    """Return unquoted top-level command separators without expanding shell syntax."""
+    separators: list[str] = []
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote is not None:
+            if char == quote:
+                quote = None
+            elif char == "\\" and quote == '"':
+                index += 1
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char in _SHELL_SEPARATOR_CHARS:
+            operator = command[index : index + 2]
+            if operator in {"&&", "||"}:
+                separators.append(operator)
+                index += 2
+                continue
+            separators.append(char)
+        index += 1
+    return separators
+
+
 def _normalize_posix(path: PurePosixPath) -> PurePosixPath:
     """Resolve ``.`` and ``..`` lexically; ``PurePosixPath`` keeps them verbatim."""
     absolute = path.is_absolute()
@@ -641,6 +721,8 @@ class CommandPlan:
     browser_action: str | None = None
     browser_subcommand: str | None = None
     script_path: str | None = None
+    script_workdir: str | None = None
+    script_python: bool = False
     inline_source: str | None = None
     inline_python: bool = False
     env_assignments: list[str] = field(default_factory=list)
@@ -658,6 +740,7 @@ class EvidenceBundle:
     packet: dict[str, Any]
     complete: bool
     incomplete_reasons: list[str]
+    reviewable_issues: list[str] = field(default_factory=list)
     deterministic_block: str | None = None
     deterministic_allow: str | None = None
     mutating_request: str | None = None
@@ -668,6 +751,31 @@ class EvidenceBundle:
         if self._tmp is not None:
             self._tmp.cleanup()
             self._tmp = None
+
+
+def _classify_dynamic_issues(issues: list[str]) -> tuple[list[str], list[str]]:
+    reviewable_prefixes = (
+        "dynamic network destination",
+        "dynamic os.system",
+        "dynamic subprocess.",
+    )
+    reviewable: list[str] = []
+    hard: list[str] = []
+    for issue in issues:
+        _, _, detail = issue.partition(": ")
+        marker = detail or issue
+        target = reviewable if marker.startswith(reviewable_prefixes) else hard
+        target.append(issue)
+    return reviewable, hard
+
+
+def _is_reviewable_parse_issue(issue: str) -> bool:
+    return issue.startswith(
+        (
+            "shell substitution requires contextual review",
+            "timeout wrapper requires contextual review",
+        )
+    )
 
 
 def _is_interpreter(executable: str) -> bool:
@@ -690,6 +798,7 @@ def _unresolved_execution(executable: str, args: list[str]) -> str | None:
         or executable in _HTTP_CLIENTS
         or executable in _DATA_COMMANDS
         or executable in _DESTRUCTIVE_COMMANDS
+        or executable in _SHELL_CONTROL_AND_BUILTINS
     ):
         return None
     scripts = [arg for arg in args if arg.endswith(_SCRIPT_SUFFIXES)]
@@ -699,6 +808,10 @@ def _unresolved_execution(executable: str, args: list[str]) -> str | None:
             f"({scripts[0]}) cannot be resolved for inspection"
         )
     return None
+
+
+def _is_missing_file_error(exc: Exception) -> bool:
+    return isinstance(exc, FileNotFoundError) or type(exc).__name__ == "WorkspaceReadNotFoundError"
 
 
 def _is_env_assignment(token: str) -> bool:
@@ -751,6 +864,7 @@ def _parse_interpreter(plan: CommandPlan, executable: str, args: list[str]) -> N
     for position, arg in enumerate(args):
         if not arg.startswith("-") or arg == "-":
             plan.script_path = arg
+            plan.script_python = executable.startswith(("python", "pypy"))
             return
         letters = set(arg[1:]) if not arg.startswith("--") else set()
         if "c" in letters:
@@ -758,7 +872,7 @@ def _parse_interpreter(plan: CommandPlan, executable: str, args: list[str]) -> N
                 plan.parse_error = "-c execution has no source to inspect"
                 return
             plan.inline_source = args[position + 1]
-            plan.inline_python = executable.startswith("python")
+            plan.inline_python = executable.startswith(("python", "pypy"))
             return
         if "m" in letters:
             plan.parse_error = "-m execution cannot be resolved to a stable script"
@@ -806,7 +920,72 @@ def _mutating_request(executable: str, args: list[str]) -> str | None:
     return None
 
 
-def parse_command(command: str) -> CommandPlan:
+def _request_input_files(  # noqa: PLR0912 - client file syntaxes are explicit.
+    executable: str, args: list[str]
+) -> list[str]:
+    if executable not in _HTTP_CLIENTS:
+        return []
+    files: list[str] = []
+    index = 0
+    while index < len(args):
+        token = args[index]
+        name, separator, inline = token.partition("=")
+        value = inline if separator else ""
+        if name in _REQUEST_DIRECT_FILE_OPTIONS | _REQUEST_AT_FILE_OPTIONS | _REQUEST_FORM_OPTIONS:
+            if not separator and index + 1 < len(args):
+                value = args[index + 1]
+                index += 1
+        elif token.startswith(("-T", "-d", "-F")) and len(token) > 2:
+            name, value = token[:2], token[2:]
+        else:
+            if executable in _HTTPIE_CLIENTS and "@" in token:
+                candidate = token.split("@", 1)[1]
+                if candidate and candidate not in files:
+                    files.append(candidate)
+            index += 1
+            continue
+
+        candidate = ""
+        if name in _REQUEST_DIRECT_FILE_OPTIONS:
+            candidate = value
+        elif name in _REQUEST_AT_FILE_OPTIONS:
+            if value.startswith("@"):
+                candidate = value[1:]
+            elif name == "--data-urlencode" and "@" in value:
+                candidate = value.split("@", 1)[1]
+        elif name in _REQUEST_FORM_OPTIONS:
+            _, _, form_value = value.partition("=")
+            if form_value.startswith(("@", "<")):
+                candidate = form_value[1:]
+        if candidate and candidate not in files:
+            files.append(candidate)
+        index += 1
+    return files
+
+
+def _positional_input_files(executable: str, args: list[str]) -> list[str]:
+    if executable not in _POSITIONAL_INPUT_COMMANDS:
+        return []
+    files: list[str] = []
+    ignored = {"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"}
+    for token in args:
+        if token in {">", ">>", "1>", "1>>", "2>", "2>>"}:
+            break
+        if token.startswith("-") or "://" in token or token in ignored:
+            continue
+        path = PurePosixPath(token)
+        if (
+            path.is_absolute()
+            or token.startswith(("./", "../"))
+            or token.endswith(_INPUT_FILE_SUFFIXES)
+        ) and token not in files:
+            files.append(token)
+    return files
+
+
+def parse_command(  # noqa: PLR0911, PLR0912 - command shapes fail closed explicitly.
+    command: str, *, _inspect_compound: bool = True
+) -> CommandPlan:
     plan = CommandPlan(command=command, compound=_has_shell_operators(command))
     try:
         tokens = shlex.split(command, posix=True)
@@ -828,10 +1007,19 @@ def parse_command(command: str) -> CommandPlan:
     executable = PurePosixPath(tokens[index]).name
     args = tokens[index + 1 :]
     plan.executable = executable
-    for candidate in _list_flag_files(args):
+    for candidate in _list_flag_files(executable, args):
+        if candidate not in plan.input_files:
+            plan.input_files.append(candidate)
+    for candidate in _request_input_files(executable, args):
+        if candidate not in plan.input_files:
+            plan.input_files.append(candidate)
+    for candidate in _positional_input_files(executable, args):
         if candidate not in plan.input_files:
             plan.input_files.append(candidate)
 
+    if executable == "timeout" and not any(arg.endswith(_SCRIPT_SUFFIXES) for arg in args):
+        plan.parse_error = "timeout wrapper requires contextual review"
+        return plan
     if executable in _OPAQUE_WRAPPERS:
         plan.parse_error = (
             f"{executable} runs another command that cannot be resolved before execution"
@@ -848,8 +1036,28 @@ def parse_command(command: str) -> CommandPlan:
         _parse_interpreter(plan, executable, args)
     elif executable.endswith(_SCRIPT_SUFFIXES):
         plan.script_path = tokens[index]
+        plan.script_python = executable.endswith(".py")
     if plan.script_path is None and plan.inline_source is None and plan.parse_error is None:
         plan.parse_error = _unresolved_execution(executable, args)
+    if plan.parse_error is None and any(marker in command for marker in ("$(", "`", "<(", ">(")):
+        contains_code = any(suffix in command for suffix in _SCRIPT_SUFFIXES) or any(
+            f"{interpreter} " in command for interpreter in _INTERPRETERS
+        )
+        plan.parse_error = (
+            "shell substitution executes code that cannot be frozen"
+            if contains_code
+            else "shell substitution requires contextual review"
+        )
+    if (
+        _inspect_compound
+        and plan.parse_error is None
+        and plan.compound
+        and _compound_has_unresolved_script(command, plan)
+    ):
+        plan.parse_error = (
+            "compound command executes a script that cannot be frozen as one exact action; "
+            "issue the script execution separately"
+        )
 
     plan.mutating_request = _mutating_request(executable, args)
     plan.read_only = (
@@ -857,6 +1065,113 @@ def parse_command(command: str) -> CommandPlan:
         and not plan.compound
         and _read_only_options_are_safe(executable, args)
     )
+    return plan
+
+
+def _compound_has_unresolved_script(  # noqa: PLR0911, PLR0912 - ambiguities fail closed.
+    command: str,
+    outer: CommandPlan,
+) -> bool:
+    segments = _shell_segments(command)
+    script_segments = [
+        (index, segment, segment_plan)
+        for index, segment in enumerate(segments)
+        if (segment_plan := _segment_script_plan(segment)) is not None
+    ]
+    if not script_segments:
+        return False
+    separators = _shell_separators(command)
+    if any(separator in {"&", "|"} for separator in separators):
+        return True
+    if outer.script_path is not None or outer.inline_source is not None:
+        return len(script_segments) > 1
+    if len(script_segments) != 1:
+        return True
+
+    script_index, script_segment, script_plan = script_segments[0]
+    if (
+        script_index != len(segments) - 1
+        or script_plan.parse_error is not None
+        or script_plan.compound
+        or script_plan.script_path is None
+        or script_plan.inline_source is not None
+        or script_plan.unsafe_env
+        or _writes_script_file(outer)
+    ):
+        return True
+    try:
+        script_tokens = shlex.split(script_segment, posix=True)
+    except ValueError:
+        return True
+    if not script_tokens or script_tokens[0] in {"!", "do", "elif", "else", "then"}:
+        return True
+
+    cd_target: str | None = None
+    for preceding in segments[:script_index]:
+        preceding_plan = parse_command(preceding, _inspect_compound=False)
+        if preceding_plan.parse_error is not None or preceding_plan.compound:
+            return True
+        if preceding_plan.executable == "cd":
+            if cd_target is not None:
+                return True
+            cd_target = _simple_cd_target(preceding)
+            if cd_target is None:
+                return True
+        elif not (
+            preceding_plan.read_only
+            or preceding_plan.executable in {":", "echo", "false", "printf", "true"}
+        ):
+            return True
+
+    if cd_target is not None and (script_index != 1 or separators != ["&&"]):
+        return True
+
+    outer.script_path = script_plan.script_path
+    outer.script_workdir = cd_target
+    outer.script_python = script_plan.script_python
+    return False
+
+
+def _simple_cd_target(segment: str) -> str | None:
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        return None
+    if tokens[:1] != ["cd"]:
+        return None
+    args = tokens[1:]
+    if args[:1] == ["--"]:
+        args = args[1:]
+    if len(args) != 1 or any(char in args[0] for char in "~$*?[]{}" + "`"):
+        return None
+    return args[0]
+
+
+def _segment_script_plan(segment: str) -> CommandPlan | None:
+    try:
+        tokens = shlex.split(segment, posix=True)
+    except ValueError:
+        return None
+    while tokens and tokens[0] in {"!", "do", "elif", "else", "then"}:
+        tokens.pop(0)
+    if not tokens:
+        return None
+    plan = parse_command(shlex.join(tokens), _inspect_compound=False)
+    contains_code_target = any(
+        _is_interpreter(PurePosixPath(token).name) or token.endswith(_SCRIPT_SUFFIXES)
+        for token in tokens
+    )
+    contains_nested_interpreter = any(
+        _is_interpreter(PurePosixPath(token).name) for token in tokens[1:]
+    )
+    if (
+        plan.script_path is None
+        and plan.inline_source is None
+        and not (
+            (plan.parse_error is not None and contains_code_target) or contains_nested_interpreter
+        )
+    ):
+        return None
     return plan
 
 
@@ -905,10 +1220,13 @@ class _PythonFacts(ast.NodeVisitor):
         # the reviewer the import statements as written.
         self.submodule_imports: set[str] = set()
         self.relative_imports: set[tuple[int, str]] = set()
+        self.relative_submodule_imports: set[tuple[int, str]] = set()
         self.calls: list[dict[str, Any]] = []
         self.urls: set[str] = set()
+        self.input_files: set[str] = set()
         self.dynamic_features: set[str] = set()
         self.browser_automation = False
+        self._literal_values: dict[str, tuple[str, bool]] = {}
 
     @staticmethod
     def _name(node: ast.AST) -> str:
@@ -923,6 +1241,72 @@ class _PythonFacts(ast.NodeVisitor):
         if any(marker in text.lower() for marker in _BROWSER_MARKERS):
             self.browser_automation = True
 
+    def _literal_value(  # noqa: PLR0911 - only explicit literal shapes are accepted.
+        self,
+        node: ast.AST,
+    ) -> tuple[str, bool] | None:
+        """Resolve a bounded string or pathlib.Path expression.
+
+        The boolean records whether the expression is a Path object, which prevents a
+        string's unrelated method named `open` from being treated as pathlib access.
+        """
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            return node.value, False
+        if isinstance(node, ast.Name):
+            return self._literal_values.get(node.id)
+        if isinstance(node, ast.Call) and self._name(node.func) in {"Path", "pathlib.Path"}:
+            if node.keywords or not node.args:
+                return None
+            parts: list[str] = []
+            for arg in node.args:
+                value = self._literal_value(arg)
+                if value is None:
+                    return None
+                parts.append(value[0])
+            return PurePosixPath(*parts).as_posix(), True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            left = self._literal_value(node.left)
+            right = self._literal_value(node.right)
+            if left is not None and left[1] and right is not None:
+                return (PurePosixPath(left[0]) / right[0]).as_posix(), True
+        return None
+
+    def _note_assignment(self, target: ast.AST, value: tuple[str, bool] | None) -> None:
+        if isinstance(target, ast.Name):
+            if value is None:
+                self._literal_values.pop(target.id, None)
+            else:
+                self._literal_values[target.id] = value
+
+    def _open_is_read(self, node: ast.Call, mode_position: int) -> bool:
+        mode_node = node.args[mode_position] if len(node.args) > mode_position else None
+        for keyword in node.keywords:
+            if keyword.arg == "mode":
+                mode_node = keyword.value
+        if mode_node is None:
+            return True
+        mode = self._literal_value(mode_node)
+        return mode is not None and not mode[1] and not any(marker in mode[0] for marker in "wax+")
+
+    def _note_file_input(self, node: ast.Call, name: str) -> None:
+        input_node: ast.AST | None = None
+        if name in {"open", "builtins.open", "io.open"} and self._open_is_read(node, 1):
+            input_node = node.args[0] if node.args else None
+            for keyword in node.keywords:
+                if keyword.arg == "file":
+                    input_node = keyword.value
+        elif isinstance(node.func, ast.Attribute):
+            receiver = self._literal_value(node.func.value)
+            reads_path = node.func.attr in {"read_bytes", "read_text"} or (
+                node.func.attr == "open" and self._open_is_read(node, 0)
+            )
+            if receiver is not None and receiver[1] and reads_path:
+                self.input_files.add(receiver[0])
+        if input_node is not None:
+            input_value = self._literal_value(input_node)
+            if input_value is not None:
+                self.input_files.add(input_value[0])
+
     def visit_Import(self, node: ast.Import) -> None:
         self.imports.update(alias.name for alias in node.names)
         for alias in node.names:
@@ -935,10 +1319,13 @@ class _PythonFacts(ast.NodeVisitor):
         module = node.module or ""
         names = tuple(alias.name for alias in node.names if alias.name != "*")
         if node.level:
-            targets = (module,) if module else names
-            self.relative_imports.update((node.level, name) for name in targets if name)
             if module:
-                self.relative_imports.update((node.level, f"{module}.{name}") for name in names)
+                self.relative_imports.add((node.level, module))
+                self.relative_submodule_imports.update(
+                    (node.level, f"{module}.{name}") for name in names
+                )
+            else:
+                self.relative_submodule_imports.update((node.level, name) for name in names)
         elif module:
             self.imports.add(module)
             self.submodule_imports.update(f"{module}.{name}" for name in names)
@@ -951,11 +1338,22 @@ class _PythonFacts(ast.NodeVisitor):
             self._note_browser(node.value)
 
     def visit_Assign(self, node: ast.Assign) -> None:
+        value = self._literal_value(node.value)
         for target in node.targets:
             if "sys.path" in self._name(target) or (
                 isinstance(target, ast.Subscript) and "sys.path" in self._name(target.value)
             ):
                 self.dynamic_features.add("sys.path assignment")
+            self._note_assignment(target, value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        value = self._literal_value(node.value) if node.value is not None else None
+        self._note_assignment(node.target, value)
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        self._note_assignment(node.target, None)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -970,10 +1368,18 @@ class _PythonFacts(ast.NodeVisitor):
             not node.args or not _literal_command(node.args[0])
         ):
             self.dynamic_features.add(f"dynamic {name}")
-        if name.startswith(("requests.", "httpx.", "urllib.request.")) and (
-            not node.args
-            or not isinstance(node.args[0], ast.Constant)
-            or not isinstance(node.args[0].value, str)
+        self._note_file_input(node, name)
+        method_name = name.rsplit(".", 1)[-1]
+        method = method_name.lower()
+        destination_index = (
+            1 if method in {"request", "stream"} or name.endswith("OpenerDirector.open") else 0
+        )
+        destination = node.args[destination_index] if len(node.args) > destination_index else None
+        if (
+            name.startswith(("requests.", "httpx.", "urllib.request."))
+            and method_name == method
+            and method in _NETWORK_CALL_METHODS
+            and not (isinstance(destination, ast.Constant) and isinstance(destination.value, str))
         ):
             self.dynamic_features.add(f"dynamic network destination in {name}")
         self._note_browser(name)
@@ -990,24 +1396,119 @@ def _literal_command(node: ast.AST) -> bool:
     return False
 
 
-def _redirect_input_files(command: str) -> list[str]:
+def _shell_redirect_word(  # noqa: PLR0912 - shell quoting requires explicit states.
+    command: str,
+    start: int,
+) -> tuple[str, int]:
+    """Read one shell word without expanding it, returning its unquoted spelling."""
+    result: list[str] = []
+    quote: str | None = None
+    index = start
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            else:
+                result.append(char)
+            index += 1
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            elif char == "\\" and index + 1 < len(command):
+                escaped = command[index + 1]
+                if escaped in {'"', "$", "`", "\\"}:
+                    result.append(escaped)
+                elif escaped != "\n":
+                    result.extend(("\\", escaped))
+                index += 1
+            else:
+                result.append(char)
+            index += 1
+            continue
+        if char == "\\":
+            if index + 1 < len(command):
+                result.append(command[index + 1])
+                index += 2
+            else:
+                index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char.isspace() or char in ";&|<>()":
+            break
+        if char == "#" and not result:
+            break
+        result.append(char)
+        index += 1
+    return "".join(result), index
+
+
+def _redirect_input_files(  # noqa: PLR0912 - shell quoting requires explicit states.
+    command: str,
+) -> list[str]:
+    """Return literal input-redirection operands, ignoring inert shell text."""
     files: list[str] = []
-    for match in _REDIRECT_INPUT_RE.finditer(command):
-        name = match.group("file")
-        if name[:1] in {'"', "'"}:
-            name = name[1:-1]
+    quote: str | None = None
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if quote == "'":
+            if char == "'":
+                quote = None
+            index += 1
+            continue
+        if char == "\\":
+            index += 2
+            continue
+        if quote == '"':
+            if char == '"':
+                quote = None
+            index += 1
+            continue
+        if char in {"'", '"'}:
+            quote = char
+            index += 1
+            continue
+        if char == "#" and (
+            index == 0 or command[index - 1].isspace() or command[index - 1] in ";&|()"
+        ):
+            newline = command.find("\n", index + 1)
+            index = len(command) if newline < 0 else newline + 1
+            continue
+        if char != "<":
+            index += 1
+            continue
+        if (
+            command[index + 1 : index + 2] in {"<", "(", "&", ">"}
+            or command[index - 1 : index] == "<"
+        ):
+            index += 1
+            continue
+        operand = index + 1
+        while operand < len(command) and command[operand] in " \t":
+            operand += 1
+        if command[operand : operand + 2] == "<(":
+            index = operand + 2
+            continue
+        name, end = _shell_redirect_word(command, operand)
         if name and name not in files:
             files.append(name)
+        index = max(end, index + 1)
     return files
 
 
-def _list_flag_files(args: list[str]) -> list[str]:
+def _list_flag_files(executable: str, args: list[str]) -> list[str]:
     """Files named as the value of a target-list flag (`-w wordlist`, `-l hosts`)."""
+    accepted = _LIST_FILE_FLAGS.get(executable, frozenset())
     files: list[str] = []
     index = 0
     while index < len(args):
         name, separator, inline = args[index].partition("=")
-        if name in _LIST_FILE_FLAGS:
+        if name in accepted:
             if separator:
                 value = inline
             elif index + 1 < len(args):
@@ -1016,6 +1517,8 @@ def _list_flag_files(args: list[str]) -> list[str]:
             else:
                 value = ""
             if value and not value.startswith("-") and value not in files:
+                if executable == "ffuf" and ":" in value:
+                    value = value.split(":", 1)[0]
                 files.append(value)
         index += 1
     return files
@@ -1037,28 +1540,32 @@ async def _read_sandbox_file(session: Any, path: PurePosixPath, limit: int) -> b
 async def _collect_input_files(
     session: Any,
     input_files: list[str],
-    workdir: str,
     artifacts_dir: Path,
     settings: SafetySettings,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[str]]:
     """Read the workspace data files a command consumes via input redirection.
 
     A file the reviewer cannot see is a file whose contents it must assume the worst
     of — so a host list or wordlist read with `< file` is attached here, letting the
-    reviewer check the queried hosts against scope instead of blocking blind. Only
-    workspace-resident files are read; an oversize file is included truncated so the
-    reviewer at least sees its shape.
+    reviewer inspect the exact action instead of blocking blind. Only
+    workspace-resident files are read. Every omitted, unreadable, or truncated input is
+    reported as incomplete evidence rather than silently disappearing from the packet.
     """
     artifacts: list[dict[str, Any]] = []
+    incomplete: list[str] = []
     for raw in input_files[: settings.max_dependencies]:
-        path = _script_posix_path(raw, workdir)
+        # Callers pass paths already resolved to absolute, normalized posix strings.
+        path = _normalize_posix(PurePosixPath(raw))
         if not _within_workspace(path):
+            incomplete.append(f"input file is outside the inspectable workspace: {path}")
             continue
         try:
             data = await _read_sandbox_file(session, path, settings.max_artifact_bytes)
-        except FileNotFoundError:
-            continue
-        except Exception:  # noqa: BLE001, S112 - an unreadable input file is not itself a block.
+        except Exception as exc:  # noqa: BLE001 - SDK not-found errors are not OSError subclasses.
+            if _is_missing_file_error(exc):
+                incomplete.append(f"input file is missing: {path}")
+                continue
+            incomplete.append(f"cannot read input file {path}: {type(exc).__name__}: {exc}")
             continue
         truncated = len(data) > settings.max_artifact_bytes
         body = data[: settings.max_artifact_bytes]
@@ -1074,19 +1581,42 @@ async def _collect_input_files(
         (artifacts_dir / evidence_name).write_bytes(body)
         artifact["evidence_path"] = f"artifacts/{evidence_name}"
         artifacts.append(artifact)
-    return artifacts
+        if truncated:
+            incomplete.append(f"input file is truncated: {path}")
+    if len(input_files) > settings.max_dependencies:
+        incomplete.append("input file count exceeds configured dependency limit")
+    return artifacts, incomplete
 
 
 def _script_posix_path(script_path: str, workdir: str | None) -> PurePosixPath:
     path = PurePosixPath(script_path)
     if path.is_absolute():
         return _normalize_posix(path)
-    return _normalize_posix(PurePosixPath(workdir or "/workspace") / path)
+    return _normalize_posix(_workdir_posix_path(workdir) / path)
 
 
-def _import_targets(facts: _PythonFacts) -> list[tuple[int, str]]:
-    absolute = [(0, module) for module in sorted(facts.imports | facts.submodule_imports)]
-    return absolute + sorted(facts.relative_imports)
+def _workdir_posix_path(workdir: str | None) -> PurePosixPath:
+    path = PurePosixPath(workdir or _WORKSPACE_ROOT)
+    if not path.is_absolute():
+        path = _WORKSPACE_ROOT / path
+    return _normalize_posix(path)
+
+
+def _script_execution_workdir(plan: CommandPlan, workdir: str) -> PurePosixPath:
+    base = _workdir_posix_path(workdir)
+    if plan.script_workdir is None:
+        return base
+    changed = PurePosixPath(plan.script_workdir)
+    return _normalize_posix(changed if changed.is_absolute() else base / changed)
+
+
+def _import_targets(facts: _PythonFacts) -> list[tuple[int, str, bool]]:
+    absolute = [(0, module, False) for module in sorted(facts.imports | facts.submodule_imports)]
+    relative = [(level, module, True) for level, module in sorted(facts.relative_imports)]
+    relative_submodules = [
+        (level, module, False) for level, module in sorted(facts.relative_submodule_imports)
+    ]
+    return absolute + relative + relative_submodules
 
 
 def _import_candidates(
@@ -1119,6 +1649,7 @@ async def _queue_dependency(
     queue: list[tuple[PurePosixPath, bytes]],
     dynamic: list[str],
     settings: SafetySettings,
+    required: bool,
 ) -> None:
     for candidate in candidates:
         if candidate.as_posix() in seen:
@@ -1128,9 +1659,9 @@ async def _queue_dependency(
             return
         try:
             data = await _read_sandbox_file(session, candidate, settings.max_artifact_bytes)
-        except FileNotFoundError:
-            continue
         except Exception as exc:  # noqa: BLE001 - an unreadable candidate is evidence.
+            if _is_missing_file_error(exc):
+                continue
             dynamic.append(f"cannot read local module {candidate}: {type(exc).__name__}: {exc}")
             return
         if len(data) > settings.max_artifact_bytes:
@@ -1138,6 +1669,9 @@ async def _queue_dependency(
             return
         queue.append((candidate, data))
         return
+    if required:
+        rendered = ", ".join(candidate.as_posix() for candidate in candidates)
+        dynamic.append(f"required relative import is missing: {rendered}")
 
 
 async def _collect_python_sources(
@@ -1148,12 +1682,13 @@ async def _collect_python_sources(
     *,
     search_root: PurePosixPath,
     entry_label: str | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, str], list[str], bool]:
+) -> tuple[list[dict[str, Any]], dict[str, str], list[str], bool, list[str]]:
     queue: list[tuple[PurePosixPath, bytes]] = [(entrypoint, entry_data)]
     seen: set[str] = set()
     artifacts: list[dict[str, Any]] = []
     sources: dict[str, str] = {}
     dynamic: list[str] = []
+    input_files: list[str] = []
     browser_automation = False
     total = 0
 
@@ -1196,7 +1731,10 @@ async def _collect_python_sources(
         )
         sources[label] = source
         dynamic.extend(f"{label}: {item}" for item in sorted(facts.dynamic_features))
-        for level, module in _import_targets(facts):
+        for input_file in sorted(facts.input_files):
+            if input_file not in input_files:
+                input_files.append(input_file)
+        for level, module, required in _import_targets(facts):
             await _queue_dependency(
                 session,
                 _import_candidates(path, search_root, level, module),
@@ -1204,8 +1742,9 @@ async def _collect_python_sources(
                 queue=queue,
                 dynamic=dynamic,
                 settings=settings,
+                required=required,
             )
-    return artifacts, sources, dynamic, browser_automation
+    return artifacts, sources, dynamic, browser_automation, input_files
 
 
 def _history_evidence(turn_input: list[Any], needle: str | None) -> list[Any]:
@@ -1383,12 +1922,13 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
 ) -> EvidenceBundle:
     command = str(arguments.get("cmd") or "")
     plan = parse_command(command)
-    workdir = str(arguments.get("workdir") or "/workspace")
+    workdir = _workdir_posix_path(str(arguments.get("workdir") or "/workspace")).as_posix()
     tmp = tempfile.TemporaryDirectory(prefix=f"strix-safety-{case_id}-")
     root = Path(tmp.name)
     artifacts_dir = root / "artifacts"
     artifacts_dir.mkdir(parents=True)
     incomplete: list[str] = []
+    reviewable_issues: list[str] = []
     packet: dict[str, Any] = {
         "case": {
             "case_id": case_id,
@@ -1416,9 +1956,12 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
         "state": {"workspace_epoch": workspace_epoch},
     }
     deterministic_allow: str | None = None
+    python_input_files: list[str] = []
+    python_input_workdir = workdir
 
     if plan.parse_error:
-        incomplete.append(plan.parse_error)
+        target = reviewable_issues if _is_reviewable_parse_issue(plan.parse_error) else incomplete
+        target.append(plan.parse_error)
     deterministic_block = _deterministic_command_rules(plan)
     if plan.read_only and not plan.browser:
         deterministic_allow = f"Known read-only command: {plan.executable}."
@@ -1430,7 +1973,7 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
         incomplete.extend(browser_incomplete)
 
     sandbox_session = getattr(ctx, "context", {}).get("sandbox_session")
-    search_root = _normalize_posix(PurePosixPath(workdir))
+    search_root = PurePosixPath(workdir)
 
     if plan.inline_source is not None:
         source = plan.inline_source
@@ -1441,7 +1984,13 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
             if sandbox_session is None:
                 incomplete.append("sandbox session is unavailable for script inspection")
             else:
-                artifacts, sources, dynamic, browser_automation = await _collect_python_sources(
+                (
+                    artifacts,
+                    sources,
+                    dynamic,
+                    browser_automation,
+                    python_input_files,
+                ) = await _collect_python_sources(
                     sandbox_session,
                     search_root / "<inline>",
                     data,
@@ -1453,7 +2002,9 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
                 packet["analysis"].update(
                     {"dynamic_features": dynamic, "browser_automation": browser_automation}
                 )
-                incomplete.extend(dynamic)
+                reviewable, hard_dynamic = _classify_dynamic_issues(dynamic)
+                reviewable_issues.extend(reviewable)
+                incomplete.extend(hard_dynamic)
                 if browser_automation:
                     deterministic_block = _BROWSER_IN_SCRIPT_BLOCK
                 for index, (source_path, text) in enumerate(sources.items()):
@@ -1478,6 +2029,11 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
             inner_block = _deterministic_command_rules(inner)
             if inner_block is not None:
                 deterministic_block = inner_block
+            if inner.script_path is not None or inner.input_files:
+                incomplete.append(
+                    "inline shell source executes a workspace-dependent command whose files "
+                    "are not frozen"
+                )
             if any(marker in source.lower() for marker in _BROWSER_MARKERS):
                 deterministic_block = (
                     "Browser automation embedded in scripts is blocked; issue direct browser "
@@ -1485,7 +2041,9 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
                 )
 
     if plan.script_path:
-        script_path = _script_posix_path(plan.script_path, workdir)
+        script_workdir = _script_execution_workdir(plan, workdir)
+        python_input_workdir = script_workdir.as_posix()
+        script_path = _script_posix_path(plan.script_path, python_input_workdir)
         if not _within_workspace(script_path):
             incomplete.append("script entrypoint is outside the inspectable workspace")
         elif sandbox_session is None:
@@ -1502,8 +2060,14 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
             else:
                 if len(entry_data) > settings.max_artifact_bytes:
                     incomplete.append("script entrypoint exceeds configured artifact limit")
-                elif script_path.suffix == ".py" or plan.executable.startswith("python"):
-                    artifacts, sources, dynamic, browser_automation = await _collect_python_sources(
+                elif script_path.suffix == ".py" or plan.script_python:
+                    (
+                        artifacts,
+                        sources,
+                        dynamic,
+                        browser_automation,
+                        python_input_files,
+                    ) = await _collect_python_sources(
                         sandbox_session,
                         script_path,
                         entry_data,
@@ -1514,7 +2078,9 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
                     packet["analysis"].update(
                         {"dynamic_features": dynamic, "browser_automation": browser_automation}
                     )
-                    incomplete.extend(dynamic)
+                    reviewable, hard_dynamic = _classify_dynamic_issues(dynamic)
+                    reviewable_issues.extend(reviewable)
+                    incomplete.extend(hard_dynamic)
                     if browser_automation:
                         deterministic_block = _BROWSER_IN_SCRIPT_BLOCK
                     for index, (source_path, source) in enumerate(sources.items()):
@@ -1542,21 +2108,40 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
                     script_path.as_posix(),
                 )
 
-    if plan.input_files and sandbox_session is not None:
-        packet["artifacts"].extend(
-            await _collect_input_files(
-                sandbox_session, plan.input_files, workdir, artifacts_dir, settings
+    input_files: list[str] = []
+    input_candidates = [(raw, workdir) for raw in plan.input_files]
+    input_candidates.extend((raw, python_input_workdir) for raw in python_input_files)
+    for raw, input_workdir in input_candidates:
+        resolved = _script_posix_path(raw, input_workdir).as_posix()
+        if resolved not in input_files:
+            input_files.append(resolved)
+    if input_files:
+        if sandbox_session is None:
+            incomplete.append("sandbox session unavailable for input-file evidence")
+        else:
+            input_artifacts, input_incomplete = await _collect_input_files(
+                sandbox_session, input_files, artifacts_dir, settings
             )
-        )
+            packet["artifacts"].extend(input_artifacts)
+            incomplete.extend(input_incomplete)
 
     packet["completeness"] = {
-        "status": "complete" if not incomplete else "incomplete",
-        "reasons": incomplete,
+        "status": (
+            "incomplete" if incomplete else "reviewable" if reviewable_issues else "complete"
+        ),
+        "reasons": [*incomplete, *reviewable_issues],
+        "hard_gaps": incomplete,
+        "reviewable_issues": reviewable_issues,
     }
     packet_json = json.dumps(packet, ensure_ascii=False, indent=2, default=str)
     if len(packet_json) > settings.max_input_chars:
         incomplete.append("compiled safety packet exceeds configured input limit")
-        packet["completeness"] = {"status": "incomplete", "reasons": incomplete}
+        packet["completeness"] = {
+            "status": "incomplete",
+            "reasons": [*incomplete, *reviewable_issues],
+            "hard_gaps": incomplete,
+            "reviewable_issues": reviewable_issues,
+        }
         packet_json = json.dumps(packet, ensure_ascii=False, indent=2, default=str)
 
     (root / "case.json").write_text(packet_json, encoding="utf-8")
@@ -1575,9 +2160,16 @@ async def compile_evidence(  # noqa: PLR0912, PLR0915
         packet=packet,
         complete=not incomplete,
         incomplete_reasons=incomplete,
+        reviewable_issues=reviewable_issues,
         deterministic_block=deterministic_block,
         deterministic_allow=deterministic_allow,
         mutating_request=plan.mutating_request,
-        workspace_evidence=bool(plan.script_path or plan.inline_python or plan.input_files),
+        workspace_evidence=bool(
+            plan.script_path
+            or plan.inline_source
+            or plan.input_files
+            or python_input_files
+            or (plan.compound and plan.parse_error is not None)
+        ),
         _tmp=tmp,
     )

@@ -392,7 +392,7 @@ async def test_stopping_agent_denies_pending_approvals_for_its_subtree() -> None
     await controller.handle("agent.stop", {"agent_id": "agent-1"})
 
     assert await asyncio.gather(*approvals) == ["cancelled", "cancelled"]
-    assert controller.snapshot()["pending_approval"] is None
+    assert controller.snapshot()["pending_approvals"] == []
 
 
 @pytest.mark.asyncio
@@ -417,17 +417,23 @@ async def test_unknown_command_is_rejected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_safety_approvals_queue_and_resolve_in_order() -> None:
+async def test_safety_approvals_are_all_visible_and_resolve_independently() -> None:
     controller = TuiController(args())
     first = asyncio.create_task(
         controller.safety_approval_callback(
-            {"request_id": "approval-1", "action": "Run exploit", "reason": "Mutates state"}
+            {
+                "request_id": "approval-1",
+                "agent_id": "agent-1",
+                "action": "Run exploit",
+                "reason": "Mutates state",
+            }
         )
     )
     second = asyncio.create_task(
         controller.safety_approval_callback(
             SimpleNamespace(
                 request_id="approval-2",
+                agent_id="agent-2",
                 action="Write a file",
                 reason="Changes the workspace",
             )
@@ -435,35 +441,117 @@ async def test_safety_approvals_queue_and_resolve_in_order() -> None:
     )
     await asyncio.sleep(0)
 
-    assert controller.snapshot()["pending_approval"] == {
-        "request_id": "approval-1",
-        "action": "Run exploit",
-        "reason": "Mutates state",
-        "agent_id": "",
-        "tool_name": "",
-        "digest": "",
-        "risk": "",
-    }
+    assert controller.snapshot()["pending_approvals"] == [
+        {
+            "request_id": "approval-1",
+            "action": "Run exploit",
+            "reason": "Mutates state",
+            "agent_id": "agent-1",
+            "tool_name": "",
+            "digest": "",
+            "risk": "",
+        },
+        {
+            "request_id": "approval-2",
+            "action": "Write a file",
+            "reason": "Changes the workspace",
+            "agent_id": "agent-2",
+            "tool_name": "",
+            "digest": "",
+            "risk": "",
+        },
+    ]
     with pytest.raises(ValueError, match="duplicate safety approval request_id"):
         await controller.safety_approval_callback(
-            {"request_id": "approval-1", "action": "Duplicate", "reason": "Duplicate"}
+            {
+                "request_id": "approval-1",
+                "agent_id": "agent-1",
+                "action": "Duplicate",
+                "reason": "Duplicate",
+            }
         )
-    with pytest.raises(RuntimeError, match="stale or unknown"):
-        await controller.handle("safety.resolve", {"request_id": "approval-2", "approved": True})
+    assert await controller.handle(
+        "safety.resolve", {"request_id": "approval-2", "approved": False}
+    ) == {"request_id": "approval-2", "approved": False, "approve_all": False}
+    assert await second is False
+    assert [item["request_id"] for item in controller.snapshot()["pending_approvals"]] == [
+        "approval-1"
+    ]
 
     assert await controller.handle(
         "safety.resolve", {"request_id": "approval-1", "approved": True}
-    ) == {"request_id": "approval-1", "approved": True}
+    ) == {"request_id": "approval-1", "approved": True, "approve_all": False}
     assert await first is True
-    assert controller.snapshot()["pending_approval"]["request_id"] == "approval-2"
-
     with pytest.raises(RuntimeError, match="stale or unknown"):
-        await controller.handle("safety.resolve", {"request_id": "approval-1", "approved": False})
-    await controller.handle("safety.resolve", {"request_id": "approval-2", "approved": False})
-    assert await second is False
-    assert controller.snapshot()["pending_approval"] is None
-    with pytest.raises(RuntimeError, match="No safety approval is pending"):
         await controller.handle("safety.resolve", {"request_id": "approval-2", "approved": False})
+    assert controller.snapshot()["pending_approvals"] == []
+
+
+class _RecordingRuntime:
+    def __init__(self) -> None:
+        self.mode = "guarded"
+
+    def disable(self) -> None:
+        self.mode = "off"
+
+
+@pytest.mark.asyncio
+async def test_approve_all_disables_review_and_releases_the_queue() -> None:
+    controller = TuiController(args())
+    runtime = _RecordingRuntime()
+    controller.register_safety_runtime(runtime)
+    first = asyncio.create_task(
+        controller.safety_approval_callback(
+            {"request_id": "a-1", "agent_id": "agent-1", "action": "Run", "reason": "x"}
+        )
+    )
+    second = asyncio.create_task(
+        controller.safety_approval_callback(
+            {"request_id": "a-2", "agent_id": "agent-2", "action": "Write", "reason": "y"}
+        )
+    )
+    await asyncio.sleep(0)
+    assert len(controller.snapshot()["pending_approvals"]) == 2
+
+    result = await controller.handle(
+        "safety.resolve", {"request_id": "a-1", "approved": True, "approve_all": True}
+    )
+
+    assert result == {"request_id": "a-1", "approved": True, "approve_all": True}
+    # The chosen call is approved and every other queued call is released as approved.
+    assert await first is True
+    assert await second is True
+    # Review is switched off for the rest of the run and the queue is cleared.
+    assert runtime.mode == "off"
+    assert controller.snapshot()["pending_approvals"] == []
+    # A review already past the runtime's mode check is auto-approved, not queued.
+    later = await controller.safety_approval_callback(
+        {"request_id": "a-3", "agent_id": "agent-1", "action": "Later", "reason": "z"}
+    )
+    assert later is True
+    assert controller.snapshot()["pending_approvals"] == []
+
+
+@pytest.mark.asyncio
+async def test_approve_all_is_ignored_when_the_answer_is_deny() -> None:
+    controller = TuiController(args())
+    runtime = _RecordingRuntime()
+    controller.register_safety_runtime(runtime)
+    pending = asyncio.create_task(
+        controller.safety_approval_callback(
+            {"request_id": "a-1", "agent_id": "agent-1", "action": "Run", "reason": "x"}
+        )
+    )
+    await asyncio.sleep(0)
+
+    result = await controller.handle(
+        "safety.resolve", {"request_id": "a-1", "approved": False, "approve_all": True}
+    )
+
+    assert result == {"request_id": "a-1", "approved": False, "approve_all": False}
+    assert await pending is False
+    # A denial must never flip the run into dangerous mode.
+    assert runtime.mode == "guarded"
 
 
 @pytest.mark.asyncio
@@ -473,6 +561,7 @@ async def test_safety_approval_validates_response_and_sanitizes_display() -> Non
         controller.safety_approval_callback(
             {
                 "request_id": "approval-safe",
+                "agent_id": "agent-safe",
                 "action": "run\x1b]52;c;Y2xpcA==\x07 command\x85",
                 "reason": "needs\x1b[31m review\x1b[0m\x7f",
             }
@@ -480,15 +569,17 @@ async def test_safety_approval_validates_response_and_sanitizes_display() -> Non
     )
     await asyncio.sleep(0)
 
-    assert controller.snapshot()["pending_approval"] == {
-        "request_id": "approval-safe",
-        "action": "run command",
-        "reason": "needs review",
-        "agent_id": "",
-        "tool_name": "",
-        "digest": "",
-        "risk": "",
-    }
+    assert controller.snapshot()["pending_approvals"] == [
+        {
+            "request_id": "approval-safe",
+            "action": "run command",
+            "reason": "needs review",
+            "agent_id": "agent-safe",
+            "tool_name": "",
+            "digest": "",
+            "risk": "",
+        }
+    ]
     with pytest.raises(TypeError, match="approved must be a boolean"):
         await controller.handle(
             "safety.resolve", {"request_id": "approval-safe", "approved": "yes"}
@@ -505,7 +596,12 @@ async def test_safety_approval_validates_response_and_sanitizes_display() -> Non
         )
         is False
     )
-    assert controller.snapshot()["pending_approval"] is None
+    assert controller.snapshot()["pending_approvals"] == []
+
+    with pytest.raises(ValueError, match="agent_id must be a non-empty string"):
+        await controller.safety_approval_callback(
+            {"request_id": "approval-ownerless", "action": "Action", "reason": "Reason"}
+        )
 
 
 @pytest.mark.asyncio
@@ -513,12 +609,22 @@ async def test_cancelled_safety_request_is_removed_and_reveals_next() -> None:
     controller = TuiController(args())
     first = asyncio.create_task(
         controller.safety_approval_callback(
-            {"request_id": "approval-1", "action": "First", "reason": "First reason"}
+            {
+                "request_id": "approval-1",
+                "agent_id": "agent-1",
+                "action": "First",
+                "reason": "First reason",
+            }
         )
     )
     second = asyncio.create_task(
         controller.safety_approval_callback(
-            {"request_id": "approval-2", "action": "Second", "reason": "Second reason"}
+            {
+                "request_id": "approval-2",
+                "agent_id": "agent-2",
+                "action": "Second",
+                "reason": "Second reason",
+            }
         )
     )
     await asyncio.sleep(0)
@@ -527,7 +633,7 @@ async def test_cancelled_safety_request_is_removed_and_reveals_next() -> None:
     with pytest.raises(asyncio.CancelledError):
         await first
 
-    assert controller.snapshot()["pending_approval"]["request_id"] == "approval-2"
+    assert controller.snapshot()["pending_approvals"][0]["request_id"] == "approval-2"
     await controller.handle("safety.resolve", {"request_id": "approval-2", "approved": False})
     assert await second is False
 
@@ -538,7 +644,12 @@ async def test_quit_denies_all_pending_and_future_safety_approvals() -> None:
     requests = [
         asyncio.create_task(
             controller.safety_approval_callback(
-                {"request_id": f"approval-{index}", "action": "Action", "reason": "Reason"}
+                {
+                    "request_id": f"approval-{index}",
+                    "agent_id": f"agent-{index}",
+                    "action": "Action",
+                    "reason": "Reason",
+                }
             )
         )
         for index in range(2)
@@ -548,10 +659,15 @@ async def test_quit_denies_all_pending_and_future_safety_approvals() -> None:
     await controller.handle("app.quit", {})
 
     assert await asyncio.gather(*requests) == ["cancelled", "cancelled"]
-    assert controller.snapshot()["pending_approval"] is None
+    assert controller.snapshot()["pending_approvals"] == []
     assert (
         await controller.safety_approval_callback(
-            {"request_id": "approval-late", "action": "Late", "reason": "Late reason"}
+            {
+                "request_id": "approval-late",
+                "agent_id": "agent-late",
+                "action": "Late",
+                "reason": "Late reason",
+            }
         )
         == "cancelled"
     )

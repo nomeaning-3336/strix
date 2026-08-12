@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from strix.config.settings import SafetySettings
+from strix.safety.evidence import EvidenceBundle
 from strix.safety.runtime import SafetyRuntime
 from strix.safety.types import SafetyApprovalCallback, SafetyApprovalRequest, SafetyDecision
 
@@ -58,7 +59,9 @@ class _StubReviewer:
         bundle: Any,
         *,
         human_approval_available: bool = False,
+        workspace_collector: Any = None,
     ) -> SafetyDecision:
+        del workspace_collector
         self.calls += 1
         self.human_approval_available.append(human_approval_available)
         if self.on_review is not None:
@@ -224,18 +227,198 @@ async def test_guarded_repeat_request_fails_closed(tmp_path: Path) -> None:
 
 
 class _Sandbox:
+    def __init__(self) -> None:
+        self.files = {"/workspace/app.py": b"print(1)\n"}
+
     async def read(self, path: Path) -> io.BytesIO:
-        if path.as_posix() == "/workspace/app.py":
-            return io.BytesIO(b"print(1)\n")
-        raise FileNotFoundError(path)
+        try:
+            return io.BytesIO(self.files[path.as_posix()])
+        except KeyError as exc:
+            raise FileNotFoundError(path) from exc
 
 
-def _script_ctx() -> Any:
+class _DirectorySandbox(_Sandbox):
+    async def ls(self, path: Path) -> list[Any]:
+        if path.as_posix() != "/workspace/recon":
+            raise FileNotFoundError(path)
+        return [
+            SimpleNamespace(
+                path="/workspace/recon/hosts.txt",
+                kind=SimpleNamespace(value="file"),
+                size=len(self.files["/workspace/recon/hosts.txt"]),
+            ),
+            SimpleNamespace(
+                path="/workspace/recon/probe.py",
+                kind=SimpleNamespace(value="file"),
+                size=len(self.files["/workspace/recon/probe.py"]),
+            ),
+            SimpleNamespace(
+                path="/workspace/recon/link",
+                kind=SimpleNamespace(value="symlink"),
+                size=4,
+            ),
+        ]
+
+
+def _script_ctx(sandbox: _Sandbox | None = None) -> Any:
     return SimpleNamespace(
-        context={"agent_id": "agent-1", "sandbox_session": _Sandbox()},
+        context={"agent_id": "agent-1", "sandbox_session": sandbox or _Sandbox()},
         tool_call_id="call-1",
         turn_input=[],
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_collector_freezes_requested_workspace_file(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    sandbox = _Sandbox()
+    sandbox.files["/workspace/missing.py"] = b"print('safe')\n"
+    evidence_root = tmp_path / "evidence"
+    (evidence_root / "artifacts").mkdir(parents=True)
+    bundle = EvidenceBundle(
+        case_id="case-collect",
+        root=evidence_root,
+        packet={
+            "artifacts": [],
+            "completeness": {
+                "status": "incomplete",
+                "hard_gaps": ["cannot read script entrypoint: /workspace/missing.py"],
+                "reviewable_issues": [],
+            },
+        },
+        complete=False,
+        incomplete_reasons=[
+            "cannot read script entrypoint: /workspace/missing.py",
+            (
+                "compound command executes a script that cannot be frozen as one exact action; "
+                "issue the script execution separately"
+            ),
+        ],
+    )
+
+    output, failed = await runtime._collect_workspace_evidence(
+        ctx=_script_ctx(sandbox),
+        bundle=bundle,
+        paths=("/workspace/missing.py",),
+    )
+
+    assert failed is False
+    assert bundle.complete is True
+    assert bundle.workspace_evidence is True
+    assert bundle.incomplete_reasons == []
+    assert bundle.reviewable_issues == [
+        "requested script requires semantic inspection: /workspace/missing.py"
+    ]
+    [artifact] = bundle.packet["artifacts"]
+    assert artifact["path"] == "/workspace/missing.py"
+    assert artifact["role"] == "requested_input"
+    assert "sha256:" in output
+    assert "print('safe')" in output
+
+
+@pytest.mark.asyncio
+async def test_already_frozen_script_source_is_surfaced_to_the_reviewer(
+    tmp_path: Path,
+) -> None:
+    # A script artifact frozen at compile time carries only structural metadata in the
+    # packet; its bytes live on disk under evidence_path. When the reviewer re-requests
+    # that path to resolve a dynamic-destination issue, the collector must hand back the
+    # real source instead of an empty string, or the review defers to a human for a file
+    # it can actually read.
+    runtime = _runtime(tmp_path, "guarded")
+    evidence_root = tmp_path / "evidence-frozen"
+    (evidence_root / "artifacts").mkdir(parents=True)
+    script_source = 'import requests\nrequests.get("https://example.test/health")\n'
+    (evidence_root / "artifacts" / "000-probe.py").write_text(script_source, encoding="utf-8")
+    bundle = EvidenceBundle(
+        case_id="case-frozen",
+        root=evidence_root,
+        packet={
+            "artifacts": [
+                {
+                    "path": "/workspace/probe.py",
+                    "digest": "sha256:abc",
+                    "bytes": len(script_source),
+                    "evidence_path": "artifacts/000-probe.py",
+                }
+            ],
+            "completeness": {"status": "reviewable"},
+        },
+        complete=True,
+        incomplete_reasons=[],
+        reviewable_issues=["/workspace/probe.py: dynamic network destination in requests.get"],
+    )
+
+    output, failed = await runtime._collect_workspace_evidence(
+        ctx=_script_ctx(),
+        bundle=bundle,
+        paths=("/workspace/probe.py",),
+    )
+
+    assert failed is False
+    payload = json.loads(output)
+    [result] = payload["workspace_artifacts"]
+    assert result["status"] == "already frozen"
+    assert 'requests.get("https://example.test/health")' in result["source"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_collector_rejects_outside_workspace_path(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    evidence_root = tmp_path / "evidence"
+    (evidence_root / "artifacts").mkdir(parents=True)
+    bundle = EvidenceBundle(
+        case_id="case-outside",
+        root=evidence_root,
+        packet={"artifacts": [], "completeness": {}},
+        complete=False,
+        incomplete_reasons=["missing evidence"],
+    )
+
+    output, failed = await runtime._collect_workspace_evidence(
+        ctx=_script_ctx(),
+        bundle=bundle,
+        paths=("/etc/passwd",),
+    )
+
+    assert failed is False
+    assert "outside /workspace" in output
+    assert bundle.packet["artifacts"] == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_collector_freezes_bounded_workspace_directory(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    sandbox = _DirectorySandbox()
+    sandbox.files.update(
+        {
+            "/workspace/recon/hosts.txt": b"a.example.test\n",
+            "/workspace/recon/probe.py": b"print('probe')\n",
+        }
+    )
+    evidence_root = tmp_path / "evidence-tree"
+    (evidence_root / "artifacts").mkdir(parents=True)
+    bundle = EvidenceBundle(
+        case_id="case-tree",
+        root=evidence_root,
+        packet={"artifacts": [], "completeness": {}},
+        complete=True,
+        incomplete_reasons=[],
+    )
+
+    output, failed = await runtime._collect_workspace_evidence(
+        ctx=_script_ctx(sandbox),
+        bundle=bundle,
+        paths=("/workspace/recon/",),
+    )
+
+    assert failed is False
+    assert {item["path"] for item in bundle.packet["artifacts"]} == {
+        "/workspace/recon/hosts.txt",
+        "/workspace/recon/probe.py",
+    }
+    assert "a.example.test" in output
+    assert "symlink" in output
 
 
 @pytest.mark.asyncio
@@ -494,12 +677,8 @@ async def test_defer_without_an_approval_channel_blocks(tmp_path: Path) -> None:
     assert "no human approval channel" in payload["safety"]["reason"]
 
 
-@pytest.mark.parametrize("command", ["rm -rf /workspace", ""])
 @pytest.mark.asyncio
-async def test_deterministic_and_incomplete_blocks_never_request_approval(
-    tmp_path: Path,
-    command: str,
-) -> None:
+async def test_deterministic_blocks_never_request_approval(tmp_path: Path) -> None:
     approval_calls = 0
 
     async def approve(_request: SafetyApprovalRequest) -> bool:
@@ -513,12 +692,101 @@ async def test_deterministic_and_incomplete_blocks_never_request_approval(
 
     result = await runtime.invoke_exec(
         ctx=_ctx(),
-        arguments={"cmd": command},
+        arguments={"cmd": "rm -rf /workspace"},
         invoke_tool=_noop_invoke,
     )
 
     assert json.loads(result)["status"] == "blocked"
     assert reviewer.calls == 0
+    assert approval_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_interactive_incomplete_evidence_reaches_reviewer_and_human(tmp_path: Path) -> None:
+    approval_calls = 0
+
+    async def deny(_request: SafetyApprovalRequest) -> bool:
+        nonlocal approval_calls
+        approval_calls += 1
+        return False
+
+    runtime = _runtime(tmp_path, "guarded", deny)
+    reviewer = _StubReviewer(decision=_deferred())
+    runtime._reviewer = reviewer
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": ""},
+        invoke_tool=_noop_invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["status"] == "blocked"
+    assert payload["safety"]["source"] == "human"
+    assert reviewer.calls == 1
+    assert approval_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_headless_incomplete_evidence_still_fails_closed(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    reviewer = _StubReviewer(decision=_deferred())
+    runtime._reviewer = reviewer
+
+    result = await runtime.invoke_exec(
+        ctx=_ctx(),
+        arguments={"cmd": ""},
+        invoke_tool=_noop_invoke,
+    )
+
+    payload = json.loads(result)
+    assert payload["safety"]["categories"] == ["incomplete_evidence"]
+    assert reviewer.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_headless_reviewable_uncertainty_reaches_reviewer_and_can_allow(
+    tmp_path: Path,
+) -> None:
+    sandbox = _Sandbox()
+    sandbox.files["/workspace/app.py"] = b"import requests\nimport sys\nrequests.get(sys.argv[1])\n"
+    runtime = _runtime(tmp_path, "guarded")
+    reviewer = _StubReviewer()
+    runtime._reviewer = reviewer
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(sandbox),
+        arguments={"cmd": "python /workspace/app.py https://example.test"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert result == "patched"
+    assert reviewer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_interactive_resolved_reviewable_issue_does_not_prompt_user(tmp_path: Path) -> None:
+    approval_calls = 0
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        nonlocal approval_calls
+        approval_calls += 1
+        return True
+
+    sandbox = _Sandbox()
+    sandbox.files["/workspace/app.py"] = b"import requests\nimport sys\nrequests.get(sys.argv[1])\n"
+    runtime = _runtime(tmp_path, "guarded", approve)
+    reviewer = _StubReviewer()
+    runtime._reviewer = reviewer
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(sandbox),
+        arguments={"cmd": "python /workspace/app.py https://example.test"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert result == "patched"
+    assert reviewer.calls == 1
     assert approval_calls == 0
 
 
@@ -598,19 +866,16 @@ async def test_review_does_not_hold_the_workspace_lock(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_workspace_change_during_review_invalidates_the_decision(tmp_path: Path) -> None:
+async def test_epoch_change_with_unchanged_evidence_executes(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path, "guarded")
 
     async def on_review() -> None:
         runtime._workspace_epoch += 1
 
     runtime._reviewer = _StubReviewer(on_review)
-    invoked = False
 
     async def invoke(_ctx: Any, _raw_input: str) -> str:
-        nonlocal invoked
-        invoked = True
-        return "bad"
+        return "ran"
 
     result = await runtime.invoke_exec(
         ctx=_script_ctx(),
@@ -618,14 +883,17 @@ async def test_workspace_change_during_review_invalidates_the_decision(tmp_path:
         invoke_tool=invoke,
     )
 
-    payload = json.loads(result)
-    assert payload["status"] == "blocked"
-    assert payload["safety"]["categories"] == ["stale_evidence"]
-    assert invoked is False
+    assert result == "ran"
+    assert runtime._reviewer.calls == 1
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / ".state" / "safety-audit.jsonl").read_text().splitlines()
+    ]
+    assert any(entry["execution_status"] == "evidence_unchanged" for entry in entries)
 
 
 @pytest.mark.asyncio
-async def test_workspace_change_during_human_approval_invalidates_the_decision(
+async def test_epoch_change_during_human_approval_with_unchanged_evidence_executes(
     tmp_path: Path,
 ) -> None:
     runtime: SafetyRuntime
@@ -636,12 +904,9 @@ async def test_workspace_change_during_human_approval_invalidates_the_decision(
 
     runtime = _runtime(tmp_path, "guarded", approve)
     runtime._reviewer = _StubReviewer(decision=_deferred())
-    invoked = False
 
     async def invoke(_ctx: Any, _raw_input: str) -> str:
-        nonlocal invoked
-        invoked = True
-        return "bad"
+        return "ran"
 
     result = await runtime.invoke_exec(
         ctx=_script_ctx(),
@@ -649,10 +914,7 @@ async def test_workspace_change_during_human_approval_invalidates_the_decision(
         invoke_tool=invoke,
     )
 
-    payload = json.loads(result)
-    assert payload["status"] == "blocked"
-    assert payload["safety"]["categories"] == ["stale_evidence"]
-    assert invoked is False
+    assert result == "ran"
 
 
 @pytest.mark.asyncio
@@ -710,9 +972,7 @@ async def test_guarded_patch_runs_and_advances_the_workspace_epoch(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_a_patch_during_review_invalidates_a_script_decision(tmp_path: Path) -> None:
-    """End-to-end pairing of the two halves: apply_patch bumps the epoch, and a decision
-    compiled before it is refused rather than executed against changed sources."""
+async def test_noop_patch_during_review_does_not_block_script_execution(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path, "guarded")
 
     async def patch_during_review() -> None:
@@ -724,12 +984,9 @@ async def test_a_patch_during_review_invalidates_a_script_decision(tmp_path: Pat
         )
 
     runtime._reviewer = _StubReviewer(patch_during_review)
-    invoked = False
 
     async def invoke(_ctx: Any, _raw_input: str) -> str:
-        nonlocal invoked
-        invoked = True
-        return "bad"
+        return "ran"
 
     result = await runtime.invoke_exec(
         ctx=_script_ctx(),
@@ -737,9 +994,122 @@ async def test_a_patch_during_review_invalidates_a_script_decision(tmp_path: Pat
         invoke_tool=invoke,
     )
 
+    assert result == "ran"
+    assert runtime._reviewer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_changed_reviewed_file_is_automatically_re_reviewed(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    sandbox = _Sandbox()
+    reviews = 0
+
+    async def change_once() -> None:
+        nonlocal reviews
+        reviews += 1
+        if reviews == 1:
+            sandbox.files["/workspace/app.py"] = b"print(2)\n"
+            runtime._workspace_epoch += 1
+
+    runtime._reviewer = _StubReviewer(change_once)
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(sandbox),
+        arguments={"cmd": "python /workspace/app.py"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert result == "patched"
+    assert runtime._reviewer.calls == 2
+    entries = [
+        json.loads(line)
+        for line in (tmp_path / ".state" / "safety-audit.jsonl").read_text().splitlines()
+    ]
+    assert any(entry["execution_status"] == "evidence_changed_re_reviewing" for entry in entries)
+
+
+@pytest.mark.asyncio
+async def test_changed_file_after_human_approval_requires_new_approval(tmp_path: Path) -> None:
+    runtime: SafetyRuntime
+    sandbox = _Sandbox()
+    approvals = 0
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        nonlocal approvals
+        approvals += 1
+        if approvals == 1:
+            sandbox.files["/workspace/app.py"] = b"print(2)\n"
+            runtime._workspace_epoch += 1
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(sandbox),
+        arguments={"cmd": "python /workspace/app.py"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert result == "patched"
+    assert approvals == 2
+    assert runtime._reviewer.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_unchanged_human_approved_evidence_does_not_prompt_again(
+    tmp_path: Path,
+) -> None:
+    runtime: SafetyRuntime
+    sandbox = _Sandbox()
+    sandbox.files["/workspace/app.py"] = b"exec(input())\n"
+    approvals = 0
+
+    async def approve(_request: SafetyApprovalRequest) -> bool:
+        nonlocal approvals
+        approvals += 1
+        if approvals == 1:
+            runtime._workspace_epoch += 1
+        return True
+
+    runtime = _runtime(tmp_path, "guarded", approve)
+    runtime._reviewer = _StubReviewer(decision=_deferred())
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(sandbox),
+        arguments={"cmd": "python /workspace/app.py"},
+        invoke_tool=_noop_invoke,
+    )
+
+    assert result == "patched"
+    assert approvals == 1
+    assert runtime._reviewer.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_repeated_evidence_churn_stops_after_bounded_re_reviews(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path, "guarded")
+    sandbox = _Sandbox()
+    changes = 0
+
+    async def change_every_time() -> None:
+        nonlocal changes
+        changes += 1
+        sandbox.files["/workspace/app.py"] = f"print({changes + 1})\n".encode()
+        runtime._workspace_epoch += 1
+
+    runtime._reviewer = _StubReviewer(change_every_time)
+
+    result = await runtime.invoke_exec(
+        ctx=_script_ctx(sandbox),
+        arguments={"cmd": "python /workspace/app.py"},
+        invoke_tool=_noop_invoke,
+    )
+
     payload = json.loads(result)
-    assert payload["safety"]["categories"] == ["stale_evidence"]
-    assert invoked is False
+    assert payload["status"] == "blocked"
+    assert payload["safety"]["categories"] == ["evidence_churn"]
+    assert runtime._reviewer.calls == 3
 
 
 async def _noop_invoke(_ctx: Any, _raw_input: str) -> str:

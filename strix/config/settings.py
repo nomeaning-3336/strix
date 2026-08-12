@@ -11,6 +11,29 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
 SafetyMode = Literal["off", "guarded"]
 SAFETY_MODES: tuple[SafetyMode, ...] = ("off", "guarded")
+# The mode a scan runs in unless the operator opts out with
+# --dangerously-disable-safety. Reads of a missing safety_mode key default here.
+DEFAULT_SAFETY_MODE: SafetyMode = "guarded"
+
+ResumeSafetyModeError = Literal["observe_removed", "invalid", "changed"]
+
+
+def resume_safety_mode_error(
+    persisted: str, requested: SafetyMode
+) -> ResumeSafetyModeError | None:
+    """Why a persisted run's safety mode blocks resuming as ``requested``, or None.
+
+    One source of truth for the resume policy, shared by the CLI pre-check and the
+    runner's defense-in-depth check so the two cannot drift. Each caller formats its
+    own message (the CLI further splits "changed" by direction).
+    """
+    if persisted == "observe":
+        return "observe_removed"
+    if persisted not in SAFETY_MODES:
+        return "invalid"
+    if persisted != requested:
+        return "changed"
+    return None
 
 DEFAULT_MAX_TURNS = 500
 

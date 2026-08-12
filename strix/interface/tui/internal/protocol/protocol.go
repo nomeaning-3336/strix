@@ -2,14 +2,14 @@ package protocol
 
 import "encoding/json"
 
-const Version = 4
+const Version = 5
 
 var Capabilities = []string{
 	"state-revisions",
 	"collection-deltas",
 	"structured-command-errors",
 	"agents-collection",
-	"safety-approval",
+	"safety-approvals",
 }
 
 type Envelope struct {
@@ -64,7 +64,8 @@ type Snapshot struct {
 	TargetCount         int              `json:"target_count"`
 	WorkingDir          string           `json:"working_dir"`
 	PendingMount        string           `json:"pending_mount"`
-	PendingApproval     *SafetyApproval  `json:"pending_approval"`
+	PendingApprovals    []SafetyApproval `json:"pending_approvals"`
+	SafetyDisabled      bool             `json:"safety_disabled"`
 	Instruction         string           `json:"instruction"`
 	ScanMode            string           `json:"scan_mode"`
 	MaxBudgetUSD        *float64         `json:"max_budget_usd"`

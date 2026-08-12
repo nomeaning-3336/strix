@@ -7,7 +7,11 @@ import sys
 from pathlib import Path
 
 from strix.config import apply_config_override, load_settings
-from strix.config.settings import DEFAULT_MAX_TURNS, SAFETY_MODES
+from strix.config.settings import (
+    DEFAULT_MAX_TURNS,
+    DEFAULT_SAFETY_MODE,
+    resume_safety_mode_error,
+)
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.interface.scan_setup import attach_workspace_mount, build_targets_info
 from strix.interface.update_check import self_update
@@ -269,7 +273,7 @@ Examples:
         load_settings()
     except ValueError as exc:
         parser.error(str(exc))
-    args.safety_mode = "off" if args.dangerously_disable_safety else "guarded"
+    args.safety_mode = "off" if args.dangerously_disable_safety else DEFAULT_SAFETY_MODE
 
     if args.update:
         sys.exit(0 if self_update() else 1)
@@ -399,16 +403,17 @@ def _load_resume_state(args: argparse.Namespace, parser: argparse.ArgumentParser
     if persisted_scan_mode and args.scan_mode == "deep":
         args.scan_mode = persisted_scan_mode
     persisted_safety_mode = state.get("safety_mode", "off")
-    if persisted_safety_mode == "observe":
+    requested_safety_mode = "off" if args.dangerously_disable_safety else DEFAULT_SAFETY_MODE
+    reason = resume_safety_mode_error(persisted_safety_mode, requested_safety_mode)
+    if reason == "observe_removed":
         parser.error(
             f"--resume {args.resume}: observe mode was removed and this run cannot be resumed"
         )
-    if persisted_safety_mode not in SAFETY_MODES:
+    if reason == "invalid":
         parser.error(
             f"--resume {args.resume}: run.json has invalid safety_mode {persisted_safety_mode!r}"
         )
-    requested_safety_mode = "off" if args.dangerously_disable_safety else "guarded"
-    if requested_safety_mode != persisted_safety_mode:
+    if reason == "changed":
         if persisted_safety_mode == "off":
             parser.error(
                 f"--resume {args.resume}: this run was created with safety disabled; pass "

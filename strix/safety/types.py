@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+if TYPE_CHECKING:
+    from strix.safety.inspection import InspectionRunner
 
 
 SafetyRisk = Literal["low", "medium", "high", "critical"]
@@ -51,11 +55,14 @@ class SafetyApprovalRequest:
 
 SafetyApprovalOutcome = bool | Literal["cancelled"]
 SafetyApprovalCallback = Callable[[SafetyApprovalRequest], Awaitable[SafetyApprovalOutcome]]
+WorkspaceEvidenceCollector = Callable[[tuple[str, ...]], Awaitable[tuple[str, bool]]]
 
 
 @dataclass(slots=True)
 class InspectionContext:
     evidence_dir: str
-    runner: object
+    runner: InspectionRunner
+    collect_workspace: WorkspaceEvidenceCollector | None = None
     used: bool = False
+    attempts: int = 0
     incomplete: bool = False

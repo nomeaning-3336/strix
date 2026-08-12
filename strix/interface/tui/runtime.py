@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from strix.config import load_settings, persist_current
+from strix.config.settings import DEFAULT_SAFETY_MODE
 from strix.core.agents import AgentCoordinator
 from strix.core.hooks import BudgetExceededError
 from strix.core.runner import run_strix_scan
@@ -79,7 +80,7 @@ class GoTuiRuntime:
             "run_name": self.args.run_name,
             "diff_scope": self.args.diff_scope,
             "scan_mode": self.args.scan_mode,
-            "safety_mode": getattr(self.args, "safety_mode", "guarded"),
+            "safety_mode": getattr(self.args, "safety_mode", DEFAULT_SAFETY_MODE),
             "non_interactive": False,
             "local_sources": self.args.local_sources or [],
             "scope_mode": self.args.scope_mode,
@@ -184,6 +185,7 @@ class GoTuiRuntime:
                 max_budget_usd=self.args.max_budget_usd,
                 event_sink=self.capture_event,
                 safety_approval_callback=self.controller.safety_approval_callback,
+                safety_runtime_sink=self.controller.register_safety_runtime,
             )
             await self._sync_agent_state()
             if self.controller.scan_state == "running":

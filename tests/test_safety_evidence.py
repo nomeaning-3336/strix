@@ -39,6 +39,18 @@ class _Sandbox:
         return io.BytesIO(self.files[key].encode())
 
 
+class WorkspaceReadNotFoundError(Exception):
+    pass
+
+
+class _SdkSandbox(_Sandbox):
+    async def read(self, path: Path) -> io.BytesIO:
+        key = path.as_posix()
+        if key not in self.files:
+            raise WorkspaceReadNotFoundError(f"file not found: {key}")
+        return await super().read(path)
+
+
 def _facts(source: str) -> _PythonFacts:
     facts = _PythonFacts()
     facts.visit(ast.parse(source))
@@ -116,6 +128,113 @@ async def test_python_script_collects_local_dependency_source() -> None:
 
 
 @pytest.mark.asyncio
+async def test_python_path_read_text_collects_literal_input() -> None:
+    hosts_map = "/workspace/recon_infra/hosts_map.txt"
+    bundle = await _compile(
+        "python /workspace/recon.py",
+        {
+            "/workspace/recon.py": (
+                "from pathlib import Path\n"
+                f"HOSTS_MAP = {hosts_map!r}\n"
+                "hosts_path = Path(HOSTS_MAP)\n"
+                "print(hosts_path.read_text())\n"
+            ),
+            hosts_map: "admin.example.test\napi.example.test\n",
+        },
+    )
+    try:
+        inputs = [item for item in bundle.packet["artifacts"] if item.get("role") == "input"]
+        assert [item["path"] for item in inputs] == [hosts_map]
+        assert "admin.example.test" in inputs[0]["source"]
+        assert bundle.complete is True
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "source",
+    [
+        "hosts_file = '/workspace/hosts_map.txt'\nopen(hosts_file).read()\n",
+        (
+            "from pathlib import Path\n"
+            "hosts_file = Path('/workspace/hosts_map.txt')\n"
+            "open(hosts_file, 'rb').read()\n"
+        ),
+    ],
+)
+async def test_python_open_variable_collects_literal_input(source: str) -> None:
+    bundle = await _compile(
+        "python /workspace/recon.py",
+        {
+            "/workspace/recon.py": source,
+            "/workspace/hosts_map.txt": "one.example.test\n",
+        },
+    )
+    try:
+        inputs = [item for item in bundle.packet["artifacts"] if item.get("role") == "input"]
+        assert [item["path"] for item in inputs] == ["/workspace/hosts_map.txt"]
+    finally:
+        bundle.cleanup()
+
+
+def test_python_write_and_update_modes_are_not_input_dependencies() -> None:
+    facts = _facts(
+        "from pathlib import Path\n"
+        "path = Path('/workspace/output.txt')\n"
+        "open(path, 'w')\n"
+        "open(path, mode='a')\n"
+        "path.open('x')\n"
+        "path.open('r+')\n"
+    )
+
+    assert facts.input_files == set()
+
+
+@pytest.mark.asyncio
+async def test_sdk_not_found_errors_do_not_make_external_imports_incomplete() -> None:
+    ctx = SimpleNamespace(
+        context={
+            "agent_id": "agent-1",
+            "sandbox_session": _SdkSandbox(
+                {"/workspace/check.py": "import json\nfrom pathlib import Path\n"}
+            ),
+        },
+        tool_call_id="call-1",
+        turn_input=[],
+    )
+    bundle = await compile_evidence(
+        case_id="case-sdk-not-found",
+        ctx=ctx,
+        arguments={"cmd": "python /workspace/check.py"},
+        mode="guarded",
+        scope={},
+        user_instruction="",
+        settings=SafetySettings(),
+    )
+    try:
+        assert bundle.complete is True
+        assert bundle.incomplete_reasons == []
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_missing_relative_import_remains_incomplete() -> None:
+    bundle = await _compile(
+        "python /workspace/pkg/check.py",
+        {"/workspace/pkg/check.py": "from .missing import value\n"},
+    )
+    try:
+        assert bundle.complete is False
+        assert any(
+            "required relative import is missing" in item for item in bundle.incomplete_reasons
+        )
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_browser_automation_inside_script_is_blocked() -> None:
     bundle = await compile_evidence(
         case_id="case-2",
@@ -176,7 +295,7 @@ async def test_dynamic_exec_makes_script_evidence_incomplete() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dynamic_network_destination_is_incomplete() -> None:
+async def test_dynamic_network_destination_is_reviewable() -> None:
     bundle = await compile_evidence(
         case_id="case-dynamic-network",
         ctx=_ctx(
@@ -189,8 +308,203 @@ async def test_dynamic_network_destination_is_incomplete() -> None:
         settings=SafetySettings(),
     )
     try:
+        assert bundle.complete is True
+        assert bundle.incomplete_reasons == []
+        assert any("dynamic network destination" in item for item in bundle.reviewable_issues)
+        assert bundle.packet["completeness"]["status"] == "reviewable"
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_http_client_constructor_is_not_a_dynamic_request() -> None:
+    bundle = await _compile(
+        "python /workspace/client.py",
+        {"/workspace/client.py": "import requests\nsession = requests.Session()\n"},
+    )
+    try:
+        assert bundle.complete is True
+        assert bundle.packet["artifacts"][0]["dynamic_features"] == []
+    finally:
+        bundle.cleanup()
+
+
+def test_compound_shell_loop_with_script_named_data_is_not_unresolved_execution() -> None:
+    plan = parse_command('for url in app.js; do curl "$url"; done')
+
+    assert plan.compound is True
+    assert plan.parse_error is None
+
+
+def test_compound_command_with_one_safe_later_script_is_resolved() -> None:
+    plan = parse_command("echo ready && python /workspace/payload.py")
+
+    assert plan.parse_error is None
+    assert plan.script_path == "/workspace/payload.py"
+
+
+@pytest.mark.asyncio
+async def test_accessible_later_compound_script_is_frozen() -> None:
+    bundle = await _compile(
+        "echo ready && python payload.py",
+        {"/workspace/payload.py": "print('inspected')\n"},
+    )
+    try:
+        assert bundle.complete is True
+        assert [item["path"] for item in bundle.packet["artifacts"]] == ["/workspace/payload.py"]
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_compound_script_resolves_simple_preceding_cd() -> None:
+    bundle = await _compile(
+        "cd recon && python payload.py",
+        {"/workspace/recon/payload.py": "print('inspected')\n"},
+    )
+    try:
+        assert bundle.complete is True
+        assert bundle.packet["artifacts"][0]["path"] == "/workspace/recon/payload.py"
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.parametrize("target", ["~", "$HOME", "repo*"])
+def test_compound_dynamic_or_escaping_cd_is_not_frozen_as_workspace_script(target: str) -> None:
+    plan = parse_command(f"cd {target} && python payload.py")
+
+    assert plan.parse_error is not None
+    assert plan.script_path is None
+
+
+def test_multiple_compound_script_executions_remain_incomplete() -> None:
+    plan = parse_command("echo ready && python first.py && python second.py")
+
+    assert plan.parse_error is not None
+    assert "issue the script execution separately" in plan.parse_error
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cd recon; python payload.py", "printf data | python payload.py"],
+)
+def test_ambiguous_compound_script_context_remains_incomplete(command: str) -> None:
+    assert parse_command(command).parse_error is not None
+
+
+def test_shell_control_prefix_cannot_hide_script_execution() -> None:
+    plan = parse_command("if true; then python /workspace/payload.py; fi")
+
+    assert plan.parse_error is not None
+    assert "issue the script execution separately" in plan.parse_error
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python /workspace/payload.py &",
+        "echo $(python /workspace/payload.py)",
+        "diff <(python /workspace/payload.py) /dev/null",
+    ],
+)
+def test_background_and_substitution_scripts_are_incomplete(command: str) -> None:
+    assert parse_command(command).parse_error is not None
+
+
+@pytest.mark.asyncio
+async def test_non_code_shell_substitution_is_reviewable() -> None:
+    bundle = await _compile(
+        "set -e; status=$(curl -s https://example.test); printf '%s' \"$status\""
+    )
+    try:
+        assert bundle.complete is True
+        assert bundle.incomplete_reasons == []
+        assert bundle.reviewable_issues == ["shell substitution requires contextual review"]
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_timeout_wrapped_non_script_command_is_reviewable() -> None:
+    bundle = await _compile("timeout 10 curl -s https://example.test")
+    try:
+        assert bundle.complete is True
+        assert bundle.reviewable_issues == ["timeout wrapper requires contextual review"]
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_code_shell_substitution_remains_a_hard_gap() -> None:
+    bundle = await _compile("echo $(python /workspace/payload.py)")
+    try:
         assert bundle.complete is False
-        assert any("dynamic network destination" in item for item in bundle.incomplete_reasons)
+        assert any("executes code" in item for item in bundle.incomplete_reasons)
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_inline_shell_workspace_script_is_not_reusable_evidence() -> None:
+    bundle = await _compile(
+        "bash -c 'python /workspace/payload.py'",
+        {"/workspace/payload.py": "print('ok')\n"},
+    )
+    try:
+        assert bundle.complete is False
+        assert bundle.workspace_evidence is True
+        assert any("workspace-dependent" in item for item in bundle.incomplete_reasons)
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if true; then sudo python /workspace/payload.py; fi",
+        "if true; then custom-runner /workspace/payload.py; fi",
+        "case x in x) python /workspace/payload.py;; esac",
+    ],
+)
+def test_wrapped_script_in_shell_control_flow_is_incomplete(command: str) -> None:
+    plan = parse_command(command)
+
+    assert plan.parse_error is not None
+    assert "issue the script execution separately" in plan.parse_error
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'import requests\nrequests.request("DELETE", target)\n',
+        "import urllib.request\nurllib.request.urlopen(target)\n",
+        "import urllib.request\nurllib.request.urlretrieve(target, '/workspace/out')\n",
+        "import requests.sessions\nrequests.sessions.Session.send(session, prepared)\n",
+        'import httpx\nhttpx.stream("GET", target)\n',
+        "import urllib.request\nurllib.request.OpenerDirector.open(opener, target)\n",
+    ],
+)
+@pytest.mark.asyncio
+async def test_dynamic_request_destination_variants_are_reviewable(source: str) -> None:
+    bundle = await _compile(
+        "python /workspace/client.py",
+        {"/workspace/client.py": source},
+    )
+    try:
+        assert bundle.complete is True
+        assert any("dynamic network destination" in item for item in bundle.reviewable_issues)
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_urllib_request_constructor_is_not_a_network_call() -> None:
+    bundle = await _compile(
+        "python /workspace/client.py",
+        {"/workspace/client.py": "import urllib.request\nurllib.request.Request(target)\n"},
+    )
+    try:
+        assert bundle.complete is True
     finally:
         bundle.cleanup()
 
@@ -341,6 +655,38 @@ async def test_relative_imports_are_collected() -> None:
         paths = {item["path"] for item in bundle.packet["artifacts"]}
         assert "/workspace/pkg/payload.py" in paths
         assert "/workspace/sibling.py" in paths
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_relative_imported_attribute_is_not_required_as_a_submodule() -> None:
+    bundle = await _compile(
+        "python /workspace/pkg/main.py",
+        {
+            "/workspace/pkg/main.py": "from .config import VALUE\n",
+            "/workspace/pkg/config.py": "VALUE = 1\n",
+        },
+    )
+    try:
+        assert bundle.complete is True
+        paths = {item["path"] for item in bundle.packet["artifacts"]}
+        assert "/workspace/pkg/config.py" in paths
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_direct_package_relative_attribute_is_optional() -> None:
+    bundle = await _compile(
+        "python /workspace/pkg/main.py",
+        {
+            "/workspace/pkg/main.py": "from . import VALUE\n",
+            "/workspace/pkg/__init__.py": "VALUE = 1\n",
+        },
+    )
+    try:
+        assert bundle.complete is True
     finally:
         bundle.cleanup()
 
@@ -848,11 +1194,22 @@ async def test_shell_field_does_not_hide_a_genuine_bash_c_payload() -> None:
 def test_redirect_input_files_are_parsed_not_heredocs() -> None:
     assert parse_command("cmd < in.txt").input_files == ["in.txt"]
     assert parse_command('x < "my hosts.txt" > out.txt').input_files == ["my hosts.txt"]
+    assert parse_command("cmd 3<'fd hosts.txt'").input_files == ["fd hosts.txt"]
+    assert parse_command(r"cmd < escaped\ hosts.txt").input_files == ["escaped hosts.txt"]
     # A heredoc and a process substitution are not files to read.
     assert parse_command("cat <<EOF").input_files == []
     assert parse_command("diff <(a) <(b)").input_files == []
     # Output redirection is not an input.
     assert parse_command("sort f > out.txt").input_files == []
+
+
+def test_redirect_scanner_ignores_quoted_escaped_and_commented_patterns() -> None:
+    assert parse_command("rg '<form' /workspace/page.html").input_files == []
+    assert parse_command(r"printf \<form").input_files == []
+    assert parse_command("printf ok # < ignored.txt").input_files == []
+    assert parse_command("printf ok # < ignored.txt\ncat < actual.txt").input_files == [
+        "actual.txt"
+    ]
 
 
 @pytest.mark.asyncio
@@ -876,10 +1233,56 @@ async def test_workspace_input_file_is_attached_for_action_review() -> None:
 
 
 @pytest.mark.asyncio
+async def test_relative_workdir_is_normalized_for_scripts_inputs_and_packet() -> None:
+    bundle = await _compile(
+        "python recon.py",
+        {
+            "/workspace/repo/recon.py": (
+                "from pathlib import Path\nprint(Path('hosts_map.txt').read_text())\n"
+            ),
+            "/workspace/repo/hosts_map.txt": "api.example.test\n",
+        },
+        workdir="repo",
+    )
+    try:
+        assert bundle.packet["pending_action"]["workdir"] == "/workspace/repo"
+        artifacts = bundle.packet["artifacts"]
+        assert artifacts[0]["path"] == "/workspace/repo/recon.py"
+        inputs = [item for item in artifacts if item.get("role") == "input"]
+        assert [item["path"] for item in inputs] == ["/workspace/repo/hosts_map.txt"]
+        assert bundle.complete is True
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_tmp_input_file_is_reported_as_unavailable_evidence() -> None:
+    tmp_input = "/tmp/hosts.txt"  # noqa: S108 - sandbox fixture path
+    bundle = await _compile(
+        f'while read -r host; do curl "$host"; done < {tmp_input}',
+        {tmp_input: "https://example.test\n"},
+        workdir="/workspace",
+    )
+    try:
+        inputs = [a for a in bundle.packet["artifacts"] if a.get("role") == "input"]
+        assert inputs == []
+        assert bundle.complete is False
+        assert any(
+            "outside the inspectable workspace" in item for item in bundle.incomplete_reasons
+        )
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
 async def test_input_file_outside_the_workspace_is_not_read() -> None:
     bundle = await _compile("cat < /etc/passwd", workdir="/workspace")
     try:
         assert [a for a in bundle.packet["artifacts"] if a.get("role") == "input"] == []
+        assert bundle.complete is False
+        assert any(
+            "outside the inspectable workspace" in item for item in bundle.incomplete_reasons
+        )
     finally:
         bundle.cleanup()
 
@@ -901,6 +1304,8 @@ async def test_oversize_input_file_is_attached_truncated() -> None:
         [inp] = [a for a in bundle.packet["artifacts"] if a.get("role") == "input"]
         assert inp["truncated"] is True
         assert inp["bytes"] <= settings.max_artifact_bytes
+        assert bundle.complete is False
+        assert any("input file is truncated" in item for item in bundle.incomplete_reasons)
     finally:
         bundle.cleanup()
 
@@ -931,10 +1336,48 @@ def test_data_tools_reading_script_named_files_are_not_execution(command: str) -
         ("nuclei --list targets.txt -severity high", ["targets.txt"]),
         ("ffuf -w=words.txt -u https://x/FUZZ", ["words.txt"]),
         ("subfinder -d x -o out.txt", []),  # -o is output, not a list input
+        ("grep -l pattern /workspace/app.py", []),
+        ("curl -w '%{http_code}' https://example.test", []),
+        ("nmap -iL /workspace/hosts.txt", ["/workspace/hosts.txt"]),
+        ("masscan -iL /workspace/hosts.txt", ["/workspace/hosts.txt"]),
+        ("ffuf -w /workspace/words.txt:FUZZ -u https://x/FUZZ", ["/workspace/words.txt"]),
     ],
 )
 def test_list_flag_files_are_parsed(command: str, expected: list[str]) -> None:
     assert parse_command(command).input_files == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("curl --data-binary @/workspace/body.json https://example.test", ["/workspace/body.json"]),
+        ("curl --json=@/workspace/body.json https://example.test", ["/workspace/body.json"]),
+        ("curl -T /workspace/upload.bin https://example.test", ["/workspace/upload.bin"]),
+        ("curl -F file=@/workspace/upload.bin https://example.test", ["/workspace/upload.bin"]),
+        ("wget --post-file=/workspace/body.json https://example.test", ["/workspace/body.json"]),
+        (
+            "curl --data-urlencode query@/workspace/body.txt https://example.test",
+            ["/workspace/body.txt"],
+        ),
+        ("http POST https://example.test query@/workspace/body.txt", ["/workspace/body.txt"]),
+    ],
+)
+def test_request_body_files_are_parsed(command: str, expected: list[str]) -> None:
+    assert parse_command(command).input_files == expected
+
+
+@pytest.mark.asyncio
+async def test_request_body_file_is_frozen_as_input_evidence() -> None:
+    bundle = await _compile(
+        "curl --data-binary @/workspace/body.json https://example.test",
+        {"/workspace/body.json": '{"probe": true}\n'},
+    )
+    try:
+        inputs = [item for item in bundle.packet["artifacts"] if item.get("role") == "input"]
+        assert [item["path"] for item in inputs] == ["/workspace/body.json"]
+        assert bundle.workspace_evidence is True
+    finally:
+        bundle.cleanup()
 
 
 @pytest.mark.asyncio
@@ -951,6 +1394,20 @@ async def test_wordlist_flag_file_is_attached_for_action_review() -> None:
         assert [a["path"] for a in inputs] == ["/workspace/paths.txt"]
         assert "admin" in inputs[0]["source"]
         assert bundle.workspace_evidence is True
+    finally:
+        bundle.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_positional_workspace_data_file_is_attached() -> None:
+    bundle = await _compile(
+        "jq -r '.name' /workspace/recon/cert_names.txt",
+        {"/workspace/recon/cert_names.txt": '{"name":"example.test"}\n'},
+    )
+    try:
+        inputs = [item for item in bundle.packet["artifacts"] if item.get("role") == "input"]
+        assert [item["path"] for item in inputs] == ["/workspace/recon/cert_names.txt"]
+        assert bundle.complete is True
     finally:
         bundle.cleanup()
 

@@ -261,7 +261,7 @@ class TuiBackendServer:
         ).encode("utf-8")
         maximum = (
             MAX_COLLECTION_FRAME_BYTES
-            if message.get("type") in {"collection_bootstrap", "collection_delta"}
+            if message.get("type") in {"collection_bootstrap", "collection_delta", "state"}
             else MAX_COMMAND_BYTES
         )
         if len(raw) > maximum:

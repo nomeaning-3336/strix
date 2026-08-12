@@ -431,6 +431,7 @@ func (m *Model) refreshAfterCollection(name string) tea.Cmd {
 	if name == "agents" {
 		m.ensureAgentVisible()
 		m.refreshViewport()
+		m.syncSafetyApprovalPrompt()
 		return m.notifyBudgetPause()
 	}
 	if name == "events" {

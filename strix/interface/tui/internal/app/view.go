@@ -684,9 +684,17 @@ func (m Model) statusView(width int) string {
 		quitHint := lipgloss.NewStyle().Foreground(white).Render("ctrl-q") + lipgloss.NewStyle().Foreground(dim).Render(" ") + lipgloss.NewStyle().Foreground(dim).Render("quit")
 		switch agent.Status {
 		case "running":
-			if m.agentHasEvents(agent.ID) {
+			switch {
+			case m.pendingApprovalForSelectedAgent() != nil:
+				// The agent is blocked on its own tool call until the prompt is
+				// answered; esc denies rather than stops here, so the "esc stop"
+				// hint would be wrong. Show that it is paused for the decision.
+				left = m.sweepView() +
+					lipgloss.NewStyle().Foreground(amber).Render("⏸ paused") +
+					lipgloss.NewStyle().Foreground(dim).Render(" · awaiting your approval")
+			case m.agentHasEvents(agent.ID):
 				left = m.sweepView() + lipgloss.NewStyle().Foreground(white).Render("esc") + lipgloss.NewStyle().Foreground(dim).Render(" ") + lipgloss.NewStyle().Foreground(dim).Render("stop")
-			} else {
+			default:
 				left = m.sweepView() + lipgloss.NewStyle().Foreground(white).Render("Initializing")
 			}
 			right = quitHint
@@ -713,6 +721,16 @@ func (m Model) statusView(width int) string {
 	}
 	if m.errorText != "" {
 		left = statusMessage(m.errorText, red, "", width-lipgloss.Width(right))
+	}
+	// Once "approve all" turns review off, keep a standing hazard flag on the row
+	// so it is never a surprise that actions are no longer being checked.
+	if m.snapshot.SafetyDisabled {
+		badge := lipgloss.NewStyle().Bold(true).Foreground(red).Render("⚠ review off")
+		if right != "" {
+			right = badge + lipgloss.NewStyle().Foreground(dim).Render(" · ") + right
+		} else {
+			right = badge
+		}
 	}
 	return composeStatusRow(left, right, width)
 }

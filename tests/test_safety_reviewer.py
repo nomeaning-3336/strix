@@ -8,7 +8,16 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
+from agents import Agent, Runner
+from agents.items import ModelResponse
+from agents.models.interface import Model
 from agents.tool_context import ToolContext
+from agents.usage import Usage
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 
 import strix.safety.reviewer as reviewer_module
 from strix.config.settings import SafetySettings
@@ -157,6 +166,193 @@ async def test_inspection_tool_can_only_run_once(tmp_path: Path) -> None:
     assert "inspected" in first
     assert "already used" in second
     assert runner.calls == 1
+    assert state.attempts == 2
+    assert state.incomplete is True
+
+
+@pytest.mark.asyncio
+async def test_inspection_collects_workspace_files_before_running_script(tmp_path: Path) -> None:
+    collected: list[tuple[str, ...]] = []
+
+    async def collect(paths: tuple[str, ...]) -> tuple[str, bool]:
+        collected.append(paths)
+        return '{"workspace_artifacts":[{"path":"/workspace/hosts.txt"}]}', False
+
+    runner = _InspectionRunner()
+    state = InspectionContext(
+        evidence_dir=str(tmp_path),
+        runner=runner,
+        collect_workspace=collect,
+    )
+    ctx = ToolContext(
+        context=state,
+        tool_name="run_inspection",
+        tool_call_id="inspect-collect",
+        tool_arguments="{}",
+    )
+
+    result = await run_inspection.on_invoke_tool(
+        ctx,
+        json.dumps(
+            {
+                "reason": "resolve host list",
+                "workspace_paths": ["/workspace/hosts.txt"],
+                "script": "print('analyzed')",
+            }
+        ),
+    )
+
+    assert collected == [("/workspace/hosts.txt",)]
+    assert "workspace_artifacts" in result
+    assert "inspected" in result
+    assert runner.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_inspection_can_collect_without_analysis_script(tmp_path: Path) -> None:
+    async def collect(_paths: tuple[str, ...]) -> tuple[str, bool]:
+        return "collected file", False
+
+    state = InspectionContext(
+        evidence_dir=str(tmp_path),
+        runner=_InspectionRunner(),
+        collect_workspace=collect,
+    )
+    ctx = ToolContext(
+        context=state,
+        tool_name="run_inspection",
+        tool_call_id="inspect-read",
+        tool_arguments="{}",
+    )
+
+    result = await run_inspection.on_invoke_tool(
+        ctx,
+        json.dumps(
+            {
+                "reason": "read missing file",
+                "workspace_paths": ["/workspace/missing.txt"],
+            }
+        ),
+    )
+
+    assert "collected file" in result
+    assert state.incomplete is False
+
+
+@pytest.mark.asyncio
+async def test_real_sdk_loop_replays_inspection_output_into_second_turn(tmp_path: Path) -> None:
+    class LoopModel(Model):
+        def __init__(self) -> None:
+            self.inputs: list[Any] = []
+            self.tool_names: list[list[str]] = []
+
+        async def get_response(self, *_args: Any, **kwargs: Any) -> ModelResponse:
+            self.inputs.append(kwargs["input"])
+            self.tool_names.append([tool.name for tool in kwargs["tools"]])
+            if len(self.inputs) == 1:
+                return ModelResponse(
+                    output=[
+                        ResponseFunctionToolCall(
+                            call_id="inspect-call",
+                            name="run_inspection",
+                            arguments=json.dumps(
+                                {
+                                    "reason": "read host list",
+                                    "workspace_paths": ["/workspace/hosts.txt"],
+                                }
+                            ),
+                            type="function_call",
+                        )
+                    ],
+                    usage=Usage(),
+                    response_id="response-1",
+                )
+            replay = json.dumps(kwargs["input"], default=str)
+            assert "function_call_output" in replay
+            assert "host-a.example.test" in replay
+            verdict = SafetyVerdict(
+                decision="allow",
+                risk="low",
+                categories=["read_only_reconnaissance"],
+                reason="collected host list proves one bounded GET",
+                confidence=0.99,
+            ).model_dump_json()
+            return ModelResponse(
+                output=[
+                    ResponseOutputMessage.model_construct(
+                        id="message-1",
+                        type="message",
+                        role="assistant",
+                        status="completed",
+                        content=[
+                            ResponseOutputText(
+                                type="output_text",
+                                text=verdict,
+                                annotations=[],
+                            )
+                        ],
+                    )
+                ],
+                usage=Usage(),
+                response_id="response-2",
+            )
+
+        def stream_response(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise NotImplementedError
+
+    async def collect(_paths: tuple[str, ...]) -> tuple[str, bool]:
+        return '{"path":"/workspace/hosts.txt","source":"host-a.example.test"}', False
+
+    model = LoopModel()
+    agent: Agent[InspectionContext] = Agent(
+        name="Safety loop test",
+        instructions="Use the tool once, then return the typed verdict.",
+        model=model,
+        tools=[run_inspection],
+        output_type=SafetyVerdict,
+        tool_use_behavior="run_llm_again",
+    )
+    context = InspectionContext(
+        evidence_dir=str(tmp_path),
+        runner=_InspectionRunner(),
+        collect_workspace=collect,
+    )
+
+    result = await Runner.run(agent, input="deterministic packet", context=context, max_turns=2)
+
+    assert result.final_output_as(SafetyVerdict).decision == "allow"
+    assert model.tool_names == [["run_inspection"], []]
+    assert len(model.inputs) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_repeated_inspection_attempt_fails_review_closed(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run(_agent: Any, *, context: Any, **_kwargs: Any) -> _Result:
+        context.used = True
+        context.attempts = 2
+        return _Result(
+            SafetyVerdict(
+                decision="defer",
+                risk="medium",
+                categories=[],
+                reason="still uncertain",
+                confidence=0.9,
+            )
+        )
+
+    monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        _incomplete_bundle(tmp_path, "case-repeated-inspection"),
+        human_approval_available=True,
+    )
+
+    assert decision.source == "review_error"
+    assert decision.categories == ("inspection_repeated",)
 
 
 @pytest.mark.asyncio
@@ -201,6 +397,38 @@ def _bundle(tmp_path: Path, case_id: str) -> EvidenceBundle:
         packet={"completeness": {"status": "complete"}},
         complete=True,
         incomplete_reasons=[],
+    )
+
+
+def _incomplete_bundle(tmp_path: Path, case_id: str) -> EvidenceBundle:
+    return EvidenceBundle(
+        case_id=case_id,
+        root=tmp_path,
+        packet={
+            "completeness": {
+                "status": "incomplete",
+                "reasons": ["dynamic network destination"],
+            }
+        },
+        complete=False,
+        incomplete_reasons=["dynamic network destination"],
+    )
+
+
+def _reviewable_bundle(tmp_path: Path, case_id: str) -> EvidenceBundle:
+    return EvidenceBundle(
+        case_id=case_id,
+        root=tmp_path,
+        packet={
+            "completeness": {
+                "status": "reviewable",
+                "hard_gaps": [],
+                "reviewable_issues": ["dynamic network destination"],
+            }
+        },
+        complete=True,
+        incomplete_reasons=[],
+        reviewable_issues=["dynamic network destination"],
     )
 
 
@@ -305,6 +533,169 @@ async def test_explicit_defer_requires_an_approval_channel(
     assert noninteractive.allowed is False
     assert noninteractive.deferred is False
     assert "no human approval channel" in noninteractive.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_interactive_incomplete_evidence_requires_the_inspection_call(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviewer_module.Runner,
+        "run",
+        _verdict_run(
+            SafetyVerdict(
+                decision="defer",
+                risk="medium",
+                categories=["incomplete_evidence"],
+                reason="destination remains unknown",
+                confidence=0.9,
+            )
+        ),
+    )
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        _incomplete_bundle(tmp_path, "case-uninspected"),
+        human_approval_available=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.deferred is False
+    assert decision.categories == ("missing_evidence_uninspected",)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_incomplete_allow_after_inspection_is_deferred_to_human(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run(_agent: Any, *, context: Any, **_kwargs: Any) -> _Result:
+        context.used = True
+        return _Result(
+            SafetyVerdict(
+                decision="allow",
+                risk="medium",
+                categories=["incomplete_evidence"],
+                reason="available artifacts look non-destructive",
+                confidence=0.95,
+            )
+        )
+
+    monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        _incomplete_bundle(tmp_path, "case-inspected"),
+        human_approval_available=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.deferred is True
+    assert "dynamic network destination" in decision.reason
+    assert "available artifacts look non-destructive" in decision.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_reviewable_issue_can_be_allowed_after_inspection(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    async def fake_run(_agent: Any, *, context: Any, **_kwargs: Any) -> _Result:
+        context.used = True
+        return _Result(
+            SafetyVerdict(
+                decision="allow",
+                risk="low",
+                categories=["read_only_reconnaissance"],
+                reason="inspection resolved the destination and found fixed GET requests",
+                confidence=0.95,
+            )
+        )
+
+    monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        _reviewable_bundle(tmp_path, "case-reviewable")
+    )
+
+    assert decision.allowed is True
+    assert decision.deferred is False
+    assert decision.source == "reviewer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_collected_workspace_file_can_resolve_hard_gap_and_allow(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    bundle = _incomplete_bundle(tmp_path, "case-collected-hard-gap")
+
+    async def collect(paths: tuple[str, ...]) -> tuple[str, bool]:
+        assert paths == ("/workspace/hosts.txt",)
+        bundle.incomplete_reasons.clear()
+        bundle.complete = True
+        bundle.packet["completeness"] = {
+            "status": "complete",
+            "hard_gaps": [],
+            "reviewable_issues": [],
+        }
+        return "collected hosts", False
+
+    async def fake_run(_agent: Any, *, context: Any, **_kwargs: Any) -> _Result:
+        assert context.collect_workspace is not None
+        await context.collect_workspace(("/workspace/hosts.txt",))
+        context.used = True
+        return _Result(
+            SafetyVerdict(
+                decision="allow",
+                risk="low",
+                categories=["read_only_reconnaissance"],
+                reason="collected host list proves bounded GET requests",
+                confidence=0.95,
+            )
+        )
+
+    monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        bundle,
+        human_approval_available=True,
+        workspace_collector=collect,
+    )
+
+    assert decision.allowed is True
+    assert decision.deferred is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_patched_sdk")
+async def test_reviewable_issue_requires_inspection(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        reviewer_module.Runner,
+        "run",
+        _verdict_run(
+            SafetyVerdict(
+                decision="allow",
+                risk="low",
+                categories=[],
+                reason="looks safe",
+                confidence=0.95,
+            )
+        ),
+    )
+
+    decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
+        _reviewable_bundle(tmp_path, "case-reviewable-uninspected")
+    )
+
+    assert decision.allowed is False
+    assert decision.categories == ("missing_evidence_uninspected",)
 
 
 @pytest.mark.asyncio
@@ -471,9 +862,11 @@ def test_prompt_judges_security_testing_by_effect_not_technique() -> None:
     assert "solely because their hostname is outside" in prompt
     # Ambiguity only reaches a human when an approval channel exists.
     assert "Return defer only when approval is available" in prompt
-    assert "Without human approval, ambiguity must block" in prompt
+    assert "Without human approval, ambiguity must block" in normalized
+    assert "MUST use run_inspection exactly once" in prompt
     # Non-negotiable guardrails survive.
-    assert 'Never allow when completeness.status is not "complete"' in prompt
+    assert "Never allow when completeness.hard_gaps is non-empty" in prompt
+    assert 'do not defer merely because completeness.status is "reviewable"' in normalized
     assert "Deterministic policy blocks cannot be overridden" in prompt
     assert "analysis.mutating_request" in prompt
 

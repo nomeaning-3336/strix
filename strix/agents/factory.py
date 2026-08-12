@@ -144,11 +144,32 @@ def _with_bounded_result(tool: FunctionTool) -> FunctionTool:
     return tool
 
 
+# The effectful static function tools that must pass pre-execution safety review.
+# Every other base tool is internal bookkeeping (notes, todos, reports, agent
+# graph) or read-only (proxy reads, web_search) and correctly runs unreviewed;
+# the target-affecting channels are Shell (exec_command/write_stdin) and
+# Filesystem (apply_patch), wired separately, plus this network-replay tool.
+#
+# SAFETY-CRITICAL INVARIANT: a new tool with any target-affecting, network-
+# mutating, or filesystem-writing effect MUST be added here (and, for a whole
+# new capability, wired like Shell/Filesystem) or it will run UNREVIEWED. We do
+# not guard-by-default because treating a read-only tool as mutating serializes
+# it on the workspace lock and bumps the review epoch, needlessly invalidating
+# other agents' in-flight reviews. A tool that reports SDK-level
+# ``needs_approval`` is also guarded, so any effectful tool that opts into the
+# SDK signal is covered even if it is not named here.
+_MUTATING_STATIC_TOOLS = frozenset({"apply_patch", "repeat_request"})
+
+
+def _tool_needs_safety_review(tool: FunctionTool) -> bool:
+    return tool.name in _MUTATING_STATIC_TOOLS or bool(getattr(tool, "needs_approval", False))
+
+
 def _with_safety_guard(tool: FunctionTool) -> FunctionTool:
     """Guard effectful static function tools before their implementation runs."""
     if getattr(tool, "_strix_safety_guarded", False):
         return tool
-    if tool.name not in {"apply_patch", "repeat_request"}:
+    if not _tool_needs_safety_review(tool):
         return tool
     invoke_tool = tool.on_invoke_tool
 
@@ -397,6 +418,8 @@ def _apply_shell_output_cap(parsed: dict[str, Any]) -> None:
 
 
 def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
+    if getattr(tool, "_strix_exec_wrapped", False):
+        return tool
     invoke_tool = tool.on_invoke_tool
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
@@ -429,10 +452,13 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
             )
 
     tool.on_invoke_tool = invoke
+    tool._strix_exec_wrapped = True  # type: ignore[attr-defined]
     return tool
 
 
 def _wrap_write_stdin(tool: FunctionTool) -> FunctionTool:
+    if getattr(tool, "_strix_stdin_wrapped", False):
+        return tool
     invoke_tool = tool.on_invoke_tool
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
@@ -460,6 +486,7 @@ def _wrap_write_stdin(tool: FunctionTool) -> FunctionTool:
             return _format_validation_error(tool.name, exc)
 
     tool.on_invoke_tool = invoke
+    tool._strix_stdin_wrapped = True  # type: ignore[attr-defined]
     return tool
 
 

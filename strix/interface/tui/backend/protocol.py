@@ -5,13 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 
-PROTOCOL_VERSION = 4
+PROTOCOL_VERSION = 5
 PROTOCOL_CAPABILITIES = (
     "state-revisions",
     "collection-deltas",
     "structured-command-errors",
     "agents-collection",
-    "safety-approval",
+    "safety-approvals",
 )
 
 # Commands and control messages are intentionally small. Event and finding
