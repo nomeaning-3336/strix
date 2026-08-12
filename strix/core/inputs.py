@@ -10,10 +10,12 @@ from openai.types.shared import Reasoning
 
 from strix.config.models import (
     DEFAULT_MODEL_RETRY,
+    OPENROUTER_ATTRIBUTION_HEADERS,
     bedrock_route_supports_prompt_caching,
     is_bedrock_route,
     is_claude_model,
     is_known_openai_bare_model,
+    is_openrouter_model,
     model_supports_reasoning,
     request_timeout_extra_args,
 )
@@ -156,6 +158,15 @@ def build_root_task(scan_config: dict[str, Any]) -> str:
             "target to assess: the instructions below are the only source of "
             "truth for what to do."
         )
+    elif not parts and user_instructions:
+        # Neither a target nor a directory, but there is an instruction: the user
+        # declined the mount, so the instruction is all there is. Say so, or the
+        # agent goes looking for a scope that was never given.
+        parts.append(
+            "\n\nNo scan target and no working directory were provided. The "
+            "instructions below are the only source of truth for what to do; "
+            "work from them and from what you can reach yourself."
+        )
 
     parts.extend(_render_diff_scope(diff_scope))
 
@@ -210,13 +221,15 @@ def make_model_settings(
     request_timeout: float | None = None,
     prompt_cache: bool = True,
     extra_headers: dict[str, str] | None = None,
+    has_tools: bool = True,
 ) -> ModelSettings:
+    headers = _request_headers(model_name, extra_headers)
     model_settings = ModelSettings(
-        parallel_tool_calls=False,
+        parallel_tool_calls=False if has_tools else None,
         retry=DEFAULT_MODEL_RETRY,
         include_usage=True,
         extra_args=request_timeout_extra_args(request_timeout),
-        extra_headers=dict(extra_headers) if extra_headers else None,
+        extra_headers=headers,
     )
     if (
         reasoning_effort is not None
@@ -237,6 +250,17 @@ def make_model_settings(
             ),
         )
     return model_settings
+
+
+def _request_headers(
+    model_name: str, extra_headers: dict[str, str] | None
+) -> dict[str, str] | None:
+    headers: dict[str, str] = {}
+    if is_openrouter_model(model_name):
+        headers.update(OPENROUTER_ATTRIBUTION_HEADERS)
+    if extra_headers:
+        headers.update(extra_headers)
+    return headers or None
 
 
 def _reasoning_settings(
