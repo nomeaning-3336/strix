@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from agents.model_settings import ModelSettings
 from openai.types.shared import Reasoning
 
+from strix.config import opencode
 from strix.config.models import (
     DEFAULT_MODEL_RETRY,
     OPENROUTER_ATTRIBUTION_HEADERS,
@@ -324,6 +325,10 @@ def _prompt_cache_extra_args(model_name: str) -> dict[str, Any] | None:
     ``TypeError`` on request kwargs it does not know.
     """
     if not is_claude_model(model_name) or not routes_through_litellm(model_name):
+        return None
+    # OpenCode routes use the raw OpenAI SDK, which rejects this LiteLLM-only
+    # argument; the gateway applies Anthropic prompt caching itself.
+    if opencode.subscription_model(model_name):
         return None
     if is_bedrock_route(model_name) and not bedrock_route_supports_prompt_caching(model_name):
         return None
