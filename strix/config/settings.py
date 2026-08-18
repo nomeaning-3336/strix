@@ -18,9 +18,7 @@ DEFAULT_SAFETY_MODE: SafetyMode = "guarded"
 ResumeSafetyModeError = Literal["observe_removed", "invalid", "changed"]
 
 
-def resume_safety_mode_error(
-    persisted: str, requested: SafetyMode
-) -> ResumeSafetyModeError | None:
+def resume_safety_mode_error(persisted: str, requested: SafetyMode) -> ResumeSafetyModeError | None:
     """Why a persisted run's safety mode blocks resuming as ``requested``, or None.
 
     One source of truth for the resume policy, shared by the CLI pre-check and the
@@ -34,6 +32,7 @@ def resume_safety_mode_error(
     if persisted != requested:
         return "changed"
     return None
+
 
 DEFAULT_MAX_TURNS = 500
 
