@@ -53,9 +53,10 @@ issue is resolved and the action is safe. The script runs in a separate networkl
 container; it cannot inspect the live target or execute commands in the live workspace.
 
 Do not call the tool when deterministic policy already requires a block or the supplied evidence
-is already sufficient. When reviewable issues or hard gaps are present, you MUST use run_inspection
-exactly once before the final verdict. Resolve reviewable issues from the immutable action, source,
-and input artifacts; do not defer merely because completeness.status is "reviewable".
+is already sufficient. The inspection call is optional even when reviewable issues or hard gaps are
+present: use it only when the frozen packet is insufficient for a confident verdict. Resolve
+reviewable issues from the immutable action, source, and input artifacts; do not defer merely
+because completeness.status is "reviewable".
 
 A hard gap is missing evidence, not proof of danger. After inspecting, judge whether the missing
 evidence could actually change the action's effect, and do not block or defer merely because a gap
@@ -253,17 +254,6 @@ class SafetyReviewer:
                 agent_name="safety-reviewer",
                 model=model_name,
                 usage=result.context_wrapper.usage,
-            )
-        if (not bundle.complete or bundle.reviewable_issues) and not context.used:
-            return SafetyDecision(
-                allowed=False,
-                source="review_error",
-                reason=(
-                    "The reviewer did not use its one inspection call for evidence that required "
-                    "correlation."
-                ),
-                categories=("missing_evidence_uninspected",),
-                case_id=bundle.case_id,
             )
         if context.attempts > 1:
             return SafetyDecision(

@@ -537,7 +537,7 @@ async def test_explicit_defer_requires_an_approval_channel(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_patched_sdk")
-async def test_interactive_incomplete_evidence_requires_the_inspection_call(
+async def test_interactive_incomplete_evidence_can_defer_without_inspection(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -561,21 +561,20 @@ async def test_interactive_incomplete_evidence_requires_the_inspection_call(
     )
 
     assert decision.allowed is False
-    assert decision.deferred is False
-    assert decision.categories == ("missing_evidence_uninspected",)
+    assert decision.deferred is True
+    assert decision.source == "reviewer"
+    assert decision.categories == ("incomplete_evidence",)
 
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_patched_sdk")
-async def test_confident_allow_after_inspection_is_respected_despite_a_hard_gap(
+async def test_confident_allow_without_inspection_is_respected_despite_a_hard_gap(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
-    # Once the reviewer has inspected, a confident allow stands even with a hard
-    # gap — it judged the missing evidence irrelevant to the effect (e.g. an
-    # output file that does not exist yet).
-    async def fake_run(_agent: Any, *, context: Any, **_kwargs: Any) -> _Result:
-        context.used = True
+    # A confident allow stands even when the optional inspection is unnecessary:
+    # the packet already proves that the missing file is an output, not an input.
+    async def fake_run(_agent: Any, **_kwargs: Any) -> _Result:
         return _Result(
             SafetyVerdict(
                 decision="allow",
@@ -589,7 +588,7 @@ async def test_confident_allow_after_inspection_is_respected_despite_a_hard_gap(
     monkeypatch.setattr(reviewer_module.Runner, "run", fake_run)
 
     decision = await SafetyReviewer(inspection_runner=_InspectionRunner()).review(
-        _incomplete_bundle(tmp_path, "case-inspected"),
+        _incomplete_bundle(tmp_path, "case-uninspected-allow"),
         human_approval_available=True,
     )
 
@@ -706,7 +705,7 @@ async def test_collected_workspace_file_can_resolve_hard_gap_and_allow(
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("_patched_sdk")
-async def test_reviewable_issue_requires_inspection(
+async def test_reviewable_issue_can_be_allowed_without_inspection(
     tmp_path: Path,
     monkeypatch: MonkeyPatch,
 ) -> None:
@@ -728,8 +727,9 @@ async def test_reviewable_issue_requires_inspection(
         _reviewable_bundle(tmp_path, "case-reviewable-uninspected")
     )
 
-    assert decision.allowed is False
-    assert decision.categories == ("missing_evidence_uninspected",)
+    assert decision.allowed is True
+    assert decision.source == "reviewer"
+    assert decision.reason == "looks safe"
 
 
 @pytest.mark.asyncio
@@ -897,7 +897,7 @@ def test_prompt_judges_security_testing_by_effect_not_technique() -> None:
     # Ambiguity only reaches a human when an approval channel exists.
     assert "Return defer only when approval is available" in prompt
     assert "Without human approval, ambiguity must block" in normalized
-    assert "MUST use run_inspection exactly once" in normalized
+    assert "The inspection call is optional" in normalized
     # A hard gap is judged by relevance, not blocked outright.
     assert "A hard gap is missing evidence, not proof of danger" in normalized
     assert "do not block or defer merely because a gap remains" in normalized
