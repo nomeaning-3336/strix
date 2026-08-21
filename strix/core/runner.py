@@ -74,6 +74,21 @@ def _mcp_startup_summary(connections: list[ConnectedMcpServer]) -> str:
     return f"MCP: connected {server_count} {servers_word} ({tool_count} {tools_word}): {names}"
 
 
+def _record_mcp_connections(connections: list[ConnectedMcpServer]) -> None:
+    """Record which MCP servers this run connected, for the interfaces.
+
+    A server's tools are offered to the model under a name built from the
+    connection name and the tool's own name, which cannot be split back apart, so
+    the TUI and the run viewer need the names to match a tool call against before
+    they can show which server it went out to. Kept on the run record because the
+    viewer reads a finished run from disk.
+    """
+    report_state = get_global_report_state()
+    if report_state is None:
+        return
+    report_state.record_mcp_connections([connection.name for connection in connections])
+
+
 def _mcp_connection_notes(connections: list[ConnectedMcpServer]) -> str | None:
     """A block describing the connections the user left notes on, for the agent.
 
@@ -338,6 +353,9 @@ async def run_strix_scan(
             if user_mcp_configs:
                 connections = await connect_mcp_servers(user_mcp_configs)
                 mcp_servers = [c.server for c in connections]
+                # Recorded even when nothing connected, so a resumed run does not
+                # keep attributing tool calls to servers it no longer has.
+                _record_mcp_connections(connections)
                 if connections:
                     report(_mcp_startup_summary(connections))
                     notes_block = _mcp_connection_notes(connections)

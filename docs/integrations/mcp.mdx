@@ -41,7 +41,7 @@ Strix reads this file at the start of each run. There is no default file, so no 
 
 <ParamField path="name" type="string" required>
   A short label for the connection. Each server's tools are namespaced by
-  `name` (for example `local_fs.read_file`), so two servers can offer the same
+  `name` (for example `local_fs_read_file`), so two servers can offer the same
   tool name without colliding.
 </ParamField>
 
@@ -105,6 +105,15 @@ or set the `STRIX_MCP_CONFIG` environment variable to that path. The flag takes 
 ## Startup confirmation
 
 When servers are configured, Strix prints a one-line summary at scan startup, for example `MCP: connected 1 server (14 tools): local_fs`, so you can confirm your servers connected.
+
+## Seeing the calls
+
+Each call the agent makes to one of your servers is shown with its own icon and
+labelled with the connection it went out to, in the terminal and in the run
+viewer (`strix view`), so a call that left Strix for a server you connected is
+easy to pick out of a transcript. The terminal shows the call and its arguments;
+results can be large and arbitrary, so read them in the viewer, which shows a
+preview you can expand.
 
 ## Behavior
 

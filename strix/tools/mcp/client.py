@@ -16,7 +16,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import re
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from agents.exceptions import ModelBehaviorError
@@ -31,6 +30,7 @@ from agents.mcp import (
 )
 
 from strix.agents.factory import register_agent_tools
+from strix.tools.mcp.naming import namespaced_tool_name
 
 
 if TYPE_CHECKING:
@@ -50,24 +50,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-# A tool name offered to a model has to be letters, digits, underscores or
-# hyphens; anything else is rejected outright by the model APIs. Three things can
-# put a stray character in one: the separator between the connection and the tool
-# name, a name the server chose for its own tool (servers commonly namespace
-# theirs), and the connection name out of the user's config file. Sanitizing the
-# finished name covers all three rather than only the separator.
-_INVALID_TOOL_NAME_CHARS = re.compile(r"[^a-zA-Z0-9_-]")
-
-
-def _namespaced_tool_name(connection: str, tool: str) -> str:
-    """The name a connection's tool is offered to the model under.
-
-    Only the model-facing name is rewritten. Every call to the server uses the
-    tool name the server itself reported, so sanitizing here can never change
-    which tool is invoked.
-    """
-    return _INVALID_TOOL_NAME_CHARS.sub("_", f"{connection}_{tool}")
 
 
 class ConnectedMcpServer(NamedTuple):
@@ -148,7 +130,7 @@ def _build_tool(
     the call, through :func:`_install_error_status_capture`, so an errored result
     reads as failed in the TUI while the agent's content is unchanged.
     """
-    namespaced_name = _namespaced_tool_name(config.name, mcp_tool.name)
+    namespaced_name = namespaced_tool_name(config.name, mcp_tool.name)
     tool = MCPUtil.to_function_tool(
         mcp_tool,
         server,

@@ -9,6 +9,7 @@ from strix.tools.mcp.config import (
     McpConnectionConfig,
 )
 from strix.tools.mcp.loader import load_user_mcp_configs
+from strix.tools.mcp.naming import McpToolOrigin, namespaced_tool_name, resolve_mcp_tool
 
 
 __all__ = [
@@ -16,6 +17,9 @@ __all__ = [
     "ConnectedMcpServer",
     "McpAuth",
     "McpConnectionConfig",
+    "McpToolOrigin",
     "connect_mcp_servers",
     "load_user_mcp_configs",
+    "namespaced_tool_name",
+    "resolve_mcp_tool",
 ]

@@ -342,7 +342,7 @@ Strix can connect to Model Context Protocol (MCP) servers you list and expose th
 ]
 ```
 
-Each server's tools are namespaced by `name` (for example `local_fs.read_file`). Omit `allowed_tools` to expose every tool the server offers, or set it to a list to restrict which tools the agent can call. The file is optional, and a server that fails to connect is skipped without failing the run. You can point Strix at a different file with `STRIX_MCP_CONFIG`.
+Each server's tools are namespaced by `name` (for example `local_fs_read_file`). Omit `allowed_tools` to expose every tool the server offers, or set it to a list to restrict which tools the agent can call. The file is optional, and a server that fails to connect is skipped without failing the run. You can point Strix at a different file with `STRIX_MCP_CONFIG`.
 
 **Recommended models for best results:**
 

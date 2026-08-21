@@ -16,12 +16,14 @@ from pydantic import ValidationError
 
 from strix.agents import factory
 from strix.core.runner import _mcp_connection_notes
-from strix.interface.tui.live_view import _tool_status_from_result
+from strix.interface.tui.live_view import TuiLiveView, _tool_status_from_result
 from strix.tools.mcp import (
     BearerAuth,
     ConnectedMcpServer,
     McpConnectionConfig,
     load_user_mcp_configs,
+    namespaced_tool_name,
+    resolve_mcp_tool,
 )
 from strix.tools.mcp import client as mcp_client
 from strix.tools.mcp.client import _auth_headers, _build_server, _register_server_tools
@@ -659,3 +661,50 @@ def test_loader_exclude_selection_drops_named(
     configs = load_user_mcp_configs(config_file)
 
     assert [c.name for c in configs] == ["a", "c"]
+
+
+# --- reading a tool call back to the server it went out to -------------------
+
+
+def test_resolve_mcp_tool_splits_against_the_run_connections() -> None:
+    assert resolve_mcp_tool("local_fs_read_file", ["github", "local_fs"]) == (
+        "local_fs",
+        "read_file",
+    )
+
+
+def test_resolve_mcp_tool_prefers_the_longest_matching_connection() -> None:
+    # One connection's name being a prefix of another's must not misattribute.
+    assert resolve_mcp_tool("files_main_list", ["files", "files_main"]) == ("files_main", "list")
+
+
+def test_resolve_mcp_tool_matches_a_connection_name_it_had_to_sanitize() -> None:
+    # "my server" reaches the model as "my_server_db_query".
+    tool_name = namespaced_tool_name("my server", "db.query")
+
+    assert resolve_mcp_tool(tool_name, ["my server"]) == ("my server", "db_query")
+
+
+def test_resolve_mcp_tool_ignores_tools_that_are_not_a_connection_s() -> None:
+    assert resolve_mcp_tool("exec_command", ["local_fs"]) is None
+    # A name that merely starts like a connection is not one of its tools.
+    assert resolve_mcp_tool("local_fsx", ["local_fs"]) is None
+
+
+def test_projected_tool_call_names_the_server_it_went_out_to() -> None:
+    view = TuiLiveView()
+    view.set_mcp_connections(["local_fs"])
+
+    view._record_tool_call_data(
+        "agent-1",
+        {"call_id": "c1", "tool_name": "local_fs_read_file", "args": {"path": "/etc/hosts"}},
+    )
+    view._record_tool_call_data(
+        "agent-1",
+        {"call_id": "c2", "tool_name": "exec_command", "args": {"cmd": "ls"}},
+    )
+
+    mcp_call, built_in = (event["data"] for event in view.events)
+    assert (mcp_call["mcp_connection"], mcp_call["mcp_tool"]) == ("local_fs", "read_file")
+    # A built-in call carries no connection, which is what keeps it rendering as one.
+    assert "mcp_connection" not in built_in

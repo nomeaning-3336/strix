@@ -24,7 +24,7 @@ func statusIcon(status string) (string, lipgloss.Style) {
 
 // renderGenericTool ports registry._render_default_tool_widget. It shows the
 // tool name, its arguments, and a status line only. The raw result is
-// deliberately not rendered: a generic/MCP result (e.g. a multi-kilobyte JSON
+// deliberately not rendered: a generic result (e.g. a multi-kilobyte JSON
 // payload from a database query tool) is noise on screen, and the agent narrates
 // what it got in its next message. The full result still lives in the event
 // data, the run log, and the `strix view` viewer.
@@ -51,6 +51,18 @@ func Tool(data map[string]any) string {
 		args = map[string]any{}
 	}
 	result := data["result"]
+
+	// A call to a tool from one of the user's MCP servers is tagged with the
+	// connection it came from, because its name is the server's own and means
+	// nothing here. The tag is only ever set from the connections the run made,
+	// so it is the one thing that can tell such a call apart from a built-in.
+	if connection := StringValue(data["mcp_connection"]); connection != "" {
+		toolName := StringValue(data["mcp_tool"])
+		if toolName == "" {
+			toolName = name
+		}
+		return renderMcpTool(connection, toolName, args, status)
+	}
 
 	switch name {
 	case "exec_command":

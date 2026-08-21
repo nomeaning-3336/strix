@@ -3,7 +3,7 @@ import type { ToolRendererProps } from "@/types/events";
 import {
   Terminal, Globe, FileText, ShieldAlert, ArrowUpRight, Brain,
   Bot, MessageCircle, Flag, Eye, Search, Code, StickyNote,
-  ListTodo, Crosshair, Wrench, Ban, Image,
+  ListTodo, Crosshair, Wrench, Ban, Image, Plug,
 } from "lucide-react";
 
 import TerminalRenderer from "./TerminalRenderer";
@@ -25,6 +25,7 @@ import TodoRenderer from "./TodoRenderer";
 import FallbackRenderer from "./FallbackRenderer";
 import LoadSkillRenderer from "./LoadSkillRenderer";
 import RespondRenderer from "./RespondRenderer";
+import McpRenderer from "./McpRenderer";
 
 /**
  * Tool-renderer mapping — data-driven, keyed by the engine's tool *family*.
@@ -53,7 +54,8 @@ export type ToolCategory =
   | "notes"
   | "skills"
   | "todos"
-  | "telemetry";
+  | "telemetry"
+  | "mcp";
 
 export interface ToolIconMeta {
   icon: ComponentType<{ className?: string }>;
@@ -84,6 +86,9 @@ const CATEGORY_META: Record<ToolCategory, CategoryMeta> = {
   skills: { renderer: LoadSkillRenderer, icon: Wrench, color: "text-emerald-400" },
   todos: { renderer: TodoRenderer, icon: ListTodo, color: "text-purple-400", match: /todo/ },
   telemetry: { renderer: FallbackRenderer, icon: Wrench, color: "text-[#555]" },
+  // Tools from the user's own MCP servers. Resolved from the connection on the
+  // event rather than from a tool name, so this family has no names below.
+  mcp: { renderer: McpRenderer, icon: Plug, color: "text-teal-400" },
 };
 
 /**
@@ -113,6 +118,7 @@ const CATEGORY_TOOLS: Record<ToolCategory, readonly string[]> = {
   skills: ["load_skill"],
   todos: ["create_todo", "list_todos", "update_todo", "mark_todo_done", "mark_todo_pending", "delete_todo"],
   telemetry: ["sandbox_error_details", "llm_error_details"],
+  mcp: [],
 };
 
 /** Reverse index (tool name → family), built once from CATEGORY_TOOLS. */
@@ -163,14 +169,26 @@ function resolveCategory(toolName: string): ToolCategory | null {
   return null;
 }
 
-export function getToolRenderer(toolName: string): ComponentType<ToolRendererProps> {
+/**
+ * A call to a tool from one of the user's MCP servers is placed by the
+ * connection it was tagged with, ahead of every name-keyed lookup below: its
+ * name belongs to that server and matches nothing in this table.
+ */
+export function getToolRenderer(
+  toolName: string,
+  mcpConnection?: string | null
+): ComponentType<ToolRendererProps> {
+  if (mcpConnection) return CATEGORY_META.mcp.renderer;
   const override = RENDERER_OVERRIDES[toolName];
   if (override) return override;
   const category = resolveCategory(toolName);
   return category ? CATEGORY_META[category].renderer : FallbackRenderer;
 }
 
-export function getToolIcon(toolName: string): ToolIconMeta {
+export function getToolIcon(toolName: string, mcpConnection?: string | null): ToolIconMeta {
+  if (mcpConnection) {
+    return { icon: CATEGORY_META.mcp.icon, color: CATEGORY_META.mcp.color };
+  }
   const override = ICON_OVERRIDES[toolName];
   if (override) return override;
   const category = resolveCategory(toolName);
