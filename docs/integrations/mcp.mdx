@@ -3,7 +3,14 @@ title: "MCP Servers"
 description: "Connect your own MCP servers and expose their tools to the agent"
 ---
 
-Strix can connect to [Model Context Protocol (MCP)](https://modelcontextprotocol.io) servers you list and expose their tools to the agent during a run. Use this to give the agent extra capabilities — reading files, querying an issue tracker, or any other tool a server offers.
+Strix can connect to [Model Context Protocol (MCP)](https://modelcontextprotocol.io) servers you list and expose their tools to the agent during a run. Use this to let the agent read how your system is actually built instead of inferring it from the outside.
+
+A few things it pays off for:
+
+- **A database server.** The agent can read the schema and access policies and see tables left readable without them, rather than guessing from responses.
+- **A hosting or infrastructure server.** Deployments, domains and environment variable names tell it what is really running, so it tests what exists instead of what it discovered by crawling.
+- **An issue tracker.** Known and accepted risks stop the agent re-reporting findings you already triaged.
+- **A logging server.** Reading logs lets it confirm an exploit attempt actually landed instead of inferring it from a status code.
 
 ## Setup
 
@@ -15,7 +22,7 @@ Create the directory if it does not exist, then write the file:
 mkdir -p ~/.strix
 ```
 
-Paste the servers you want into `~/.strix/mcp-servers.json`. The example below shows one of each transport — a local filesystem server over `stdio` and a remote GitHub server over `http` with a bearer token:
+Paste the servers you want into `~/.strix/mcp-servers.json`. The example below shows one of each transport: a local filesystem server over `stdio` and a remote GitHub server over `http` with a bearer token:
 
 ```json
 [
@@ -68,7 +75,9 @@ Strix reads this file at the start of each run. There is no default file, so no 
 
 <ParamField path="allowed_tools" type="array">
   Restrict which tools the agent can call. Omit it to expose every tool the
-  server offers, or set it to a list of tool names to allow only those.
+  server offers, or set it to a list of tool names to allow only those. Strix
+  does not decide for you which of a server's tools only read and which change
+  things, so run the server in its own read-only mode if it has one.
 </ParamField>
 
 <ParamField path="notes" type="string">
