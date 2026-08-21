@@ -6,6 +6,8 @@ import asyncio
 import json
 from typing import TYPE_CHECKING, Any
 
+import re
+
 import pytest
 from agents.mcp import MCPServer, MCPServerStdio, MCPServerStreamableHttp
 from mcp.types import CallToolResult, TextContent
@@ -219,7 +221,35 @@ async def test_tools_are_namespaced_per_connection() -> None:
     await _register_server_tools(_config("conn_b", ["describe"]), server_b)
 
     # Same remote tool name on two connections does not collide.
-    assert _registered_names() == ["conn_a.describe", "conn_b.describe"]
+    assert _registered_names() == ["conn_a_describe", "conn_b_describe"]
+
+
+@pytest.mark.asyncio
+async def test_registered_names_are_valid_tool_names() -> None:
+    # Model APIs reject a tool name containing anything but letters, digits,
+    # underscores and hyphens, and reject the whole request rather than the one
+    # tool. A server naming its own tools with dots, or a connection named with
+    # a space in the user's config, must not be able to break a run.
+    server = FakeMCPServer("my server", [_mcp_tool("db.query"), _mcp_tool("ok_tool")])
+
+    await _register_server_tools(_config("my server", None), server)
+
+    names = _registered_names()
+    assert names == ["my_server_db_query", "my_server_ok_tool"]
+    assert all(re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", name) for name in names)
+
+
+@pytest.mark.asyncio
+async def test_a_rename_does_not_change_which_tool_is_called() -> None:
+    # Only the model-facing name is sanitized; the server is always asked for the
+    # tool name it reported.
+    server = FakeMCPServer("my server", [_mcp_tool("db.query")])
+
+    tools = await _register_server_tools(_config("my server", None), server)
+
+    assert tools[0].name == "my_server_db_query"
+    await tools[0].on_invoke_tool(None, "{}")
+    assert server.calls == [("db.query", {})]
 
 
 @pytest.mark.asyncio
@@ -232,8 +262,8 @@ async def test_disallowed_tool_is_not_registered() -> None:
     await _register_server_tools(_config("files_main", ["list_files"]), server)
 
     names = _registered_names()
-    assert "files_main.list_files" in names
-    assert "files_main.search" not in names
+    assert "files_main_list_files" in names
+    assert "files_main_search" not in names
 
 
 @pytest.mark.asyncio
@@ -247,8 +277,8 @@ async def test_allowed_tools_none_registers_every_listed_tool() -> None:
     await _register_server_tools(config, server)
 
     names = _registered_names()
-    assert "local_fs.read_file" in names
-    assert "local_fs.write_file" in names
+    assert "local_fs_read_file" in names
+    assert "local_fs_write_file" in names
 
 
 @pytest.mark.asyncio
@@ -261,7 +291,7 @@ async def test_allowed_tools_list_restricts_registration() -> None:
     await _register_server_tools(_config("local_fs", ["read_file"]), server)
 
     names = _registered_names()
-    assert names == ["local_fs.read_file"]
+    assert names == ["local_fs_read_file"]
 
 
 @pytest.mark.asyncio
@@ -304,7 +334,7 @@ async def test_result_transform_receives_namespaced_name_and_structured_result()
     # The transform is called with the namespaced name and the parsed result.
     assert len(seen) == 1
     name, structured = seen[0]
-    assert name == "files_main.list_files"
+    assert name == "files_main_list_files"
     # A parsed CallToolResult (dict/list), not a pre-serialized string.
     assert structured["content"][0]["text"] == "routed:list_files"
     assert structured["isError"] is False
