@@ -28,10 +28,13 @@ repos:
   # Built-in hooks for basic file checks
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
-    exclude: ^strix/interface/viewer/static/
     hooks:
+      # The committed viewer bundle is build output: rewriting its bytes would
+      # change shipped minified code.
       - id: trailing-whitespace
+        exclude: ^strix/interface/viewer/static/
       - id: end-of-file-fixer
+        exclude: ^strix/interface/viewer/static/
       - id: check-toml
       - id: check-merge-conflict
       - id: check-added-large-files
