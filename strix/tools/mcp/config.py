@@ -61,8 +61,9 @@ class McpConnectionConfig(BaseModel):
 
     notes: str | None = None
     """Free-text notes for the agent describing what this connection is and how
-    to use it. When set, they are prefixed onto each of the connection's tool
-    descriptions so the agent sees them."""
+    to use it. When set, the runner collects the notes of every connection into
+    a single block on the root task, so a note describes its connection once
+    rather than being repeated onto each of its tools."""
 
     @model_validator(mode="after")
     def _check_transport_fields(self) -> McpConnectionConfig:
