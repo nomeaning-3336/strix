@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import TYPE_CHECKING, Any
-
 import re
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from agents.mcp import MCPServer, MCPServerStdio, MCPServerStreamableHttp
@@ -92,6 +91,18 @@ def _config(name: str, allowed_tools: list[str]) -> McpConnectionConfig:
         auth=BearerAuth(token="run-token"),
         allowed_tools=allowed_tools,
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_mcp_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Hide any MCP settings the developer has exported in their own shell.
+
+    The loader reads these to resolve the config path and the per-run
+    include/exclude selection, so a shell that has them set (from using
+    --mcp-config or --mcp-server) would otherwise filter what these tests see.
+    """
+    for name in ("STRIX_MCP_CONFIG", "STRIX_MCP_ONLY", "STRIX_MCP_EXCLUDE"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -300,9 +311,7 @@ async def test_allowed_tools_list_restricts_registration() -> None:
 async def test_registered_tool_routes_to_its_server_with_the_original_name() -> None:
     server = FakeMCPServer("files_main", [_mcp_tool("list_files")])
 
-    tools: list[Tool] = await _register_server_tools(
-        _config("files_main", ["list_files"]), server
-    )
+    tools: list[Tool] = await _register_server_tools(_config("files_main", ["list_files"]), server)
     tool = tools[0]
 
     output = await tool.on_invoke_tool(None, "{}")  # type: ignore[union-attr]
@@ -400,9 +409,7 @@ class ErroringMCPServer(FakeMCPServer):
 async def test_errored_mcp_result_is_flagged_failed_for_the_tui() -> None:
     server = ErroringMCPServer("files_main", [_mcp_tool("list_files")])
 
-    tools: list[Tool] = await _register_server_tools(
-        _config("files_main", ["list_files"]), server
-    )
+    tools: list[Tool] = await _register_server_tools(_config("files_main", ["list_files"]), server)
     output = await tools[0].on_invoke_tool(None, "{}")  # type: ignore[union-attr]
 
     # The error text stays exactly what the agent gets today; a success:False tag
@@ -415,9 +422,7 @@ async def test_errored_mcp_result_is_flagged_failed_for_the_tui() -> None:
 async def test_successful_mcp_result_stays_completed_for_the_tui() -> None:
     server = FakeMCPServer("files_main", [_mcp_tool("list_files")])
 
-    tools: list[Tool] = await _register_server_tools(
-        _config("files_main", ["list_files"]), server
-    )
+    tools: list[Tool] = await _register_server_tools(_config("files_main", ["list_files"]), server)
     output = await tools[0].on_invoke_tool(None, "{}")  # type: ignore[union-attr]
 
     # A non-error result is untouched and keeps rendering as done.
