@@ -7,7 +7,9 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from agents.sandbox.errors import InvalidManifestPathError
 from agents.tool import CustomTool, FunctionTool
+from pydantic import BaseModel, ValidationError
 
 from strix.agents import factory
 from strix.config import load_settings
@@ -292,3 +294,53 @@ async def test_wrap_write_stdin_malformed_input_passes_through() -> None:
 
     assert await wrapped.on_invoke_tool(cast("Any", None), "not json") == "ok"
     assert captured["raw_input"] == "not json"
+
+
+# --- error formatting --------------------------------------------------------
+
+
+class _ExecArgs(BaseModel):
+    cmd: str
+
+
+def _raising_tool(name: str, exc: Exception) -> FunctionTool:
+    async def invoke(_ctx: Any, _raw_input: str) -> str:
+        raise exc
+
+    return FunctionTool(
+        name=name,
+        description="test tool",
+        params_json_schema={"type": "object", "properties": {}},
+        on_invoke_tool=invoke,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "wrap"),
+    [("exec_command", factory._wrap_exec_command), ("write_stdin", factory._wrap_write_stdin)],
+)
+async def test_validation_error_is_rendered_as_a_message(name: str, wrap: Any) -> None:
+    try:
+        _ExecArgs.model_validate({})
+    except ValidationError as exc:
+        validation_error = exc
+
+    wrapped = wrap(_raising_tool(name, validation_error))
+    result = await wrapped.on_invoke_tool(cast("Any", None), json.dumps({"cmd": "echo hi"}))
+
+    assert isinstance(result, str)
+    assert result.startswith(f"{name}: invalid arguments — ")
+    assert "cmd" in result
+
+
+@pytest.mark.asyncio
+async def test_invalid_workdir_is_rendered_as_a_message() -> None:
+    exc = InvalidManifestPathError(rel="../etc", reason="escape_root")
+    wrapped = factory._wrap_exec_command(_raising_tool("exec_command", exc))
+
+    result = await wrapped.on_invoke_tool(cast("Any", None), json.dumps({"cmd": "ls"}))
+
+    assert isinstance(result, str)
+    assert "workdir must be a path inside /workspace" in result
+    assert "'../etc'" in result
