@@ -16,6 +16,8 @@ from typing import Any
 
 from agents import RunContextWrapper, function_tool
 
+from strix.tools.nullish import clean_optional
+
 
 logger = logging.getLogger(__name__)
 
@@ -1605,12 +1607,12 @@ def _do_list_reports(
     caller_agent_id: str | None = None,
 ) -> dict[str, Any]:
     errors: list[str] = []
-    severity = (severity or "").strip().lower() or None
+    severity = (clean_optional(severity) or "").lower() or None
     if severity and severity not in _VALID_SEVERITIES:
         errors.append(
             f"Invalid severity: {severity!r}. Must be one of: {sorted(_VALID_SEVERITIES)}"
         )
-    finding_class = (finding_class or "").strip().lower() or None
+    finding_class = (clean_optional(finding_class) or "").lower() or None
     if finding_class and finding_class not in _VALID_FINDING_CLASSES:
         errors.append(
             f"Invalid finding_class: {finding_class!r}. "
@@ -1640,8 +1642,8 @@ def _do_list_reports(
             r,
             severity=severity,
             finding_class=finding_class,
-            target=(target or "").strip() or None,
-            search=(search or "").strip() or None,
+            target=clean_optional(target),
+            search=clean_optional(search),
         )
     ]
     matched.sort(key=lambda r: (_report_severity_rank(r), str(r.get("id", ""))))

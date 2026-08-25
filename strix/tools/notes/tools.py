@@ -14,6 +14,8 @@ from typing import Any
 
 from agents import RunContextWrapper, function_tool
 
+from strix.tools.nullish import clean_optional, is_nullish
+
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +113,10 @@ def _filter_notes(
     tags: list[str] | None = None,
     search_query: str | None = None,
 ) -> list[dict[str, Any]]:
+    category = clean_optional(category)
+    search_query = clean_optional(search_query)
+    tags = [tag for tag in tags if not is_nullish(tag)] if tags else None
+
     filtered: list[dict[str, Any]] = []
     for note_id, note in _notes_storage.items():
         if category and note.get("category") != category:

@@ -101,3 +101,24 @@ def test_get_note_flags_caller_ownership() -> None:
     assert mine["note"]["agent_name"] == "Agent One"
     theirs = notes_tools._get_note_impl(note_id, caller_agent_id="agent-9")
     assert "by_you" not in theirs["note"]
+
+
+@pytest.mark.parametrize("nullish", ["null", "none", "NULL", " None ", "undefined", "nil"])
+def test_list_notes_ignores_nullish_filter_strings(nullish: str) -> None:
+    notes_tools._create_note_impl("recon", "content", category="findings", tags=["auth"])
+    notes_tools._create_note_impl("other", "content", category="general")
+
+    unfiltered = notes_tools._list_notes_impl()
+    assert unfiltered["filtered_count"] == 2
+
+    assert notes_tools._list_notes_impl(category=nullish) == unfiltered
+    assert notes_tools._list_notes_impl(search=nullish) == unfiltered
+    assert notes_tools._list_notes_impl(tags=[nullish]) == unfiltered
+
+
+def test_list_notes_still_filters_on_real_values() -> None:
+    notes_tools._create_note_impl("recon", "content", category="findings")
+    notes_tools._create_note_impl("other", "content", category="general")
+
+    result = notes_tools._list_notes_impl(category="findings")
+    assert [n["title"] for n in result["notes"]] == ["recon"]

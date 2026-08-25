@@ -9,6 +9,8 @@ import pytest
 from agents.tool import FunctionTool
 
 from strix.agents import factory
+from strix.tools.notes.tools import list_notes
+from strix.tools.reporting.tool import list_reports
 
 
 def _capturing_tool(captured: dict[str, str], schema: dict[str, Any]) -> FunctionTool:
@@ -144,3 +146,76 @@ async def test_coercion_is_applied_once_per_tool() -> None:
     tool = factory._with_coerced_arguments(_capturing_tool(captured, _ARRAY))
 
     assert factory._with_coerced_arguments(tool) is tool
+
+
+_NULLABLE_STRING = {"category": {"anyOf": [{"type": "string"}, {"type": "null"}]}}
+_NULLABLE_STRING_TYPE_LIST = {"category": {"type": ["string", "null"]}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schema", [_NULLABLE_STRING, _NULLABLE_STRING_TYPE_LIST])
+@pytest.mark.parametrize("value", ["null", "none", "NULL", " None ", "nil", "undefined"])
+async def test_nullish_string_on_a_nullable_parameter_becomes_none(
+    schema: dict[str, Any], value: str
+) -> None:
+    parsed = await _roundtrip(schema, {"category": value})
+
+    assert parsed["category"] is None
+
+
+@pytest.mark.asyncio
+async def test_nullish_string_on_a_required_parameter_is_untouched() -> None:
+    schema = {"content": {"type": "string"}}
+    captured: dict[str, str] = {}
+    tool = _capturing_tool(captured, schema)
+    tool.params_json_schema["required"] = ["content"]
+    wrapped = factory._with_coerced_arguments(tool)
+
+    assert await wrapped.on_invoke_tool(cast("Any", None), json.dumps({"content": "none"})) == "ok"
+    assert json.loads(captured["raw_input"])["content"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_parameter_absent_from_required_is_treated_as_nullable() -> None:
+    captured: dict[str, str] = {}
+    tool = _capturing_tool(captured, {"category": {"type": "string"}})
+    tool.params_json_schema["required"] = []
+    wrapped = factory._with_coerced_arguments(tool)
+
+    assert await wrapped.on_invoke_tool(cast("Any", None), json.dumps({"category": "null"})) == "ok"
+    assert json.loads(captured["raw_input"])["category"] is None
+
+
+@pytest.mark.asyncio
+async def test_nullish_string_without_a_required_list_is_untouched() -> None:
+    parsed = await _roundtrip(_STRING, {"todos": "none"})
+
+    assert parsed["todos"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_nullish_looking_content_is_not_coerced() -> None:
+    parsed = await _roundtrip(_NULLABLE_STRING, {"category": "none of the endpoints reflect input"})
+
+    assert parsed["category"] == "none of the endpoints reflect input"
+
+
+@pytest.mark.asyncio
+async def test_empty_string_on_a_nullable_string_parameter_is_untouched() -> None:
+    parsed = await _roundtrip(_NULLABLE_STRING, {"category": ""})
+
+    assert parsed["category"] == ""
+
+
+@pytest.mark.asyncio
+async def test_nullish_string_on_a_nullable_array_parameter_becomes_none() -> None:
+    parsed = await _roundtrip(_NULLABLE_ARRAY, {"tags": "null"})
+
+    assert parsed["tags"] is None
+
+
+def test_real_tool_schemas_declare_optional_filters_as_nullable() -> None:
+    for tool, params in ((list_notes, ("category", "search")), (list_reports, ("target",))):
+        schema = tool.params_json_schema
+        for param in params:
+            assert factory._is_nullable(param, schema["properties"][param], schema)

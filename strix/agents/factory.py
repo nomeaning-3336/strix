@@ -36,6 +36,7 @@ from strix.tools.notes.tools import (
     list_notes,
     update_note,
 )
+from strix.tools.nullish import is_nullish
 from strix.tools.output_store import bound_and_store, bound_text
 from strix.tools.proxy.tools import (
     list_requests,
@@ -164,6 +165,28 @@ def _schema_types(spec: dict[str, Any]) -> set[str]:
     return types
 
 
+def _allows_null(spec: dict[str, Any]) -> bool:
+    raw = spec.get("type")
+    if raw == "null" or (isinstance(raw, list) and "null" in raw):
+        return True
+    return any(
+        isinstance(variant, dict) and _allows_null(variant) for variant in spec.get("anyOf") or ()
+    )
+
+
+def _is_nullable(key: str, spec: dict[str, Any], schema: dict[str, Any]) -> bool:
+    """Whether ``key`` may be ``None``.
+
+    Strict schemas list every property as required, so nullability shows up as a
+    ``null`` type variant; without a declared one, fall back to the property
+    being absent from a declared ``required`` list.
+    """
+    if _allows_null(spec):
+        return True
+    required = schema.get("required")
+    return isinstance(required, list) and key not in required
+
+
 def _decode_structured(value: str, types: set[str]) -> Any:
     stripped = value.strip()
     if not stripped:
@@ -178,9 +201,14 @@ def _decode_structured(value: str, types: set[str]) -> Any:
     return decoded if isinstance(decoded, wanted) else value
 
 
-def _coerce_argument(value: Any, spec: dict[str, Any]) -> Any:
+def _coerce_argument(value: Any, spec: dict[str, Any], *, nullable: bool = False) -> Any:
+    if value is None:
+        return value
+    if nullable and is_nullish(value):
+        # The model's stand-in for "no value"; as a filter it matches nothing.
+        return None
     types = _schema_types(spec)
-    if not types or value is None:
+    if not types:
         return value
     if isinstance(value, list | dict) and "string" in types and not types & {"array", "object"}:
         return json.dumps(value, ensure_ascii=False)
@@ -205,7 +233,7 @@ def _coerce_arguments(raw_input: str, schema: dict[str, Any]) -> str:
         spec = properties.get(key)
         if not isinstance(spec, dict):
             continue
-        coerced = _coerce_argument(value, spec)
+        coerced = _coerce_argument(value, spec, nullable=_is_nullable(key, spec, schema))
         if coerced is not value:
             payload[key] = coerced
             changed = True
