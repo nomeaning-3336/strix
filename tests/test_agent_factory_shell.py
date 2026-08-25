@@ -164,16 +164,20 @@ async def test_wrap_exec_command_default_does_not_depend_on_the_binary(cmd: str)
 
 
 @pytest.mark.asyncio
-async def test_wrap_exec_command_preserves_long_explicit_yield() -> None:
+async def test_wrap_exec_command_preserves_longer_explicit_yield() -> None:
+    """A slow command gets the yield the agent asked for, not a guessed one.
+
+    The SDK's PTY layer clamps anything above 30s, so a longer wait than that
+    cannot be bought with a bigger argument."""
     captured: dict[str, str] = {}
     wrapped = factory._wrap_exec_command(_capturing_exec_tool(captured))
 
     await wrapped.on_invoke_tool(
         cast("Any", None),
-        json.dumps({"cmd": "nmap -p- example.com", "yield_time_ms": 300_000}),
+        json.dumps({"cmd": "nmap -p- example.com", "yield_time_ms": 25_000}),
     )
 
-    assert json.loads(captured["raw_input"])["yield_time_ms"] == 300_000
+    assert json.loads(captured["raw_input"])["yield_time_ms"] == 25_000
 
 
 @pytest.mark.asyncio

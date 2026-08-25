@@ -109,13 +109,18 @@ class ShellSettings(BaseSettings):
     after only 250ms on a ``write_stdin`` poll and 10s on ``exec_command``.
     Raising these defaults lets one call return a meaningful result instead of a
     no-op round-trip. An explicit ``yield_time_ms`` from the model always wins.
+
+    The SDK's PTY layer clamps every yield to 30s, so a larger value here would
+    be silently ineffective; keep both yields at or below that ceiling.
     """
 
     model_config = _BASE_CONFIG
 
-    # Default yield for exec_command when the model omits yield_time_ms.
+    # Default yield for exec_command when the model omits yield_time_ms. 30s is
+    # the most the PTY layer honours, so this sits right at that ceiling.
     exec_yield_ms: int = Field(default=30_000, gt=0, alias="STRIX_SHELL_EXEC_YIELD_MS")
-    # Default yield for an empty (polling) write_stdin call.
+    # Default yield for an empty (polling) write_stdin call. The SDK already
+    # floors an empty poll at 5s; this trades a little latency for far fewer turns.
     write_stdin_poll_yield_ms: int = Field(
         default=20_000, gt=0, alias="STRIX_SHELL_WRITE_STDIN_POLL_YIELD_MS"
     )

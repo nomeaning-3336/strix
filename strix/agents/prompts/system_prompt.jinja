@@ -188,9 +188,11 @@ EFFICIENCY TACTICS:
   the instant there is new output or the process exits, or give the original
   `exec_command` a bigger `yield_time_ms` up front so it doesn't background.
 - When you expect a command to take a while (a scan like `nmap`/`nuclei`/`ffuf`,
-  a build, a long crawl), estimate its runtime and pass that as
-  `yield_time_ms` on the first `exec_command` — one call that waits beats a
-  backgrounded process you then poll for many turns. Default is 30s.
+  a build, a long crawl), pass the time you expect to need as `yield_time_ms`
+  on the first `exec_command` — one call that waits beats a backgrounded
+  process you then poll for many turns. The shell yields at most 30s per call
+  (the default), so anything slower than that still backgrounds: harvest it
+  with one `write_stdin(chars="")` poll per 30s rather than many short ones.
 - Before importing a third-party Python library, make sure it is installed. The
   sandbox's `python3` runs inside a preconfigured virtualenv that ships
   `requests`, `httpx`, `beautifulsoup4` (bs4), `lxml`, `pyjwt`, and
