@@ -113,7 +113,16 @@ def test_list_notes_ignores_nullish_filter_strings(nullish: str) -> None:
 
     assert notes_tools._list_notes_impl(category=nullish) == unfiltered
     assert notes_tools._list_notes_impl(search=nullish) == unfiltered
-    assert notes_tools._list_notes_impl(tags=[nullish]) == unfiltered
+
+
+@pytest.mark.parametrize("tag", ["null", "none"])
+def test_list_notes_filters_on_a_literal_nullish_tag(tag: str) -> None:
+    notes_tools._create_note_impl("tagged", "content", tags=[tag])
+    notes_tools._create_note_impl("other", "content", tags=["auth"])
+
+    assert [n["title"] for n in notes_tools._list_notes_impl(tags=[tag])["notes"]] == ["tagged"]
+    mixed = notes_tools._list_notes_impl(tags=[tag, "auth"])
+    assert sorted(n["title"] for n in mixed["notes"]) == ["other", "tagged"]
 
 
 def test_list_notes_still_filters_on_real_values() -> None:

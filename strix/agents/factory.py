@@ -217,7 +217,12 @@ def _coerce_argument(value: Any, spec: dict[str, Any], *, nullable: bool = False
     return value
 
 
-def _coerce_arguments(raw_input: str, schema: dict[str, Any]) -> str:
+# Only query tools get nullish coercion: there a literal "null" is a filter that
+# matches nothing, while a tool that writes may well be given it as real content.
+_QUERY_TOOL_PREFIXES = ("list_", "search_", "view_", "get_")
+
+
+def _coerce_arguments(raw_input: str, schema: dict[str, Any], *, nullish: bool = False) -> str:
     properties = schema.get("properties")
     if not isinstance(properties, dict) or not properties:
         return raw_input
@@ -233,7 +238,9 @@ def _coerce_arguments(raw_input: str, schema: dict[str, Any]) -> str:
         spec = properties.get(key)
         if not isinstance(spec, dict):
             continue
-        coerced = _coerce_argument(value, spec, nullable=_is_nullable(key, spec, schema))
+        coerced = _coerce_argument(
+            value, spec, nullable=nullish and _is_nullable(key, spec, schema)
+        )
         if coerced is not value:
             payload[key] = coerced
             changed = True
@@ -248,9 +255,10 @@ def _with_coerced_arguments(tool: FunctionTool) -> FunctionTool:
         return tool
     invoke_tool = tool.on_invoke_tool
     schema = tool.params_json_schema
+    nullish = tool.name.startswith(_QUERY_TOOL_PREFIXES)
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
-        return await invoke_tool(ctx, _coerce_arguments(raw_input, schema))
+        return await invoke_tool(ctx, _coerce_arguments(raw_input, schema, nullish=nullish))
 
     tool.on_invoke_tool = invoke
     tool._strix_coerced = True  # type: ignore[attr-defined]

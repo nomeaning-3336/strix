@@ -13,22 +13,26 @@ from strix.tools.notes.tools import list_notes
 from strix.tools.reporting.tool import list_reports
 
 
-def _capturing_tool(captured: dict[str, str], schema: dict[str, Any]) -> FunctionTool:
+def _capturing_tool(
+    captured: dict[str, str], schema: dict[str, Any], name: str = "probe"
+) -> FunctionTool:
     async def invoke(_ctx: Any, raw_input: str) -> str:
         captured["raw_input"] = raw_input
         return "ok"
 
     return FunctionTool(
-        name="probe",
+        name=name,
         description="test tool",
         params_json_schema={"type": "object", "properties": schema},
         on_invoke_tool=invoke,
     )
 
 
-async def _roundtrip(schema: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+async def _roundtrip(
+    schema: dict[str, Any], payload: dict[str, Any], name: str = "probe"
+) -> dict[str, Any]:
     captured: dict[str, str] = {}
-    wrapped = factory._with_coerced_arguments(_capturing_tool(captured, schema))
+    wrapped = factory._with_coerced_arguments(_capturing_tool(captured, schema, name))
     assert await wrapped.on_invoke_tool(cast("Any", None), json.dumps(payload)) == "ok"
     return cast("dict[str, Any]", json.loads(captured["raw_input"]))
 
@@ -149,6 +153,7 @@ async def test_coercion_is_applied_once_per_tool() -> None:
 
 
 _NULLABLE_STRING = {"category": {"anyOf": [{"type": "string"}, {"type": "null"}]}}
+_NULLABLE_CONTENT = {"content": {"anyOf": [{"type": "string"}, {"type": "null"}]}}
 _NULLABLE_STRING_TYPE_LIST = {"category": {"type": ["string", "null"]}}
 
 
@@ -158,7 +163,7 @@ _NULLABLE_STRING_TYPE_LIST = {"category": {"type": ["string", "null"]}}
 async def test_nullish_string_on_a_nullable_parameter_becomes_none(
     schema: dict[str, Any], value: str
 ) -> None:
-    parsed = await _roundtrip(schema, {"category": value})
+    parsed = await _roundtrip(schema, {"category": value}, "list_probes")
 
     assert parsed["category"] is None
 
@@ -167,7 +172,7 @@ async def test_nullish_string_on_a_nullable_parameter_becomes_none(
 async def test_nullish_string_on_a_required_parameter_is_untouched() -> None:
     schema = {"content": {"type": "string"}}
     captured: dict[str, str] = {}
-    tool = _capturing_tool(captured, schema)
+    tool = _capturing_tool(captured, schema, "list_probes")
     tool.params_json_schema["required"] = ["content"]
     wrapped = factory._with_coerced_arguments(tool)
 
@@ -178,7 +183,7 @@ async def test_nullish_string_on_a_required_parameter_is_untouched() -> None:
 @pytest.mark.asyncio
 async def test_a_parameter_absent_from_required_is_treated_as_nullable() -> None:
     captured: dict[str, str] = {}
-    tool = _capturing_tool(captured, {"category": {"type": "string"}})
+    tool = _capturing_tool(captured, {"category": {"type": "string"}}, "list_probes")
     tool.params_json_schema["required"] = []
     wrapped = factory._with_coerced_arguments(tool)
 
@@ -188,14 +193,25 @@ async def test_a_parameter_absent_from_required_is_treated_as_nullable() -> None
 
 @pytest.mark.asyncio
 async def test_nullish_string_without_a_required_list_is_untouched() -> None:
-    parsed = await _roundtrip(_STRING, {"todos": "none"})
+    parsed = await _roundtrip(_STRING, {"todos": "none"}, "list_probes")
 
     assert parsed["todos"] == "none"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["update_note", "create_note", "record_coverage"])
+@pytest.mark.parametrize("value", ["null", "none"])
+async def test_a_nullish_value_survives_on_a_tool_that_writes(name: str, value: str) -> None:
+    parsed = await _roundtrip(_NULLABLE_CONTENT, {"content": value}, name)
+
+    assert parsed["content"] == value
+
+
+@pytest.mark.asyncio
 async def test_nullish_looking_content_is_not_coerced() -> None:
-    parsed = await _roundtrip(_NULLABLE_STRING, {"category": "none of the endpoints reflect input"})
+    parsed = await _roundtrip(
+        _NULLABLE_STRING, {"category": "none of the endpoints reflect input"}, "list_probes"
+    )
 
     assert parsed["category"] == "none of the endpoints reflect input"
 
@@ -209,7 +225,7 @@ async def test_empty_string_on_a_nullable_string_parameter_is_untouched() -> Non
 
 @pytest.mark.asyncio
 async def test_nullish_string_on_a_nullable_array_parameter_becomes_none() -> None:
-    parsed = await _roundtrip(_NULLABLE_ARRAY, {"tags": "null"})
+    parsed = await _roundtrip(_NULLABLE_ARRAY, {"tags": "null"}, "list_probes")
 
     assert parsed["tags"] is None
 
