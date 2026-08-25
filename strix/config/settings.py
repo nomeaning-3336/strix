@@ -102,6 +102,29 @@ class ContextSettings(BaseSettings):
     )
 
 
+class ShellSettings(BaseSettings):
+    """Yield-time defaults for the SDK shell tools.
+
+    Agents spend many turns polling backgrounded shells because the SDK yields
+    after only 250ms on a ``write_stdin`` poll and 10s on ``exec_command``.
+    Raising these defaults lets one call return a meaningful result instead of a
+    no-op round-trip. An explicit ``yield_time_ms`` from the model always wins.
+    """
+
+    model_config = _BASE_CONFIG
+
+    # Default yield for exec_command when the model omits yield_time_ms.
+    exec_yield_ms: int = Field(default=30_000, gt=0, alias="STRIX_SHELL_EXEC_YIELD_MS")
+    # Larger default for known long-running security binaries.
+    exec_long_yield_ms: int = Field(default=120_000, gt=0, alias="STRIX_SHELL_EXEC_LONG_YIELD_MS")
+    # Default yield for an empty (polling) write_stdin call.
+    write_stdin_poll_yield_ms: int = Field(
+        default=20_000, gt=0, alias="STRIX_SHELL_WRITE_STDIN_POLL_YIELD_MS"
+    )
+    # Cap on a bare `sleep N` hand-wait (seconds); larger sleeps are clamped.
+    max_sleep_seconds: int = Field(default=60, gt=0, alias="STRIX_SHELL_MAX_SLEEP_SECONDS")
+
+
 class RuntimeSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
@@ -151,6 +174,7 @@ class Settings(BaseSettings):
     dedupe: DedupeSettings = Field(default_factory=DedupeSettings)
     runtime: RuntimeSettings = Field(default_factory=RuntimeSettings)
     context: ContextSettings = Field(default_factory=ContextSettings)
+    shell_tools: ShellSettings = Field(default_factory=ShellSettings)
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
     integrations: IntegrationSettings = Field(default_factory=IntegrationSettings)
     viewer: ViewerSettings = Field(default_factory=ViewerSettings)
