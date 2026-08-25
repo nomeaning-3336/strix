@@ -352,21 +352,28 @@ func (m Model) toastOverlay(view string) string {
 	return strings.Join(bg, "\n")
 }
 
-// blackBG is the SGR that selects a solid black background.
-const blackBG = "\x1b[48;2;0;0;0m"
+// Base frame colors are reapplied after full SGR resets so the TUI does not
+// inherit an unreadable foreground from the user's terminal profile.
+const (
+	blackBG         = "\x1b[48;2;0;0;0m"
+	textFG          = "\x1b[38;2;212;212;212m"
+	baseFrameColors = blackBG + textFG
+)
 
 // fillBackground paints the whole frame black like Textual's Screen background.
 // Bubble Tea has no screen compositor, so any cell the view does not explicitly
 // color shows the terminal's default background. lipgloss emits a full reset
-// (\x1b[0m) at the end of every styled span, which also clears the background, so
-// we reassert black after each reset (and at the start). Spans that set their own
-// background — inline code, selected rows, buttons — keep it, because their color
-// is emitted before the reset.
+// (\x1b[0m) at the end of every styled span, which clears both foreground and
+// background. Reasserting only black made uncolored and faint text inherit the
+// terminal profile's foreground; light profiles therefore rendered that text
+// black-on-black. Reapply both base colors after each reset (and at the start).
+// Spans that set their own colors — inline code, selected rows, buttons — keep
+// them, because their color is emitted after the base style.
 func fillBackground(view string) string {
 	if view == "" {
 		return view
 	}
-	return blackBG + strings.ReplaceAll(view, "\x1b[0m", "\x1b[0m"+blackBG)
+	return baseFrameColors + strings.ReplaceAll(view, "\x1b[0m", "\x1b[0m"+baseFrameColors)
 }
 
 func (m Model) splashView() string {

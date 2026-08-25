@@ -865,6 +865,20 @@ func TestPanelPaddingResetsLeakingLineBackground(t *testing.T) {
 	}
 }
 
+func TestFillBackgroundRestoresBaseForegroundAfterReset(t *testing.T) {
+	const textFG = "\x1b[38;2;212;212;212m"
+	view := "\x1b[38;2;167;139;250m◈ \x1b[0m\x1b[2mspawning\x1b[0m"
+	filled := fillBackground(view)
+	baseStyle := blackBG + textFG
+
+	if !strings.HasPrefix(filled, baseStyle) {
+		t.Fatalf("frame does not set its base colors: %q", filled)
+	}
+	if got, want := strings.Count(filled, "\x1b[0m"+baseStyle), 2; got != want {
+		t.Fatalf("base colors restored after %d resets, want %d: %q", got, want, filled)
+	}
+}
+
 func TestMainTraceTreeAndFindingsRenderScrollbars(t *testing.T) {
 	model := New(nil)
 	model.width, model.height = 150, 35
