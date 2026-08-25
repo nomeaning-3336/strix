@@ -151,14 +151,29 @@ async def test_wrap_exec_command_raises_default_yield_when_omitted() -> None:
     "cmd",
     ["nmap -sV example.com", "sudo nmap -sV example.com", "PROXY=1 ffuf -u http://x"],
 )
-async def test_wrap_exec_command_uses_long_yield_for_known_binaries(cmd: str) -> None:
+async def test_wrap_exec_command_default_does_not_depend_on_the_binary(cmd: str) -> None:
+    """The wrapper never guesses a command's runtime: the agent asks for a
+    longer yield itself when it expects one."""
     captured: dict[str, str] = {}
     wrapped = factory._wrap_exec_command(_capturing_exec_tool(captured))
 
     await wrapped.on_invoke_tool(cast("Any", None), json.dumps({"cmd": cmd}))
 
-    expected = load_settings().shell_tools.exec_long_yield_ms
+    expected = load_settings().shell_tools.exec_yield_ms
     assert json.loads(captured["raw_input"])["yield_time_ms"] == expected
+
+
+@pytest.mark.asyncio
+async def test_wrap_exec_command_preserves_long_explicit_yield() -> None:
+    captured: dict[str, str] = {}
+    wrapped = factory._wrap_exec_command(_capturing_exec_tool(captured))
+
+    await wrapped.on_invoke_tool(
+        cast("Any", None),
+        json.dumps({"cmd": "nmap -p- example.com", "yield_time_ms": 300_000}),
+    )
+
+    assert json.loads(captured["raw_input"])["yield_time_ms"] == 300_000
 
 
 @pytest.mark.asyncio
@@ -174,7 +189,7 @@ async def test_wrap_exec_command_preserves_explicit_yield() -> None:
 
 
 @pytest.mark.asyncio
-async def test_wrap_exec_command_unparsable_command_uses_plain_default() -> None:
+async def test_wrap_exec_command_unparsable_command_still_gets_the_default() -> None:
     captured: dict[str, str] = {}
     wrapped = factory._wrap_exec_command(_capturing_exec_tool(captured))
 

@@ -115,8 +115,6 @@ class ShellSettings(BaseSettings):
 
     # Default yield for exec_command when the model omits yield_time_ms.
     exec_yield_ms: int = Field(default=30_000, gt=0, alias="STRIX_SHELL_EXEC_YIELD_MS")
-    # Larger default for known long-running security binaries.
-    exec_long_yield_ms: int = Field(default=120_000, gt=0, alias="STRIX_SHELL_EXEC_LONG_YIELD_MS")
     # Default yield for an empty (polling) write_stdin call.
     write_stdin_poll_yield_ms: int = Field(
         default=20_000, gt=0, alias="STRIX_SHELL_WRITE_STDIN_POLL_YIELD_MS"

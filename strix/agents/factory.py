@@ -388,71 +388,11 @@ def _apply_shell_output_cap(parsed: dict[str, Any]) -> None:
     )
 
 
-# Binaries that routinely run for minutes; they get a bigger exec yield so the
-# agent gets a result in one call instead of polling a backgrounded process.
-_LONG_RUNNING_BINARIES: frozenset[str] = frozenset(
-    {
-        "amass",
-        "dirsearch",
-        "feroxbuster",
-        "ffuf",
-        "gobuster",
-        "httpx",
-        "katana",
-        "masscan",
-        "nikto",
-        "nmap",
-        "nuclei",
-        "sqlmap",
-        "subfinder",
-        "wpscan",
-    }
-)
-
-# Wrapper commands that precede the real binary; skip them when parsing.
-_COMMAND_PREFIXES: frozenset[str] = frozenset(
-    {"command", "doas", "env", "nice", "nohup", "stdbuf", "sudo", "time"}
-)
-
-_ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-
 _SLEEP_HINT = (
     "\n\n[strix] To wait on a background job, prefer "
     'write_stdin(session_id=..., chars="", yield_time_ms=...), which returns as '
     "soon as there is new output or the process exits — better than a blind sleep."
 )
-
-
-def _leading_binary(cmd: str) -> str | None:
-    """Best-effort name of the first real binary in ``cmd``.
-
-    Skips env-var assignments and wrapper prefixes (``sudo``/``env``/…) and
-    stops at the first token of a pipeline. Returns ``None`` when the command
-    cannot be parsed so callers can fall back to the plain default."""
-    try:
-        tokens = shlex.split(cmd)
-    except ValueError:
-        return None
-    idx = 0
-    while idx < len(tokens):
-        token = tokens[idx]
-        if _ENV_ASSIGN_RE.match(token):
-            idx += 1
-            continue
-        if token in _COMMAND_PREFIXES:
-            idx += 1
-            while idx < len(tokens) and tokens[idx].startswith("-"):
-                idx += 1
-            continue
-        return token.rsplit("/", 1)[-1] or None
-    return None
-
-
-def _default_exec_yield_ms(cmd: Any) -> int:
-    settings = load_settings().shell_tools
-    if isinstance(cmd, str) and _leading_binary(cmd) in _LONG_RUNNING_BINARIES:
-        return settings.exec_long_yield_ms
-    return settings.exec_yield_ms
 
 
 _SLEEP_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd]?)$")
@@ -498,9 +438,10 @@ def _normalize_exec_args(parsed: dict[str, Any]) -> bool:
     if "shell" not in parsed:
         parsed["shell"] = "bash"
     # Raise the yield above the SDK's 10s so a command returns in one call
-    # instead of getting backgrounded and then polled turn after turn.
+    # instead of getting backgrounded and then polled turn after turn. The agent
+    # asks for a longer yield itself when it expects a command to run longer.
     if "yield_time_ms" not in parsed:
-        parsed["yield_time_ms"] = _default_exec_yield_ms(parsed.get("cmd"))
+        parsed["yield_time_ms"] = load_settings().shell_tools.exec_yield_ms
     is_sleep = _apply_sleep_guard(parsed)
     _apply_shell_output_cap(parsed)
     return is_sleep
