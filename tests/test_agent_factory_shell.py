@@ -8,11 +8,12 @@ from typing import Any, cast
 
 import pytest
 from agents.sandbox.errors import InvalidManifestPathError
+from agents.sandbox.session.pty_types import PTY_YIELD_TIME_MS_MAX
 from agents.tool import CustomTool, FunctionTool
 from pydantic import BaseModel, ValidationError
 
 from strix.agents import factory
-from strix.config import load_settings
+from strix.config import ShellSettings, load_settings
 
 
 def _capturing_exec_tool(captured: dict[str, str]) -> FunctionTool:
@@ -363,3 +364,12 @@ async def test_invalid_workdir_is_rendered_as_a_message() -> None:
     assert isinstance(result, str)
     assert "workdir must be a path inside /workspace" in result
     assert "'../etc'" in result
+
+
+@pytest.mark.parametrize("field", ["exec_yield_ms", "write_stdin_poll_yield_ms"])
+def test_shell_settings_reject_a_yield_above_the_pty_ceiling(field: str) -> None:
+    """A yield the PTY layer would clamp is a misconfiguration, not a longer wait."""
+    with pytest.raises(ValidationError):
+        ShellSettings(**{field: PTY_YIELD_TIME_MS_MAX + 1})
+
+    assert getattr(ShellSettings(**{field: PTY_YIELD_TIME_MS_MAX}), field) == PTY_YIELD_TIME_MS_MAX

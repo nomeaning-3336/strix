@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from agents.sandbox.session.pty_types import PTY_YIELD_TIME_MS_MAX
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -110,19 +111,27 @@ class ShellSettings(BaseSettings):
     Raising these defaults lets one call return a meaningful result instead of a
     no-op round-trip. An explicit ``yield_time_ms`` from the model always wins.
 
-    The SDK's PTY layer clamps every yield to 30s, so a larger value here would
-    be silently ineffective; keep both yields at or below that ceiling.
+    The SDK's PTY layer clamps every yield to ``PTY_YIELD_TIME_MS_MAX``, so both
+    yields are validated against that ceiling instead of being silently reduced.
     """
 
     model_config = _BASE_CONFIG
 
-    # Default yield for exec_command when the model omits yield_time_ms. 30s is
-    # the most the PTY layer honours, so this sits right at that ceiling.
-    exec_yield_ms: int = Field(default=30_000, gt=0, alias="STRIX_SHELL_EXEC_YIELD_MS")
+    # Default yield for exec_command when the model omits yield_time_ms. The
+    # default sits at the ceiling: waiting is cheaper than another poll turn.
+    exec_yield_ms: int = Field(
+        default=PTY_YIELD_TIME_MS_MAX,
+        gt=0,
+        le=PTY_YIELD_TIME_MS_MAX,
+        alias="STRIX_SHELL_EXEC_YIELD_MS",
+    )
     # Default yield for an empty (polling) write_stdin call. The SDK already
     # floors an empty poll at 5s; this trades a little latency for far fewer turns.
     write_stdin_poll_yield_ms: int = Field(
-        default=20_000, gt=0, alias="STRIX_SHELL_WRITE_STDIN_POLL_YIELD_MS"
+        default=20_000,
+        gt=0,
+        le=PTY_YIELD_TIME_MS_MAX,
+        alias="STRIX_SHELL_WRITE_STDIN_POLL_YIELD_MS",
     )
     # Cap on a bare `sleep N` hand-wait (seconds); larger sleeps are clamped.
     max_sleep_seconds: int = Field(default=60, gt=0, alias="STRIX_SHELL_MAX_SLEEP_SECONDS")
