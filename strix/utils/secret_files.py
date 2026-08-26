@@ -28,4 +28,9 @@ def write_secret_text(path: Path, text: str) -> None:
             tmp.unlink()
         raise
 
-    tmp.replace(path)
+    try:
+        tmp.replace(path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise

@@ -31,6 +31,8 @@ AUTH_PATH = Path.home() / ".strix" / "platform-auth.json"
 
 _HTTP_TIMEOUT_S = 30
 _DEFAULT_POLL_INTERVAL_S = 5
+_MAX_POLL_INTERVAL_S = 60
+_MAX_EXPIRES_IN_S = 30 * 60
 
 _LOGIN_USAGE = (
     "Usage:\n  strix login [--no-browser] [--scopes SCOPE ...] [--workspace WORKSPACE]\n"
@@ -182,8 +184,14 @@ def _run_device_flow(
         or ""
     )
     device_code = str(authorization.get("device_code") or "")
-    expires_in = _as_positive_int(authorization.get("expires_in"), default=300)
-    interval = _as_positive_int(authorization.get("interval"), default=_DEFAULT_POLL_INTERVAL_S)
+    expires_in = _as_positive_int(
+        authorization.get("expires_in"), default=300, maximum=_MAX_EXPIRES_IN_S
+    )
+    interval = _as_positive_int(
+        authorization.get("interval"),
+        default=_DEFAULT_POLL_INTERVAL_S,
+        maximum=_MAX_POLL_INTERVAL_S,
+    )
     if not device_code or not verification_uri:
         raise PlatformAuthError("the server returned an incomplete device authorization")
 
@@ -420,12 +428,14 @@ def _json_object(response: requests.Response) -> dict[str, Any]:
     return cast("dict[str, Any]", data)
 
 
-def _as_positive_int(value: Any, *, default: int) -> int:
+def _as_positive_int(value: Any, *, default: int, maximum: int) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError, OverflowError):
         return default
-    return parsed if parsed > 0 else default
+    if parsed <= 0:
+        return default
+    return min(parsed, maximum)
 
 
 def _error_detail(response: requests.Response) -> str:
