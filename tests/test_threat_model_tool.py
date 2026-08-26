@@ -15,6 +15,7 @@ from strix.tools.threat_model.tools import (
     _save_impl,
     amend_threat_model,
     get_threat_model,
+    hydrate_threat_models_from_disk,
     save_threat_model,
 )
 
@@ -63,8 +64,9 @@ def _make_repo(tmp_path: Path, name: str = "repo") -> Path:
 
 @pytest.fixture(autouse=True)
 def _empty_store() -> None:
-    """Each test is its own run, so it starts with an empty store."""
+    """Each test is its own run, so it starts with an empty, unmirrored store."""
     threat_model_tools._MODELS.clear()
+    threat_model_tools._store_path = None
 
 
 def test_missing_model_reports_not_found(tmp_path: Path) -> None:
@@ -87,8 +89,10 @@ def test_saved_model_round_trips(tmp_path: Path) -> None:
     assert "multi-tenant billing API" in result["content"]
 
 
-def test_nothing_is_written_to_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The model must not outlive the run, so no file may be left behind."""
+def test_nothing_is_written_outside_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The model must not outlive the scan, so nothing may land in the home dir."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -103,11 +107,28 @@ def test_nothing_is_written_to_disk(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_a_new_run_starts_without_the_model(tmp_path: Path) -> None:
     """A later scan of the same target inherits nothing from this one."""
     repo = _make_repo(tmp_path)
+    hydrate_threat_models_from_disk(tmp_path / "first-run")
     _save_impl(str(repo), _MODEL, "root")
 
-    threat_model_tools._MODELS.clear()  # what a fresh process starts from
+    hydrate_threat_models_from_disk(tmp_path / "second-run")  # a different scan
 
     assert _get_impl(str(repo))["found"] is False
+
+
+def test_resuming_the_same_run_keeps_the_model(tmp_path: Path) -> None:
+    """A resumed scan is the same scan, so its agents keep the shared baseline."""
+    state_dir = tmp_path / "state"
+    repo = _make_repo(tmp_path)
+    hydrate_threat_models_from_disk(state_dir)
+    _save_impl(str(repo), _MODEL, "root")
+    _amend_impl(str(repo), _ADDENDUM, "agent-a")
+
+    threat_model_tools._MODELS.clear()  # what the resuming process starts from
+    hydrate_threat_models_from_disk(state_dir)
+
+    result = _get_impl(str(repo))
+    assert result["found"] is True
+    assert [a["content"] for a in result["amendments"]] == [_ADDENDUM]
 
 
 def test_model_survives_a_new_revision_within_the_run(tmp_path: Path) -> None:

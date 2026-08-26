@@ -1,16 +1,17 @@
-"""Run-scoped threat models — held in memory for the duration of one scan.
+"""Run-scoped threat models — mirrored to ``{state_dir}/threat_models.json``.
 
 A threat model is the scan's shared answer to who the attacker is, where the
 trust boundaries sit, and what counts as critical for the target. One agent
 derives it and every other agent on the same run reads it back instead of
 re-deriving trust boundaries from scratch.
 
-It never outlives the run. Nothing is written to disk and nothing is shared
-between scans: a new scan against the same host or checkout starts with no
-model and derives its own. Agents do spell one target several ways within a
-run — the URL they were handed, the page they happen to be testing, a checkout
-path — so a model is keyed by a normalized target identity to keep them
-converging on one document instead of each starting a fresh one.
+It does not outlive the scan. The mirror lives in the run's own state directory
+and exists only so a resumed scan keeps the baseline its earlier agents agreed
+on; a new scan against the same host or checkout starts with no model and
+derives its own. Agents do spell one target several ways within a run — the URL
+they were handed, the page they happen to be testing, a checkout path — so a
+model is keyed by a normalized target identity to keep them converging on one
+document instead of each starting a fresh one.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import json
 import logging
 import re
 import subprocess
+import tempfile
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,9 +45,10 @@ _DEFAULT_PORTS = {"http": "80", "https": "443"}
 
 _store_lock = threading.RLock()
 
-# The whole store: target identity -> model. Process-local and never persisted,
-# so it holds exactly the models this run derived and dies with it.
+# The whole store: target identity -> model. It holds exactly the models this
+# scan derived, and is mirrored to the run's state directory for resume.
 _MODELS: dict[str, dict[str, Any]] = {}
+_store_path: Path | None = None
 
 _REQUIRED_SECTIONS = (
     "overview",
@@ -202,6 +205,67 @@ def _resolve_target(
     return (_snap_to_scan_target(raw, known) if known else raw), None
 
 
+def hydrate_threat_models_from_disk(state_dir: Path) -> None:
+    """Point the store at this run's mirror and load whatever it already holds.
+
+    A resumed scan is the same scan, so its agents have to keep the baseline
+    the earlier ones agreed on. The mirror lives under the run directory, so a
+    different scan never reads it.
+    """
+    global _store_path  # noqa: PLW0603
+    _store_path = state_dir / "threat_models.json"
+    with _store_lock:
+        _MODELS.clear()
+        if not _store_path.is_file():
+            return
+        try:
+            data = json.loads(_store_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            logger.exception(
+                "threat_models.json at %s is unreadable; starting with no models",
+                _store_path,
+            )
+            return
+        if not isinstance(data, dict):
+            return
+        _MODELS.update(
+            {
+                identity: model
+                for identity, model in data.items()
+                if isinstance(identity, str) and isinstance(model, dict)
+            }
+        )
+        logger.info("threat models hydrated from %s (%d)", _store_path, len(_MODELS))
+
+
+def _persist_locked() -> None:
+    """Mirror the store to disk. Callers must already hold ``_store_lock``.
+
+    Serializing and renaming in one critical section keeps a writer holding an
+    older serialization from winning the rename and dropping a concurrent
+    agent's model or amendment.
+    """
+    path = _store_path
+    if path is None:
+        return
+    try:
+        payload = json.dumps(_MODELS, ensure_ascii=False, default=str)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as tmp:
+            tmp.write(payload)
+            tmp_path = Path(tmp.name)
+        tmp_path.replace(path)
+    except OSError:
+        logger.exception("threat model mirror to %s failed", path)
+
+
 def _missing_sections(content: str) -> list[str]:
     lowered = content.lower()
     return [section for section in _REQUIRED_SECTIONS if section not in lowered]
@@ -221,7 +285,7 @@ def _not_found(identity: str) -> dict[str, Any]:
         "target": identity,
         "message": (
             "No threat model for this target on this scan. Nothing carries over "
-            "from earlier runs, so derive one — from the code if you have it, from "
+            "from other scans, so derive one — from the code if you have it, from "
             "recon output if you do not — and share it with save_threat_model, so "
             "every agent on this scan works from one view of the trust boundaries "
             "instead of each inventing their own."
@@ -306,6 +370,7 @@ def _save_impl(
             "written_by": agent_name,
             "content": body,
         }
+        _persist_locked()
 
     message = (
         "Threat model shared with this scan. Subagents should call get_threat_model "
@@ -346,6 +411,7 @@ def _append_amendment(
         if len(json.dumps(sized, ensure_ascii=False).encode("utf-8")) > _MAX_MODEL_BYTES:
             return None, "Threat model with this amendment exceeds 512KB; tighten it."
         model["amendments"] = candidate
+        _persist_locked()
         return candidate, None
 
 
