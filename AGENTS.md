@@ -38,7 +38,8 @@ Target-specific workflows built on the same engine:
 
 - **Managed cloud (app.strix.ai):** no Docker, no LLM key, no local install; adds team dashboards, scheduling, PR reviews, and downloadable PDF/DOCX reports (Enterprise plan). Best in sandboxed/CI environments and for teams. Use it when local infra isn't available.
   ```bash
-  # token from Settings → API Access; register the target as an asset, then:
+  # token from `strix login` (device sign-in, stored in ~/.strix/platform-auth.json)
+  # or from Settings → API Access; register the target as an asset, then:
   curl -sS https://app.strix.ai/api/v1/scans -H "Authorization: Bearer $STRIX_API_TOKEN" \
     -H "Content-Type: application/json" -d '{"engagement_type":"live_test","domain_ids":["<uuid>"]}'
   ```

@@ -320,6 +320,19 @@ strix auth status             # show the active sign-in
 strix auth logout             # forget the sign-in
 ```
 
+#### Sign in to the managed platform
+
+To use the managed platform ([app.strix.ai](https://app.strix.ai)) from the terminal, run the device sign-in. It creates your account and workspace on first use and stores a personal API token in `~/.strix/platform-auth.json`:
+
+```bash
+strix login                   # opens the browser to approve the sign-in
+strix login --scopes scans:read scans:write   # request specific token scopes
+strix login status            # show the active sign-in
+strix login logout            # forget the sign-in
+```
+
+The token authorizes the [REST API](https://docs.app.strix.ai) — scans, vulnerabilities, credits, and top-ups — with no dashboard visit.
+
 #### Connect your own MCP servers
 
 Strix can connect to Model Context Protocol (MCP) servers you list and expose their tools to the agent during a run. Create `~/.strix/mcp-servers.json` with a JSON list of servers. Each entry is either a local `stdio` server that Strix launches as a subprocess, or a remote `http` server:
