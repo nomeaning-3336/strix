@@ -279,8 +279,8 @@ def _complete_selection(
     scopes: list[str] | None,
     workspace: str | None,
 ) -> dict[str, Any]:
-    organizations = [org for org in selection.get("organizations") or [] if isinstance(org, dict)]
-    catalog = [item for item in selection.get("scopes") or [] if isinstance(item, dict)]
+    organizations = _dict_items(selection.get("organizations"))
+    catalog = _dict_items(selection.get("scopes"))
     selection_token = str(selection.get("selection_token") or "")
     if not selection_token or not organizations:
         raise PlatformAuthError("the server returned an incomplete selection response")
@@ -308,6 +308,12 @@ def _complete_selection(
     if not response.ok:
         raise PlatformAuthError(_error_detail(response))
     return _signed_in_record(response)
+
+
+def _dict_items(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
 
 
 def _choose_workspace(
@@ -465,7 +471,7 @@ def _status(console: Console) -> int:
 
 
 def _logout(console: Console) -> int:
-    if read_record() is None:
+    if read_record() is None and not AUTH_PATH.exists():
         console.print("[yellow]Not signed in.[/]")
         return 0
     if not logout():
