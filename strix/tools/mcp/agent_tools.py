@@ -97,10 +97,11 @@ async def call_mcp(
     Args:
         connection: The connection name exactly as shown in the MCP inventory.
         tool: The tool name, exactly as reported by ``describe_mcp``.
-        arguments: The tool's arguments as an object of names to values, or
-            omitted/empty for a tool that takes none. ``arguments`` is passed
-            through as-is, so its shape is whatever ``describe_mcp`` showed for
-            the tool rather than a shape this tool fixes in advance.
+        arguments: The tool's arguments as a JSON object of names to values (for
+            example ``{"path": "app.py"}``), or omitted/empty for a tool that
+            takes none. Pass an object, not a stringified one. Its shape is
+            whatever ``describe_mcp`` showed for the tool rather than a shape this
+            tool fixes in advance.
     """
     registry = _registry_from_ctx(ctx)
     if registry is None or not registry:
@@ -108,11 +109,22 @@ async def call_mcp(
     entry = registry.get(connection)
     if entry is None:
         return _unknown_connection(connection, registry)
+    invalid_arguments = (
+        f"Invalid arguments for {connection!r}.{tool}: expected a JSON object of "
+        "argument names to values, or none. Call describe_mcp for the input schema."
+    )
+    if isinstance(arguments, str):
+        # The ``arguments`` parameter is schema-less (an open object is not
+        # expressible as a strict tool schema), so some models serialize it as a
+        # JSON string instead of a bare object. Accept a string that decodes to an
+        # object so a correct call is not rejected over its encoding.
+        stripped = arguments.strip()
+        try:
+            arguments = json.loads(stripped) if stripped else {}
+        except json.JSONDecodeError:
+            return invalid_arguments
     if arguments is not None and not isinstance(arguments, dict):
-        return (
-            f"Invalid arguments for {connection!r}.{tool}: expected a JSON object of "
-            "argument names to values, or none. Call describe_mcp for the input schema."
-        )
+        return invalid_arguments
     available = await entry.server.list_tools()
     valid_names = {mcp_tool.name for mcp_tool in available}
     if tool not in valid_names:

@@ -31,7 +31,6 @@ from strix.tools.mcp import (
     load_user_mcp_configs,
     mcp_inventory_context,
     namespaced_tool_name,
-    resolve_mcp_tool,
 )
 from strix.tools.mcp import client as mcp_client
 
@@ -418,6 +417,40 @@ async def test_call_mcp_defaults_missing_arguments_to_empty_object() -> None:
 
 
 @pytest.mark.asyncio
+async def test_call_mcp_coerces_json_string_arguments() -> None:
+    # Some models serialize the schema-less ``arguments`` object as a JSON string;
+    # a correct call must not be rejected over that encoding.
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry),
+        json.dumps(
+            {"connection": "fs", "tool": "read_file", "arguments": '{"path": "/etc/hosts"}'}
+        ),
+    )
+
+    assert server.calls == [("read_file", {"path": "/etc/hosts"})]
+    assert out == {"type": "text", "text": "routed:read_file"}
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_errors_on_unparseable_string_arguments() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry),
+        json.dumps({"connection": "fs", "tool": "read_file", "arguments": "not json"}),
+    )
+
+    assert "expected a JSON object" in out
+    assert server.calls == []
+
+
+@pytest.mark.asyncio
 async def test_call_mcp_errors_on_unknown_connection() -> None:
     registry = McpRegistry()
     registry.add(name="fs", server=FakeMCPServer("fs", []), purpose=None, tool_count=0)
@@ -685,31 +718,9 @@ async def test_connect_cleans_up_when_cancelled_mid_connect(
 
 
 # --- reading a tool call back to the server it went out to -------------------
-# resolve_mcp_tool / namespaced_tool_name stay in strix.tools.mcp.naming: the
-# TUI reads them to attribute a call to its connection, and call_mcp builds the
-# result_transform label with namespaced_tool_name.
-
-
-def test_resolve_mcp_tool_splits_against_the_run_connections() -> None:
-    assert resolve_mcp_tool("local_fs_read_file", ["github", "local_fs"]) == (
-        "local_fs",
-        "read_file",
-    )
-
-
-def test_resolve_mcp_tool_prefers_the_longest_matching_connection() -> None:
-    assert resolve_mcp_tool("files_main_list", ["files", "files_main"]) == ("files_main", "list")
-
-
-def test_resolve_mcp_tool_matches_a_connection_name_it_had_to_sanitize() -> None:
-    tool_name = namespaced_tool_name("my server", "db.query")
-
-    assert resolve_mcp_tool(tool_name, ["my server"]) == ("my server", "db_query")
-
-
-def test_resolve_mcp_tool_ignores_tools_that_are_not_a_connection_s() -> None:
-    assert resolve_mcp_tool("exec_command", ["local_fs"]) is None
-    assert resolve_mcp_tool("local_fsx", ["local_fs"]) is None
+# namespaced_tool_name stays in strix.tools.mcp.naming so call_mcp can build the
+# result_transform label. The connection a call went out to is read off the
+# call's arguments by the TUI projection, not off the tool name.
 
 
 def test_namespaced_name_is_a_valid_tool_name() -> None:
@@ -721,13 +732,16 @@ def test_namespaced_name_is_a_valid_tool_name() -> None:
     assert re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", name)
 
 
-def test_projected_tool_call_names_the_server_it_went_out_to() -> None:
+def test_projected_call_mcp_names_the_server_and_tool_from_its_args() -> None:
     view = TuiLiveView()
-    view.set_mcp_connections(["local_fs"])
 
     view._record_tool_call_data(
         "agent-1",
-        {"call_id": "c1", "tool_name": "local_fs_read_file", "args": {"path": "/etc/hosts"}},
+        {
+            "call_id": "c1",
+            "tool_name": "call_mcp",
+            "args": {"connection": "local_fs", "tool": "read_file", "arguments": {"path": "/x"}},
+        },
     )
     view._record_tool_call_data(
         "agent-1",
@@ -737,3 +751,18 @@ def test_projected_tool_call_names_the_server_it_went_out_to() -> None:
     mcp_call, built_in = (event["data"] for event in view.events)
     assert (mcp_call["mcp_connection"], mcp_call["mcp_tool"]) == ("local_fs", "read_file")
     assert "mcp_connection" not in built_in
+
+
+def test_projected_describe_mcp_names_the_connection_with_no_tool() -> None:
+    view = TuiLiveView()
+
+    view._record_tool_call_data(
+        "agent-1",
+        {"call_id": "c1", "tool_name": "describe_mcp", "args": {"connection": "local_fs"}},
+    )
+
+    (describe,) = (event["data"] for event in view.events)
+    # An empty tool is what tells both renderers to present the row as inspecting
+    # the connection rather than as a call to a tool on it.
+    assert describe["mcp_connection"] == "local_fs"
+    assert describe["mcp_tool"] == ""

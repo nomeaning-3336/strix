@@ -181,8 +181,9 @@ function resolveCategory(toolName: string): ToolCategory | null {
 
 /**
  * A call to a tool from one of the user's MCP servers is placed by the
- * connection it was tagged with, ahead of every name-keyed lookup below: its
- * name belongs to that server and matches nothing in this table.
+ * connection it was tagged with, ahead of every name-keyed lookup below. Every
+ * MCP call goes through the `call_mcp` / `describe_mcp` dispatch tools, so the
+ * connection tag, not the tool name, is what routes it to the MCP renderer.
  */
 export function getToolRenderer(
   toolName: string,

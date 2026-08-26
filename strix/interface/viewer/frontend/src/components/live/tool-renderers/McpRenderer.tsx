@@ -47,13 +47,29 @@ export default function McpRenderer({
   const lines = argLines(args);
   const failed = status === "failed" || status === "error";
   const error = failed ? errorText(result) : null;
+  // describe_mcp inspects a connection's catalog rather than calling a tool on
+  // it, so the connection is the subject and there is no underlying tool.
+  const inspecting = toolName === "describe_mcp";
 
   return (
     <div>
       <div className="flex items-center gap-2 flex-wrap">
-        <span className="font-mono text-teal-300 font-semibold text-sm">{mcpTool || toolName}</span>
-        <span className="text-[13px] text-[#555]">via MCP server</span>
-        {mcpConnection && <span className="text-[13px] text-teal-400/80">{mcpConnection}</span>}
+        {inspecting ? (
+          <>
+            <span className="text-[13px] text-[#555]">Inspecting MCP server</span>
+            {mcpConnection && (
+              <span className="font-mono text-teal-300 font-semibold text-sm">{mcpConnection}</span>
+            )}
+          </>
+        ) : (
+          <>
+            <span className="font-mono text-teal-300 font-semibold text-sm">
+              {mcpTool || toolName}
+            </span>
+            <span className="text-[13px] text-[#555]">via MCP server</span>
+            {mcpConnection && <span className="text-[13px] text-teal-400/80">{mcpConnection}</span>}
+          </>
+        )}
       </div>
 
       {lines.length > 0 && (

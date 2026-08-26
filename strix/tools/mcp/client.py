@@ -17,6 +17,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import os
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from agents.mcp import (
@@ -27,6 +29,7 @@ from agents.mcp import (
     MCPServerStreamableHttpParams,
     create_static_tool_filter,
 )
+from mcp.client.stdio import stdio_client
 
 
 if TYPE_CHECKING:
@@ -72,6 +75,35 @@ def _auth_headers(config: McpConnectionConfig) -> dict[str, str]:
     return {"Authorization": f"Bearer {auth.token}"}
 
 
+@contextlib.asynccontextmanager
+async def _quiet_stdio_streams(params: Any) -> Any:
+    """Run a stdio MCP server with its stderr sent to the void.
+
+    A stdio MCP server chats on stderr as it boots (the filesystem server, for
+    one, prints ``Allowed directories: [ ... ]``). The mcp library forwards that
+    stderr to the parent's ``sys.stderr`` by default, which is the terminal the
+    TUI is drawing on, so the banner corrupts the display. Pointing ``errlog`` at
+    ``os.devnull`` drops that chatter. Connection failures are unaffected: they
+    still raise from ``connect`` and are logged by :func:`connect_mcp_servers`.
+    """
+    with Path(os.devnull).open("w", encoding="utf-8") as errlog:
+        async with stdio_client(params, errlog=errlog) as streams:
+            yield streams
+
+
+class _QuietMCPServerStdio(MCPServerStdio):
+    """``MCPServerStdio`` whose subprocess stderr is kept off the terminal.
+
+    The SDK's ``create_streams`` calls ``stdio_client(self.params)`` with no
+    ``errlog``, so the subprocess stderr defaults to ``sys.stderr`` and paints
+    server banners over the running TUI. Overriding it lets us redirect that
+    stream; everything else about the stdio transport is unchanged.
+    """
+
+    def create_streams(self) -> Any:
+        return _quiet_stdio_streams(self.params)
+
+
 def _build_server(config: McpConnectionConfig) -> MCPServer:
     """Construct (but do not connect) the SDK server for one connection.
 
@@ -92,7 +124,7 @@ def _build_server(config: McpConnectionConfig) -> MCPServer:
             "args": config.args,
             "env": config.env,
         }
-        return MCPServerStdio(
+        return _QuietMCPServerStdio(
             params=stdio_params,
             name=config.name,
             tool_filter=tool_filter,

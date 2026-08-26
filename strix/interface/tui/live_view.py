@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
     from pathlib import Path
 
 from agents.tool import ToolOutputImage
@@ -16,9 +15,10 @@ from agents.tool import ToolOutputImage
 from strix.core.paths import runtime_state_dir
 from strix.interface.tui.history import load_session_history
 
-# Imported from the naming module rather than the mcp package so a projection
-# never pulls in the MCP client and the agents SDK behind it.
-from strix.tools.mcp.naming import resolve_mcp_tool
+
+# Every MCP call the model makes goes through one of two dispatch tools, so a
+# call to a user's server is recognised by the tool's name alone.
+_MCP_DISPATCH_TOOLS = frozenset({"call_mcp", "describe_mcp"})
 
 
 class TuiLiveView:
@@ -31,27 +31,30 @@ class TuiLiveView:
         self._user_instruction: str | None = None
         self._user_instruction_at: str | None = None
         self._user_instruction_shown = False
-        self._mcp_connections: tuple[str, ...] = ()
 
-    def set_mcp_connections(self, names: Iterable[str]) -> None:
-        """The MCP servers this run connected, so its tool calls can name theirs.
-
-        A server's tools are offered to the model under a name built from the
-        connection name and the tool's own name. That name cannot be split back
-        apart on its own, so tool calls are matched against these names instead.
-        """
-        self._mcp_connections = tuple(str(name) for name in names)
-
-    def _mcp_tool_fields(self, tool_name: str) -> dict[str, str]:
+    def _mcp_tool_fields(self, tool_name: str, args: dict[str, Any]) -> dict[str, str]:
         """Event fields naming the MCP server a tool call went out to, if any.
 
-        Empty for every built-in tool, which is what tells an interface to render
-        the call as one of its own rather than as a call to a user's server.
+        Every MCP call the model makes goes through one of two dispatch tools:
+        ``call_mcp`` runs a named tool on a connection, and ``describe_mcp``
+        inspects a connection's catalog. The connection, and for ``call_mcp`` the
+        server's own name for the tool, ride in the call's arguments rather than
+        in the tool name, so they are read from there. Empty for every other tool,
+        which is what tells an interface to render the call as one of its own
+        rather than as a call to a user's server.
         """
-        origin = resolve_mcp_tool(tool_name, self._mcp_connections)
-        if origin is None:
+        if tool_name not in _MCP_DISPATCH_TOOLS:
             return {}
-        return {"mcp_connection": origin.connection, "mcp_tool": origin.tool}
+        connection = args.get("connection")
+        if not isinstance(connection, str) or not connection:
+            return {}
+        # describe_mcp has no underlying tool; an empty tool tells both renderers
+        # to present the row as inspecting the connection itself.
+        tool = args.get("tool") if tool_name == "call_mcp" else ""
+        return {
+            "mcp_connection": connection,
+            "mcp_tool": tool if isinstance(tool, str) else "",
+        }
 
     def set_user_instruction(self, text: str | None, *, timestamp: str | None = None) -> None:
         """Open the transcript with what the user asked for.
@@ -98,8 +101,7 @@ class TuiLiveView:
 
     def hydrate_from_run_dir(self, run_dir: Path) -> None:
         # Armed before the agents are added so the root agent's arrival puts the
-        # user's opening message ahead of the replayed history, and before the
-        # history is replayed so its MCP tool calls are attributed too.
+        # user's opening message ahead of the replayed history.
         self._load_run_record(run_dir)
         state_dir = runtime_state_dir(run_dir)
         agents_path = state_dir / "agents.json"
@@ -128,16 +130,13 @@ class TuiLiveView:
         self._hydrate_sdk_session_history(run_dir, statuses.keys())
 
     def _load_run_record(self, run_dir: Path) -> None:
-        """Take the user's opening message and the run's MCP servers off the record."""
+        """Take the user's opening message off the record."""
         try:
             record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return
         if not isinstance(record, dict):
             return
-        connections = record.get("mcp_connections")
-        if isinstance(connections, list):
-            self.set_mcp_connections(name for name in connections if isinstance(name, str))
         instruction = record.get("user_instruction")
         if not isinstance(instruction, str):
             return
@@ -348,7 +347,7 @@ class TuiLiveView:
             "status": "running",
             "agent_id": agent_id,
             "call_id": call_id,
-            **self._mcp_tool_fields(call["tool_name"]),
+            **self._mcp_tool_fields(call["tool_name"], call["args"]),
         }
         if existing is None:
             event = self._append_event(agent_id, "tool", tool_data, timestamp=timestamp)
@@ -371,6 +370,10 @@ class TuiLiveView:
         event_key = (agent_id, call_id)
         event = self._tool_event_by_agent_and_call_id.get(event_key)
         if event is None:
+            # No prior call event to update, so its arguments are gone and the
+            # connection an MCP call went out to cannot be recovered. The matching
+            # call event, when there is one, already carries the MCP fields; this
+            # arrives only when the call was never projected, so it stays generic.
             event = self._append_event(
                 agent_id,
                 "tool",
@@ -380,7 +383,6 @@ class TuiLiveView:
                     "status": "completed",
                     "agent_id": agent_id,
                     "call_id": call_id,
-                    **self._mcp_tool_fields(output["tool_name"]),
                 },
                 timestamp=timestamp,
             )

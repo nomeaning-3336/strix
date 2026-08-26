@@ -10,7 +10,7 @@ from strix.tools.mcp.config import (
     McpConnectionConfig,
 )
 from strix.tools.mcp.loader import load_user_mcp_configs
-from strix.tools.mcp.naming import McpToolOrigin, namespaced_tool_name, resolve_mcp_tool
+from strix.tools.mcp.naming import namespaced_tool_name
 from strix.tools.mcp.registry import (
     MCP_REGISTRY_CONTEXT_KEY,
     McpConnectionEntry,
@@ -29,12 +29,10 @@ __all__ = [
     "McpConnectionEntry",
     "McpConnectionSummary",
     "McpRegistry",
-    "McpToolOrigin",
     "call_mcp",
     "connect_mcp_servers",
     "describe_mcp",
     "load_user_mcp_configs",
     "mcp_inventory_context",
     "namespaced_tool_name",
-    "resolve_mcp_tool",
 ]

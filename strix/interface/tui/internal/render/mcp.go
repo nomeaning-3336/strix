@@ -33,3 +33,15 @@ func renderMcpTool(connection, toolName string, args map[string]any, status stri
 	b.WriteString(style.Render(icon))
 	return b.String()
 }
+
+// renderMcpInspect renders describe_mcp: a request to inspect one connection's
+// catalog rather than a call to a tool on it. There is no underlying tool, so
+// the connection is the whole subject and leads. Same icon and colors as a tool
+// call so the two read as one family while scrolling a transcript.
+func renderMcpInspect(connection, status string) string {
+	var b strings.Builder
+	b.WriteString(mcpIcon + Dim().Render("Inspecting MCP server ") + Bold(Mint).Render(connection) + "\n")
+	icon, style := statusIcon(status)
+	b.WriteString(style.Render(icon))
+	return b.String()
+}
