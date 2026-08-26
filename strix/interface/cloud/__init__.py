@@ -12,6 +12,7 @@ from rich.console import Console
 
 from strix.interface.cloud.runner import resolve, run
 from strix.interface.cloud.spec import DEFAULT_VERBS, GROUP_HELP, SPEC
+from strix.interface.cloud.workspaces import run_workspace_use
 from strix.interface.platform_cli import run_login
 
 
@@ -45,6 +46,8 @@ def run_cloud(argv: list[str]) -> int:
         return run_login(session_argv[group])
     if group == "credits":
         group, rest = "billing", ["credits", *rest]
+    if group == "workspaces" and rest and rest[0] == "use":
+        return run_workspace_use(rest[1:])
 
     if group not in SPEC:
         console.print(f"[red]Unknown command:[/] {group}")
@@ -70,3 +73,5 @@ def _print_verbs(console: Console, group: str) -> None:
     console.print(f"[bold]strix cloud {group}[/] verbs:")
     for verb, cmd in SPEC[group].items():
         console.print(f"  {verb:<28}{cmd.help}")
+    if group == "workspaces":
+        console.print(f"  {'use':<28}Switch the stored token to another workspace.")

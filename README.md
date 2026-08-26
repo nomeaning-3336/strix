@@ -344,6 +344,20 @@ strix cloud credits                           # credit balance
 strix cloud billing topup --credits 20        # buy credits (agent payment, HTTP 402)
 ```
 
+Workspaces and account setup also work from the terminal:
+
+```bash
+strix cloud workspaces list                   # your workspaces
+strix cloud workspaces create --name "My Team"
+strix cloud workspaces use "My Team"          # store a token for another workspace
+strix cloud billing subscribe --plan strix_pro   # opens the hosted checkout page
+strix cloud billing portal                    # opens the billing portal
+strix cloud integrations install github       # opens the app installation page
+strix cloud domains verify <domain-id>        # prints the DNS record to add
+```
+
+The last four commands end at a person. Strix creates the link, opens the browser for an interactive terminal, and always prints the URL. The user enters the card, approves the installation, or adds the DNS record. Pass `--no-browser` to print the URL only.
+
 The commands are agent friendly. Output is JSON when stdout is not a terminal or when you pass `--json`. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication required, `5` payment required. Set the token with `--token` or `STRIX_API_TOKEN` to skip the stored sign-in.
 
 Write commands take request fields as flags, and every write command also accepts one JSON object with `--data`:

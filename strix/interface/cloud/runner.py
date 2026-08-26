@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import time
+import webbrowser
 from pathlib import Path
 from typing import Any, cast
 
@@ -123,7 +124,27 @@ def _execute(
             result = _poll(console, path, token=token, as_json=as_json)
         elif cmd.wait_path:
             result = _wait(console, cmd, result, token=token, as_json=as_json)
+    if cmd.link:
+        return _handoff_link(console, cmd, args, result, as_json=as_json)
     emit(console, result, as_json=as_json)
+    return http.EXIT_OK
+
+
+def _handoff_link(
+    console: Console, cmd: Cmd, args: argparse.Namespace, result: Any, *, as_json: bool
+) -> int:
+    """Print a hosted URL a person must open, and open the browser when interactive."""
+    url = result.get(cmd.link) if isinstance(result, dict) else None
+    if not isinstance(url, str) or not url:
+        emit(console, result, as_json=as_json)
+        return http.EXIT_OK
+    interactive = sys.stdout.isatty() and not getattr(args, "no_browser", False)
+    if as_json:
+        emit(console, result, as_json=True)
+    else:
+        console.print(f"Open this URL to continue:\n  [bold]{url}[/]")
+    if interactive:
+        webbrowser.open(url)
     return http.EXIT_OK
 
 
@@ -179,6 +200,12 @@ def _build_parser(group: str, verb_label: str, cmd: Cmd) -> argparse.ArgumentPar
         )
     if cmd.binary:
         parser.add_argument("--output", default=None, metavar="FILE", help="Write to this file.")
+    if cmd.link:
+        parser.add_argument(
+            "--no-browser",
+            action="store_true",
+            help="Do not open the browser. Print the URL only.",
+        )
     if cmd.wait_path or cmd.wait_self:
         parser.add_argument(
             "--wait", action="store_true", help="Wait until the operation reaches a final state."

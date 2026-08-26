@@ -36,6 +36,10 @@ class Cmd:
     wait_path: str | None = None
     # When true, `--wait` polls GET on this same path until the status is final.
     wait_self: bool = False
+    # Response field that holds a URL a person must open, for example a hosted
+    # checkout page. The runner opens the browser for an interactive terminal
+    # and always prints the URL.
+    link: str | None = None
 
 
 def _q(*names: str) -> tuple[P, ...]:
@@ -498,6 +502,27 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "Buy credits with an agent payment (HTTP 402 flow).",
             body=(P("credits", "int", required=True, help="Number of credits to buy."),),
         ),
+        "subscribe": Cmd(
+            "POST",
+            "/billing/checkout",
+            "Create a checkout link for a plan or a credit pack. A person completes the payment.",
+            body=(
+                P(
+                    "product",
+                    required=True,
+                    flag="plan",
+                    help="Product to buy, for example strix_pro, strix_cloud, or strix_top_up.",
+                ),
+                P("success_url", help="Page to open after the payment."),
+            ),
+            link="checkout_url",
+        ),
+        "portal": Cmd(
+            "POST",
+            "/billing/portal",
+            "Create a billing portal link. A person manages the card and the plan there.",
+            link="portal_url",
+        ),
         "auto-topup": Cmd("GET", "/billing/auto-topup", "Get the automatic top-up settings."),
         "auto-topup update": Cmd(
             "PUT",
@@ -709,6 +734,12 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "Validate a Git provider token. The provider is gitlab or bitbucket.",
             body=_GIT_TOKEN_BODY,
         ),
+        "install": Cmd(
+            "POST",
+            "/integrations/{provider}/install-url",
+            "Create an installation link. The provider is github or slack. A person approves it.",
+            link="url",
+        ),
         "disconnect": Cmd("DELETE", "/integrations/{provider}", "Disconnect an integration."),
     },
     "connectors": {
@@ -852,11 +883,21 @@ SPEC: dict[str, dict[str, Cmd]] = {
         ),
         "delete": Cmd("DELETE", "/uploads/{uploadId}", "Delete an upload."),
     },
+    "workspaces": {
+        "list": Cmd("GET", "/workspaces", "List the workspaces of your account."),
+        "create": Cmd(
+            "POST",
+            "/workspaces",
+            "Create a workspace and become its admin.",
+            body=(P("name", required=True, help="Workspace name."),),
+        ),
+    },
 }
 
 
 # Default verbs let a bare group name run its most common read command.
 DEFAULT_VERBS: dict[str, str] = {
+    "workspaces": "list",
     "costs": "overview",
     "audit": "list",
     "license": "show",
@@ -876,7 +917,8 @@ GROUP_HELP: dict[str, str] = {
     "chat": "Interactive pentest chat sessions",
     "knowledge": "Manage the knowledge base",
     "org": "Manage the organization and its members",
-    "integrations": "Connect Git providers",
+    "integrations": "Connect Git providers and other integrations",
+    "workspaces": "List, create, and switch workspaces",
     "connectors": "Manage network connectors",
     "webhooks": "Manage webhooks",
     "analytics": "Read analytics data",

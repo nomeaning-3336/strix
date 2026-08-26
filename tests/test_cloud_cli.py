@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import webbrowser
 from typing import TYPE_CHECKING, Any
 
 import pytest
 import requests
 
 from strix.interface import cloud, platform_cli
-from strix.interface.cloud import http, render, runner
+from strix.interface.cloud import http, render, runner, workspaces
 from strix.interface.cloud.spec import SPEC
 
 
@@ -353,3 +354,93 @@ def test_created_id_reads_resource_id() -> None:
     assert runner._created_id({"scan_id": "abc", "status": "pending"}) == "abc"
     assert runner._created_id({"id": "xyz"}) == "xyz"
     assert runner._created_id({"status": "pending"}) is None
+
+
+def test_billing_subscribe_prints_checkout_url(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_request(method: str, path: str, **kwargs: Any) -> FakeResponse:
+        seen["method"], seen["path"] = method, path
+        seen["body"] = kwargs.get("body")
+        return FakeResponse(status_code=200, payload={"checkout_url": "https://pay.test/session"})
+
+    monkeypatch.setattr(http, "request", fake_request)
+    code = cloud.run_cloud(["billing", "subscribe", "--plan", "strix_pro", "--json"])
+    assert code == 0
+    assert seen["method"] == "POST"
+    assert seen["path"] == "/billing/checkout"
+    assert seen["body"] == {"product": "strix_pro"}
+    assert "https://pay.test/session" in capsys.readouterr().out
+
+
+def test_integration_install_url_does_not_open_browser(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    opened: list[str] = []
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(status_code=200, payload={"url": "https://github.test/app"}),
+    )
+
+    def fake_open(url: str) -> bool:
+        opened.append(url)
+        return True
+
+    monkeypatch.setattr(webbrowser, "open", fake_open)
+    code = cloud.run_cloud(["integrations", "install", "github", "--json"])
+    assert code == 0
+    assert opened == []
+    assert "https://github.test/app" in capsys.readouterr().out
+
+
+def test_workspaces_use_switches_stored_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any
+) -> None:
+    auth_path = tmp_path / "platform-auth.json"
+    monkeypatch.setattr(platform_cli, "AUTH_PATH", auth_path)
+    monkeypatch.setattr(workspaces, "AUTH_PATH", auth_path)
+    platform_cli.save_record({"api_token": "old", "email": "a@b.test"})
+
+    calls: list[tuple[str, str]] = []
+
+    def fake_request(method: str, path: str, **kwargs: Any) -> FakeResponse:
+        calls.append((method, path))
+        if path == "/workspaces":
+            return FakeResponse(
+                status_code=200,
+                payload={"workspaces": [{"id": "org_1", "name": "Team One", "role": "admin"}]},
+            )
+        return FakeResponse(
+            status_code=201,
+            payload={
+                "api_token": "new-token",
+                "organization_id": "org_1",
+                "organization_name": "Team One",
+                "scopes": ["scans:read"],
+            },
+        )
+
+    monkeypatch.setattr(http, "request", fake_request)
+    code = cloud.run_cloud(["workspaces", "use", "team one", "--json"])
+    assert code == 0
+    assert calls == [("GET", "/workspaces"), ("POST", "/workspaces/org_1/token")]
+    record = platform_cli.read_record()
+    assert record is not None
+    assert record["api_token"] == "new-token"
+    assert record["organization_name"] == "Team One"
+    assert record["email"] == "a@b.test"
+    assert "org_1" in capsys.readouterr().out
+
+
+def test_workspaces_use_reports_unknown_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            status_code=200, payload={"workspaces": [{"id": "org_1", "name": "Team One"}]}
+        ),
+    )
+    assert cloud.run_cloud(["workspaces", "use", "missing", "--json"]) == 1

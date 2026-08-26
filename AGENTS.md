@@ -44,6 +44,7 @@ Target-specific workflows built on the same engine:
   strix cloud vulns list --severity critical
   strix cloud billing topup --credits 20   # buy credits when a scan returns exit code 5
   ```
+  - Account setup runs from the CLI too: `strix cloud workspaces list|create|use`, `strix cloud org members invite`, `strix cloud billing subscribe --plan strix_pro`, `strix cloud billing portal`, `strix cloud integrations install github`, and `strix cloud domains verify <id>`. The last four end at a person: the command prints a link or a DNS record for the user to open or add, and it never completes the payment, the installation, or the DNS change for them.
   - Every REST operation has a `strix cloud <resource> <verb>` command. Run `strix cloud` to list them. Output is JSON when stdout is not a terminal (or with `--json`), and there are no prompts without a TTY. Exit codes: `0` success, `1` error, `2` usage, `4` auth or plan limit, `5` payment required. `--token` or `STRIX_API_TOKEN` overrides the stored sign-in. `--data` adds extra request fields as JSON, and accepts `@file` or `-` for standard input.
   - The REST API works directly too: https://docs.app.strix.ai (OpenAPI: https://docs.app.strix.ai/openapi.json).
 
