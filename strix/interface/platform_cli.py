@@ -30,7 +30,10 @@ AUTH_PATH = Path.home() / ".strix" / "platform-auth.json"
 _HTTP_TIMEOUT_S = 30
 _DEFAULT_POLL_INTERVAL_S = 5
 
-_LOGIN_USAGE = "Usage:\n  strix login [--no-browser]\n  strix login status\n  strix login logout"
+_LOGIN_USAGE = (
+    "Usage:\n  strix login [--no-browser] [--scopes SCOPE ...]\n"
+    "  strix login status\n  strix login logout"
+)
 
 
 class PlatformAuthError(Exception):
@@ -85,6 +88,16 @@ def _login(console: Console, argv: list[str]) -> int:
         action="store_true",
         help="Do not open the browser. Print the verification URL instead.",
     )
+    parser.add_argument(
+        "--scopes",
+        nargs="+",
+        metavar="SCOPE",
+        default=None,
+        help=(
+            "API scopes for the token, for example scans:read billing:write. "
+            "The server always includes a minimum scope set."
+        ),
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse already printed the message
@@ -98,7 +111,7 @@ def _login(console: Console, argv: list[str]) -> int:
     console.print()
 
     try:
-        record = _run_device_flow(console, open_browser=not args.no_browser)
+        record = _run_device_flow(console, open_browser=not args.no_browser, scopes=args.scopes)
     except PlatformAuthError as exc:
         console.print(f"[red]Sign-in failed:[/] {exc}")
         return 1
@@ -111,7 +124,9 @@ def _login(console: Console, argv: list[str]) -> int:
     return 0
 
 
-def _run_device_flow(console: Console, *, open_browser: bool) -> dict[str, Any]:
+def _run_device_flow(
+    console: Console, *, open_browser: bool, scopes: list[str] | None = None
+) -> dict[str, Any]:
     app_url = _app_url()
 
     try:
@@ -150,13 +165,17 @@ def _run_device_flow(console: Console, *, open_browser: bool) -> dict[str, Any]:
 
     console.print("[dim]Waiting for browser confirmation…[/]")
 
+    poll_body: dict[str, Any] = {"device_code": device_code}
+    if scopes:
+        poll_body["scopes"] = scopes
+
     deadline = time.monotonic() + expires_in
     while time.monotonic() < deadline:
         time.sleep(interval)
         try:
             poll = requests.post(
                 f"{app_url}/api/v1/cli/login/poll",
-                json={"device_code": device_code},
+                json=poll_body,
                 timeout=_HTTP_TIMEOUT_S,
             )
         except requests.RequestException:
