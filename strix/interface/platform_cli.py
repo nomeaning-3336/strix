@@ -61,9 +61,14 @@ def save_record(record: dict[str, Any]) -> None:
     write_secret_text(AUTH_PATH, json.dumps(record, indent=2))
 
 
-def logout() -> None:
-    with contextlib.suppress(OSError):
+def logout() -> bool:
+    try:
         AUTH_PATH.unlink()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def run_login(argv: list[str]) -> int:
@@ -119,7 +124,14 @@ def _login(console: Console, argv: list[str]) -> int:
         console.print("\n[yellow]Sign-in cancelled.[/]")
         return 130
 
-    save_record(record)
+    try:
+        save_record(record)
+    except OSError as exc:
+        console.print(f"[red]Sign-in succeeded, but the token could not be stored:[/] {exc}")
+        console.print(
+            f"[dim]Check that {AUTH_PATH.parent} is writable, then run `strix login` again.[/]"
+        )
+        return 1
     _print_success(console, record)
     return 0
 
@@ -135,15 +147,17 @@ def _run_device_flow(
         raise PlatformAuthError(f"could not reach {app_url}: {exc}") from exc
     if not response.ok:
         raise PlatformAuthError(_error_detail(response))
-    authorization = response.json()
+    authorization = _json_object(response)
 
-    user_code = authorization.get("user_code", "")
-    verification_uri = authorization.get("verification_uri_complete") or authorization.get(
-        "verification_uri", ""
+    user_code = str(authorization.get("user_code") or "")
+    verification_uri = str(
+        authorization.get("verification_uri_complete")
+        or authorization.get("verification_uri")
+        or ""
     )
-    device_code = authorization.get("device_code", "")
-    expires_in = int(authorization.get("expires_in") or 300)
-    interval = int(authorization.get("interval") or _DEFAULT_POLL_INTERVAL_S)
+    device_code = str(authorization.get("device_code") or "")
+    expires_in = _as_positive_int(authorization.get("expires_in"), default=300)
+    interval = _as_positive_int(authorization.get("interval"), default=_DEFAULT_POLL_INTERVAL_S)
     if not device_code or not verification_uri:
         raise PlatformAuthError("the server returned an incomplete device authorization")
 
@@ -181,9 +195,9 @@ def _run_device_flow(
         except requests.RequestException:
             continue
         if poll.ok:
-            return dict(poll.json())
+            return _json_object(poll)
         error = ""
-        with contextlib.suppress(ValueError):
+        with contextlib.suppress(ValueError, AttributeError):
             error = str(poll.json().get("error", ""))
         if error == "authorization_pending":
             continue
@@ -199,8 +213,26 @@ def _run_device_flow(
     raise PlatformAuthError("the sign-in request expired. Run `strix login` again.")
 
 
+def _json_object(response: requests.Response) -> dict[str, Any]:
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise PlatformAuthError("the server returned a response that is not JSON") from exc
+    if not isinstance(data, dict):
+        raise PlatformAuthError("the server returned an unexpected response shape")
+    return cast("dict[str, Any]", data)
+
+
+def _as_positive_int(value: Any, *, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
 def _error_detail(response: requests.Response) -> str:
-    with contextlib.suppress(ValueError):
+    with contextlib.suppress(ValueError, AttributeError):
         detail = response.json().get("detail")
         if detail:
             return str(detail)
@@ -244,6 +276,10 @@ def _logout(console: Console) -> int:
     if read_record() is None:
         console.print("[yellow]Not signed in.[/]")
         return 0
-    logout()
+    if not logout():
+        console.print(
+            f"[red]Could not remove the stored API token.[/] Delete {AUTH_PATH} manually."
+        )
+        return 1
     console.print("[green]Signed out.[/] The stored API token was removed from this machine.")
     return 0
