@@ -287,7 +287,9 @@ def _complete_selection(
 
     chosen_org = _choose_workspace(console, organizations, workspace)
     role = str(chosen_org.get("role") or "admin")
-    chosen_scopes = scopes if scopes else _choose_scopes(console, catalog, role)
+    chosen_scopes = scopes
+    if chosen_scopes is None and sys.stdin.isatty():
+        chosen_scopes = _choose_scopes(console, catalog, role)
 
     body: dict[str, Any] = {
         "selection_token": selection_token,
