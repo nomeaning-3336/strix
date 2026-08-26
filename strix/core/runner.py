@@ -370,13 +370,21 @@ async def run_strix_scan(
                 _record_mcp_connections(connections)
                 if connections:
                     report(_mcp_startup_summary(connections))
-                    # Flag that MCP is reachable so both the root context and the
-                    # child factory's context (both derive from scope_context)
-                    # render the static three-tool guidance. Set only when a
-                    # connection exists, so a run with no MCP leaves the prompt
-                    # context unchanged. The connections themselves are discovered
-                    # at run time via list_mcps, not listed in the prompt.
+                    # Name the connected servers in the prompt so every agent
+                    # (root and children, both deriving from scope_context) sees
+                    # what is available at the start; they can still re-list or
+                    # inspect them at run time via list_mcps / describe_mcp. Set
+                    # only when a connection exists, so a run with no MCP leaves
+                    # the prompt context unchanged.
                     scope_context["mcp_available"] = bool(mcp_registry)
+                    scope_context["mcp_connections"] = [
+                        {
+                            "name": summary.name,
+                            "purpose": summary.purpose,
+                            "tool_count": summary.tool_count,
+                        }
+                        for summary in mcp_registry.summaries()
+                    ]
         except Exception:
             logger.exception("Failed to connect user MCP servers; continuing without them")
 

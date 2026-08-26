@@ -648,21 +648,36 @@ def test_prompt_has_no_mcp_section_without_availability() -> None:
     assert "MCP CONNECTIONS" not in render_system_prompt(system_prompt_context={})
 
 
-def test_prompt_no_longer_renders_a_per_connection_inventory() -> None:
-    """The old inventory loop read ``mcp_connections`` and listed each connection
-    with its purpose. That data no longer drives the prompt; only the boolean
-    ``mcp_available`` does, so a legacy ``mcp_connections`` list renders nothing."""
+def test_prompt_renders_named_connection_inventory() -> None:
+    """With mcp_available set, the prompt names each connected server (name, tool
+    count, purpose) so every agent sees what is available at the start, alongside
+    the three dispatch tools for re-listing and inspecting them at run time."""
     prompt = render_system_prompt(
         system_prompt_context={
+            "mcp_available": True,
             "mcp_connections": [
-                {"name": "secret-conn", "purpose": "should not appear", "tool_count": 3}
-            ]
+                {"name": "supabase", "purpose": "read the app's schema", "tool_count": 13}
+            ],
+        }
+    )
+
+    assert "MCP CONNECTIONS" in prompt
+    assert "supabase" in prompt
+    assert "13 tools" in prompt
+    assert "read the app's schema" in prompt
+
+
+def test_prompt_inventory_is_gated_on_availability() -> None:
+    """The block is gated on ``mcp_available``; an ``mcp_connections`` payload
+    without it renders nothing, so a stale or spoofed list cannot leak names."""
+    prompt = render_system_prompt(
+        system_prompt_context={
+            "mcp_connections": [{"name": "secret-conn", "purpose": "x", "tool_count": 3}]
         }
     )
 
     assert "MCP CONNECTIONS" not in prompt
     assert "secret-conn" not in prompt
-    assert "should not appear" not in prompt
 
 
 # --- loader ------------------------------------------------------------------

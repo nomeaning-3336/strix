@@ -187,9 +187,10 @@ async def test_mcp_available_flag_set_when_a_connection_attaches(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Any,
 ) -> None:
-    """When at least one MCP connection attaches, the runner sets the boolean
-    ``mcp_available`` (not a per-connection inventory) into the scan context that
-    reaches every agent."""
+    """When at least one MCP connection attaches, the runner sets ``mcp_available``
+    plus a named ``mcp_connections`` inventory into the scan context that reaches
+    every agent, so each agent sees which connections exist at the start while
+    still being able to re-list them at run time via list_mcps."""
     scope_context: dict[str, Any] = {"scope": "built-in"}
     captured = _patch_engine_scaffold(monkeypatch, tmp_path, scope_context)
 
@@ -217,8 +218,10 @@ async def test_mcp_available_flag_set_when_a_connection_attaches(
 
     kwargs = captured["kwargs"]
     assert kwargs["system_prompt_context"]["mcp_available"] is True
-    # The old per-connection inventory key is gone entirely.
-    assert "mcp_connections" not in kwargs["system_prompt_context"]
+    # The named inventory names each connected server for the prompt.
+    assert kwargs["system_prompt_context"]["mcp_connections"] == [
+        {"name": "fs", "purpose": "local files", "tool_count": 2}
+    ]
 
 
 @pytest.mark.asyncio

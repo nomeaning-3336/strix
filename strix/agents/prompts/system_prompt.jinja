@@ -78,6 +78,13 @@ AUTHORIZED TARGETS:
 {% if system_prompt_context and system_prompt_context.mcp_available %}
 MCP CONNECTIONS (available this run):
 - The user connected one or more MCP (Model Context Protocol) servers — external tool providers you can reach on demand. Their individual tools do NOT appear in your tool list; three dispatch tools are the only way in.
+{% if system_prompt_context.mcp_connections %}
+- Connected this run (call describe_mcp on one to see its tools):
+{% for connection in system_prompt_context.mcp_connections %}
+  - {{ connection.name }} ({{ connection.tool_count }} tools){% if connection.purpose %}: {{ connection.purpose }}{% endif %}
+{% endfor %}
+{% endif %}
+- Reach for a connection whenever the target itself cannot give you information a connection could: its database schema and access policies, real deployment or infrastructure configuration, known issues or prior findings, or server logs. In those cases call list_mcps early to see what is available, and prefer a connection's authoritative data over inferring from the target's responses. Do not wait to be told a connection exists.
   1. Call list_mcps() to discover the available connections.
   2. Call describe_mcp(connection="<name>") to inspect one connection's tools, each with its name, description, and JSON input schema.
   3. Call call_mcp(connection="<name>", tool="<tool>", arguments={...}) to run one, passing an arguments object that matches the schema (omit arguments for a tool that takes none).
