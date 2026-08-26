@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import sys
 import time
 import webbrowser
 from pathlib import Path
@@ -31,9 +32,11 @@ _HTTP_TIMEOUT_S = 30
 _DEFAULT_POLL_INTERVAL_S = 5
 
 _LOGIN_USAGE = (
-    "Usage:\n  strix login [--no-browser] [--scopes SCOPE ...]\n"
+    "Usage:\n  strix login [--no-browser] [--scopes SCOPE ...] [--workspace WORKSPACE]\n"
     "  strix login status\n  strix login logout"
 )
+
+_ROLE_RANK = {"viewer": 0, "analyst": 1, "admin": 2}
 
 
 class PlatformAuthError(Exception):
@@ -100,7 +103,18 @@ def _login(console: Console, argv: list[str]) -> int:
         default=None,
         help=(
             "API scopes for the token, for example scans:read billing:write. "
-            "The server always includes a minimum scope set."
+            "The server always includes a minimum scope set. "
+            "Without this option, an interactive picker opens after the browser step."
+        ),
+    )
+    parser.add_argument(
+        "--workspace",
+        metavar="WORKSPACE",
+        default=None,
+        help=(
+            "Workspace that receives the token, by ID or by exact name. "
+            "Without this option, an interactive picker opens when you have "
+            "more than one workspace."
         ),
     )
     try:
@@ -116,7 +130,12 @@ def _login(console: Console, argv: list[str]) -> int:
     console.print()
 
     try:
-        record = _run_device_flow(console, open_browser=not args.no_browser, scopes=args.scopes)
+        record = _run_device_flow(
+            console,
+            open_browser=not args.no_browser,
+            scopes=args.scopes,
+            workspace=args.workspace,
+        )
     except PlatformAuthError as exc:
         console.print(f"[red]Sign-in failed:[/] {exc}")
         return 1
@@ -137,9 +156,14 @@ def _login(console: Console, argv: list[str]) -> int:
 
 
 def _run_device_flow(
-    console: Console, *, open_browser: bool, scopes: list[str] | None = None
+    console: Console,
+    *,
+    open_browser: bool,
+    scopes: list[str] | None = None,
+    workspace: str | None = None,
 ) -> dict[str, Any]:
     app_url = _app_url()
+    interactive = workspace is not None or (sys.stdin.isatty() and scopes is None)
 
     try:
         response = requests.post(f"{app_url}/api/v1/cli/login", timeout=_HTTP_TIMEOUT_S)
@@ -180,7 +204,9 @@ def _run_device_flow(
     console.print("[dim]Waiting for browser confirmation…[/]")
 
     poll_body: dict[str, Any] = {"device_code": device_code}
-    if scopes:
+    if interactive:
+        poll_body["interactive"] = True
+    elif scopes:
         poll_body["scopes"] = scopes
 
     deadline = time.monotonic() + expires_in
@@ -195,29 +221,182 @@ def _run_device_flow(
         except requests.RequestException:
             continue
         if poll.ok:
-            return _signed_in_record(poll)
-        error = ""
-        with contextlib.suppress(ValueError, AttributeError):
-            error = str(poll.json().get("error", ""))
-        if error == "authorization_pending":
-            continue
-        if error == "slow_down":
-            interval += 5
-            continue
-        if error == "access_denied":
-            raise PlatformAuthError("the sign-in request was denied in the browser")
-        if error == "expired_token":
+            return _finish_login(console, app_url, poll, scopes=scopes, workspace=workspace)
+        delta = _handle_poll_error(poll)
+        if delta is None:
             break
-        raise PlatformAuthError(_error_detail(poll))
+        interval += delta
 
     raise PlatformAuthError("the sign-in request expired. Run `strix login` again.")
 
 
+def _handle_poll_error(poll: requests.Response) -> int | None:
+    """Return the interval increase, or None when the device code expired."""
+    error = ""
+    with contextlib.suppress(ValueError, AttributeError):
+        error = str(poll.json().get("error", ""))
+    if error == "authorization_pending":
+        return 0
+    if error == "slow_down":
+        return 5
+    if error == "access_denied":
+        raise PlatformAuthError("the sign-in request was denied in the browser")
+    if error == "expired_token":
+        return None
+    raise PlatformAuthError(_error_detail(poll))
+
+
+def _finish_login(
+    console: Console,
+    app_url: str,
+    poll: requests.Response,
+    *,
+    scopes: list[str] | None,
+    workspace: str | None,
+) -> dict[str, Any]:
+    result = _json_object(poll)
+    if result.get("selection_required"):
+        return _complete_selection(console, app_url, result, scopes=scopes, workspace=workspace)
+    return _require_api_token(result)
+
+
 def _signed_in_record(response: requests.Response) -> dict[str, Any]:
-    record = _json_object(response)
+    return _require_api_token(_json_object(response))
+
+
+def _require_api_token(record: dict[str, Any]) -> dict[str, Any]:
     if not str(record.get("api_token") or ""):
         raise PlatformAuthError("the server returned a sign-in response without an API token")
     return record
+
+
+def _complete_selection(
+    console: Console,
+    app_url: str,
+    selection: dict[str, Any],
+    *,
+    scopes: list[str] | None,
+    workspace: str | None,
+) -> dict[str, Any]:
+    organizations = [org for org in selection.get("organizations") or [] if isinstance(org, dict)]
+    catalog = [item for item in selection.get("scopes") or [] if isinstance(item, dict)]
+    selection_token = str(selection.get("selection_token") or "")
+    if not selection_token or not organizations:
+        raise PlatformAuthError("the server returned an incomplete selection response")
+
+    chosen_org = _choose_workspace(console, organizations, workspace)
+    role = str(chosen_org.get("role") or "admin")
+    chosen_scopes = scopes if scopes else _choose_scopes(console, catalog, role)
+
+    body: dict[str, Any] = {
+        "selection_token": selection_token,
+        "organization_id": chosen_org.get("id"),
+    }
+    if chosen_scopes is not None:
+        body["scopes"] = chosen_scopes
+    try:
+        response = requests.post(
+            f"{app_url}/api/v1/cli/login/complete",
+            json=body,
+            timeout=_HTTP_TIMEOUT_S,
+        )
+    except requests.RequestException as exc:
+        raise PlatformAuthError(f"could not reach {app_url}: {exc}") from exc
+    if not response.ok:
+        raise PlatformAuthError(_error_detail(response))
+    return _signed_in_record(response)
+
+
+def _choose_workspace(
+    console: Console, organizations: list[dict[str, Any]], workspace: str | None
+) -> dict[str, Any]:
+    if workspace is not None:
+        wanted = workspace.strip().lower()
+        for org in organizations:
+            if wanted in (str(org.get("id", "")).lower(), str(org.get("name", "")).lower()):
+                return org
+        names = ", ".join(str(org.get("name", "")) for org in organizations)
+        raise PlatformAuthError(f"no workspace matches {workspace!r}. Your workspaces: {names}")
+    if len(organizations) == 1:
+        return organizations[0]
+
+    console.print()
+    console.print("[bold]Select a workspace for the API token:[/]")
+    for index, org in enumerate(organizations, start=1):
+        console.print(f"  [cyan]{index}[/]. {org.get('name', '')} [dim]({org.get('role', '')})[/]")
+    while True:
+        answer = console.input(f"Workspace [1-{len(organizations)}] (1): ").strip() or "1"
+        if answer.isdigit() and 1 <= int(answer) <= len(organizations):
+            return organizations[int(answer) - 1]
+        console.print("[yellow]Enter a number from the list.[/]")
+
+
+def _choose_scopes(console: Console, catalog: list[dict[str, Any]], role: str) -> list[str] | None:
+    """Prompt for token scopes. Returns None to accept the server defaults."""
+    rank = _ROLE_RANK.get(role, 2)
+    allowed = [
+        item for item in catalog if _ROLE_RANK.get(str(item.get("min_role", "viewer")), 0) <= rank
+    ]
+    if not allowed:
+        return None
+
+    console.print()
+    console.print("[bold]Select token scopes:[/]")
+    console.print(
+        "  [cyan]1[/]. Recommended [dim](scans, vulnerabilities, schedules, assets, billing)[/]"
+    )
+    console.print("  [cyan]2[/]. Full access [dim](every scope your role allows)[/]")
+    console.print("  [cyan]3[/]. Minimal [dim](scans and billing read only)[/]")
+    console.print("  [cyan]4[/]. Custom [dim](pick individual scopes)[/]")
+    while True:
+        answer = console.input("Scopes [1-4] (1): ").strip() or "1"
+        if answer == "1":
+            return None
+        if answer == "2":
+            return [str(item["scope"]) for item in allowed if item.get("scope")]
+        if answer == "3":
+            return [
+                str(item["scope"]) for item in allowed if item.get("scope") and item.get("minimum")
+            ]
+        if answer == "4":
+            return _choose_custom_scopes(console, allowed)
+        console.print("[yellow]Enter a number from 1 to 4.[/]")
+
+
+def _choose_custom_scopes(console: Console, allowed: list[dict[str, Any]]) -> list[str]:
+    selected = {
+        str(item["scope"])
+        for item in allowed
+        if item.get("scope") and (item.get("default") or item.get("minimum"))
+    }
+    while True:
+        console.print()
+        for index, item in enumerate(allowed, start=1):
+            scope = str(item.get("scope", ""))
+            mark = "[green]x[/]" if scope in selected else " "
+            required = " [dim](always included)[/]" if item.get("minimum") else ""
+            console.print(
+                f"  [{mark}] [cyan]{index:>2}[/]. {scope}{required}"
+                f"\n         [dim]{item.get('description', '')}[/]"
+            )
+        answer = console.input(
+            "Toggle scopes by number (comma separated), or press Enter to confirm: "
+        ).strip()
+        if not answer:
+            return sorted(selected)
+        for part in answer.replace(",", " ").split():
+            if not part.isdigit() or not 1 <= int(part) <= len(allowed):
+                console.print(f"[yellow]Ignored {part!r}: not a number from the list.[/]")
+                continue
+            item = allowed[int(part) - 1]
+            scope = str(item.get("scope", ""))
+            if item.get("minimum"):
+                console.print(f"[yellow]{scope} is always included.[/]")
+                continue
+            if scope in selected:
+                selected.discard(scope)
+            else:
+                selected.add(scope)
 
 
 def _json_object(response: requests.Response) -> dict[str, Any]:
@@ -255,6 +434,9 @@ def _print_success(console: Console, record: dict[str, Any]) -> None:
         console.print(f"  Account:   [bold]{email}[/]")
     if organization:
         console.print(f"  Workspace: [bold]{organization}[/]")
+    scopes = record.get("scopes")
+    if isinstance(scopes, list) and scopes:
+        console.print(f"  Scopes:    [dim]{' '.join(str(s) for s in scopes)}[/]")
     console.print(f"  Token:     stored in [dim]{AUTH_PATH}[/]")
     console.print()
     console.print(

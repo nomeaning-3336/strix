@@ -325,8 +325,9 @@ strix auth logout             # forget the sign-in
 To use the managed platform ([app.strix.ai](https://app.strix.ai)) from the terminal, run the device sign-in. It creates your account and workspace on first use and stores a personal API token in `~/.strix/platform-auth.json`:
 
 ```bash
-strix login                   # opens the browser to approve the sign-in
+strix login                   # opens the browser, then pick a workspace and scopes
 strix login --scopes scans:read scans:write   # request specific token scopes
+strix login --workspace "My Team"             # select a workspace by name or ID
 strix login status            # show the active sign-in
 strix login logout            # forget the sign-in
 ```
