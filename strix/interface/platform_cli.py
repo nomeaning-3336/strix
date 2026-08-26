@@ -421,7 +421,7 @@ def _json_object(response: requests.Response) -> dict[str, Any]:
 def _as_positive_int(value: Any, *, default: int) -> int:
     try:
         parsed = int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return parsed if parsed > 0 else default
 
