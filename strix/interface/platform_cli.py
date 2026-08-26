@@ -195,7 +195,7 @@ def _run_device_flow(
         except requests.RequestException:
             continue
         if poll.ok:
-            return _json_object(poll)
+            return _signed_in_record(poll)
         error = ""
         with contextlib.suppress(ValueError, AttributeError):
             error = str(poll.json().get("error", ""))
@@ -211,6 +211,13 @@ def _run_device_flow(
         raise PlatformAuthError(_error_detail(poll))
 
     raise PlatformAuthError("the sign-in request expired. Run `strix login` again.")
+
+
+def _signed_in_record(response: requests.Response) -> dict[str, Any]:
+    record = _json_object(response)
+    if not str(record.get("api_token") or ""):
+        raise PlatformAuthError("the server returned a sign-in response without an API token")
+    return record
 
 
 def _json_object(response: requests.Response) -> dict[str, Any]:
