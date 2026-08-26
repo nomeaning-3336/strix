@@ -16,6 +16,7 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import requests
 from rich.console import Console
@@ -123,7 +124,8 @@ def _login(console: Console, argv: list[str]) -> int:
         return int(exc.code or 2)
 
     console.print()
-    console.print("[bold]Signing in to the Strix platform[/] [dim](app.strix.ai)[/]")
+    host = urlparse(_app_url()).netloc or _app_url()
+    console.print(f"[bold]Signing in to the Strix platform[/] [dim]({host})[/]")
     console.print(
         "[dim]This creates your account and workspace when needed, and stores an API token.[/]"
     )
