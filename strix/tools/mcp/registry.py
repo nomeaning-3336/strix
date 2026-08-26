@@ -4,9 +4,10 @@ Replaces per-tool registration. The old model turned every tool of every
 connected MCP server into its own agent tool, so a run with a handful of
 connections put dozens of provider tool schemas on the root agent's first LLM
 request. Instead, a run holds its live connections here, keyed by the name the
-user gave each connection, and every agent reaches them through two generic
-dispatch tools: ``describe_mcp`` to learn one connection's tool schemas on
-demand, and ``call_mcp`` to run one of its tools.
+user gave each connection, and every agent reaches them through three generic
+dispatch tools: ``list_mcps`` to discover the available connections, ``describe_mcp``
+to learn one connection's tool schemas on demand, and ``call_mcp`` to run one of
+its tools.
 
 One :class:`McpRegistry` is built per run in :mod:`strix.core.runner`, stored in
 the run context under :data:`MCP_REGISTRY_CONTEXT_KEY`, and shared by the root
@@ -38,11 +39,12 @@ if TYPE_CHECKING:
 MCP_REGISTRY_CONTEXT_KEY = "mcp_registry"
 
 
-# The two generic dispatch tools every agent reaches its MCP connections through.
-# ``call_mcp`` runs one tool on a connection; ``describe_mcp`` lists a
-# connection's tool schemas. Kept here (not in the interface layer) so the engine,
-# the OSS viewer, and strix-pro's tracer all recognise a dispatch call by the same
-# names.
+# The two connection-scoped dispatch tools an interface attributes to a specific
+# MCP connection. ``call_mcp`` runs one tool on a connection; ``describe_mcp``
+# lists a connection's tool schemas. (``list_mcps`` is deliberately not here: it
+# names no single connection, so it renders as an ordinary tool call.) Kept here
+# (not in the interface layer) so the engine, the OSS viewer, and strix-pro's
+# tracer all recognise a connection-scoped dispatch call by the same names.
 CALL_MCP_TOOL = "call_mcp"
 DESCRIBE_MCP_TOOL = "describe_mcp"
 MCP_DISPATCH_TOOLS = frozenset({CALL_MCP_TOOL, DESCRIBE_MCP_TOOL})
@@ -53,10 +55,10 @@ class McpConnectionEntry:
     """One live MCP connection a scan may reach, keyed by ``name``.
 
     ``server`` is the connected SDK session the dispatch tools list tools on and
-    call tools through. ``purpose`` is the human label shown in the prompt
-    inventory (the user's connection notes, or whatever the caller supplies).
-    ``tool_count`` is how many tools the connection offers, for the inventory
-    line. ``result_transform``, when set, runs on each call's structured result
+    call tools through. ``purpose`` is the human label ``list_mcps`` reports as the
+    connection's description (the user's connection notes, or whatever the caller
+    supplies). ``tool_count`` is how many tools the connection offers, also
+    reported by ``list_mcps``. ``result_transform``, when set, runs on each call's structured result
     at the single dispatch point (strix-pro's sanitizer uses it). ``provider`` is
     an optional source label (e.g. ``"supabase"``) the caller tags the connection
     with; the command-line path leaves it ``None``, and event tagging surfaces it
@@ -73,8 +75,8 @@ class McpConnectionEntry:
 
 @dataclasses.dataclass(frozen=True)
 class McpConnectionSummary:
-    """One inventory line: what an agent needs to decide whether to
-    ``describe_mcp`` a connection, with no tool schemas."""
+    """One connection summary ``list_mcps`` returns: what an agent needs to decide
+    whether to ``describe_mcp`` a connection, with no tool schemas."""
 
     name: str
     purpose: str | None
@@ -92,8 +94,8 @@ class McpConnectionRequest:
     (e.g. ``"supabase"``; empty for the command-line path). ``result_transform``
     is an optional per-connection transform run on each call's structured result
     at the single dispatch point (strix-pro's sanitizer; empty for the
-    command-line path). ``purpose`` is the human label shown in the prompt
-    inventory; when unset it falls back to ``config.notes``.
+    command-line path). ``purpose`` is the human label ``list_mcps`` reports as the
+    connection's description; when unset it falls back to ``config.notes``.
     """
 
     config: McpConnectionConfig
@@ -175,23 +177,6 @@ class McpRegistry:
 
     def __bool__(self) -> bool:
         return bool(self._entries)
-
-
-def mcp_inventory_context(registry: McpRegistry | None) -> list[dict[str, Any]]:
-    """Build the prompt inventory data for a run's connections.
-
-    Returns one dict per connection with its ``name``, ``purpose``, and
-    ``tool_count`` (no tool schemas), ready to thread into the system-prompt
-    context under ``mcp_connections`` so both the root agent and every child
-    render the same inventory. Returns an empty list when there is no registry
-    or no connection, and the template's inventory section is then not rendered.
-    """
-    if not registry:
-        return []
-    return [
-        {"name": summary.name, "purpose": summary.purpose, "tool_count": summary.tool_count}
-        for summary in registry.summaries()
-    ]
 
 
 def resolve_mcp_call(

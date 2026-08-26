@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from strix.tools.mcp.agent_tools import call_mcp, describe_mcp
+from strix.tools.mcp.agent_tools import call_mcp, describe_mcp, list_mcps
 from strix.tools.mcp.client import (
     ConnectedMcpServer,
     attach_mcp_requests,
@@ -25,7 +25,6 @@ from strix.tools.mcp.registry import (
     McpConnectionRequest,
     McpConnectionSummary,
     McpRegistry,
-    mcp_inventory_context,
     resolve_mcp_call,
 )
 
@@ -48,8 +47,8 @@ __all__ = [
     "call_mcp",
     "connect_mcp_servers",
     "describe_mcp",
+    "list_mcps",
     "load_user_mcp_configs",
-    "mcp_inventory_context",
     "namespaced_tool_name",
     "resolve_mcp_call",
 ]

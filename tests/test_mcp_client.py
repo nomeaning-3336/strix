@@ -20,6 +20,7 @@ from mcp.types import Tool as MCPTool
 from pydantic import ValidationError
 
 from strix.agents import factory
+from strix.agents.prompt import render_system_prompt
 from strix.interface.tui.live_view import TuiLiveView
 from strix.tools.mcp import (
     MCP_REGISTRY_CONTEXT_KEY,
@@ -31,8 +32,8 @@ from strix.tools.mcp import (
     attach_mcp_requests,
     call_mcp,
     describe_mcp,
+    list_mcps,
     load_user_mcp_configs,
-    mcp_inventory_context,
     namespaced_tool_name,
     resolve_mcp_call,
 )
@@ -374,7 +375,7 @@ def test_registry_add_get_and_names() -> None:
     assert len(registry) == 1
 
 
-def test_registry_summaries_and_inventory() -> None:
+def test_registry_summaries() -> None:
     registry = McpRegistry()
     registry.add(name="fs", server=FakeMCPServer("fs", []), purpose="local files", tool_count=2)
     registry.add(name="db", server=FakeMCPServer("db", []), purpose=None, tool_count=1)
@@ -385,16 +386,36 @@ def test_registry_summaries_and_inventory() -> None:
         ("db", None, 1),
     ]
 
-    # The prompt inventory carries name/purpose/tool_count and no schemas.
-    assert mcp_inventory_context(registry) == [
-        {"name": "fs", "purpose": "local files", "tool_count": 2},
-        {"name": "db", "purpose": None, "tool_count": 1},
-    ]
+
+# --- list_mcps ---------------------------------------------------------------
 
 
-def test_inventory_is_empty_without_a_registry() -> None:
-    assert mcp_inventory_context(None) == []
-    assert mcp_inventory_context(McpRegistry()) == []
+@pytest.mark.asyncio
+async def test_list_mcps_returns_connections_with_ids_and_descriptions() -> None:
+    registry = McpRegistry()
+    registry.add(name="fs", server=FakeMCPServer("fs", []), purpose="local files", tool_count=2)
+    registry.add(name="db", server=FakeMCPServer("db", []), purpose=None, tool_count=1)
+
+    out = await list_mcps.on_invoke_tool(_ctx(registry), "{}")
+
+    # ``id`` is the exact connection name describe_mcp/call_mcp accept;
+    # ``description`` is the summary's purpose; no tool schemas are included.
+    assert out == {
+        "connections": [
+            {"id": "fs", "name": "fs", "description": "local files", "tool_count": 2},
+            {"id": "db", "name": "db", "description": None, "tool_count": 1},
+        ]
+    }
+
+
+@pytest.mark.asyncio
+async def test_list_mcps_empty_without_a_registry() -> None:
+    assert await list_mcps.on_invoke_tool(_ctx(None), "{}") == {"connections": []}
+
+
+@pytest.mark.asyncio
+async def test_list_mcps_empty_when_registry_has_no_connections() -> None:
+    assert await list_mcps.on_invoke_tool(_ctx(McpRegistry()), "{}") == {"connections": []}
 
 
 # --- describe_mcp ------------------------------------------------------------
@@ -581,17 +602,18 @@ async def test_call_mcp_flags_an_errored_result_failed_for_the_tui() -> None:
 # --- the two tools are the only MCP surface every agent gets -----------------
 
 
-def test_agent_carries_exactly_the_two_dispatch_tools_regardless_of_connections() -> None:
+def test_agent_carries_exactly_the_dispatch_tools_regardless_of_connections() -> None:
     """No matter how many MCP connections a run makes, an agent's tool list gains
-    exactly describe_mcp and call_mcp and never a per-connection provider tool."""
+    exactly list_mcps, describe_mcp, and call_mcp and never a per-connection
+    provider tool."""
     root = factory.build_strix_agent(is_root=True)
     child = factory.build_strix_agent(is_root=False)
 
     root_names = [t.name for t in root.tools]
     child_names = [t.name for t in child.tools]
 
-    assert {"describe_mcp", "call_mcp"} <= set(root_names)
-    assert {"describe_mcp", "call_mcp"} <= set(child_names)
+    assert {"list_mcps", "describe_mcp", "call_mcp"} <= set(root_names)
+    assert {"list_mcps", "describe_mcp", "call_mcp"} <= set(child_names)
 
     # Five hypothetical connections would once have added ~all their tools as
     # namespaced provider tools; none of those names may appear now.
@@ -607,6 +629,40 @@ def test_agent_carries_exactly_the_two_dispatch_tools_regardless_of_connections(
     # names whether or not any connection exists, because connections never
     # contribute tools.
     assert root_names == [t.name for t in factory.build_strix_agent(is_root=True).tools]
+
+
+# --- prompt guidance replaces the old per-connection inventory ---------------
+
+
+def test_prompt_renders_static_three_tool_guidance_when_mcp_available() -> None:
+    prompt = render_system_prompt(system_prompt_context={"mcp_available": True})
+
+    assert "MCP CONNECTIONS" in prompt
+    # The three discovery/dispatch tools are named as the way in.
+    assert "list_mcps" in prompt
+    assert "describe_mcp" in prompt
+    assert "call_mcp" in prompt
+
+
+def test_prompt_has_no_mcp_section_without_availability() -> None:
+    assert "MCP CONNECTIONS" not in render_system_prompt(system_prompt_context={})
+
+
+def test_prompt_no_longer_renders_a_per_connection_inventory() -> None:
+    """The old inventory loop read ``mcp_connections`` and listed each connection
+    with its purpose. That data no longer drives the prompt; only the boolean
+    ``mcp_available`` does, so a legacy ``mcp_connections`` list renders nothing."""
+    prompt = render_system_prompt(
+        system_prompt_context={
+            "mcp_connections": [
+                {"name": "secret-conn", "purpose": "should not appear", "tool_count": 3}
+            ]
+        }
+    )
+
+    assert "MCP CONNECTIONS" not in prompt
+    assert "secret-conn" not in prompt
+    assert "should not appear" not in prompt
 
 
 # --- loader ------------------------------------------------------------------

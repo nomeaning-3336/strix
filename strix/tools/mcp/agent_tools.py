@@ -1,19 +1,21 @@
-"""The two generic MCP dispatch tools every agent carries.
+"""The three generic MCP dispatch tools every agent carries.
 
 Under the generic-dispatch model an agent does not get one tool per MCP tool.
-It gets exactly these two, plus a short inventory in its system prompt naming
-which connections exist and what each is for (no schemas):
+It gets exactly these three and discovers connections on demand:
 
+- ``list_mcps()`` returns the connections available this run — each connection's
+  id, name, description, and tool count, with no tool schemas — so the model can
+  discover what it can reach without any inventory in the system prompt.
 - ``describe_mcp(connection)`` returns, as text, one connection's tools with
   their names, descriptions, and JSON input schemas — the schemas the model
   needs, fetched on demand instead of loaded onto every request up front.
 - ``call_mcp(connection, tool, arguments)`` dispatches one call to a
   connection's tool and returns its result.
 
-Both read the per-run :class:`~strix.tools.mcp.registry.McpRegistry` from the run
-context under :data:`~strix.tools.mcp.registry.MCP_REGISTRY_CONTEXT_KEY`. They are
-ordinary ``FunctionTool`` objects placed in the agent factory's base tool set, so
-the factory's output-bounding and disk-spill wrapping apply to their results
+All three read the per-run :class:`~strix.tools.mcp.registry.McpRegistry` from the
+run context under :data:`~strix.tools.mcp.registry.MCP_REGISTRY_CONTEXT_KEY`. They
+are ordinary ``FunctionTool`` objects placed in the agent factory's base tool set,
+so the factory's output-bounding and disk-spill wrapping apply to their results
 automatically.
 """
 
@@ -54,17 +56,45 @@ def _format_tool(tool: MCPTool) -> str:
 
 
 @function_tool(timeout=60)
+async def list_mcps(ctx: RunContextWrapper) -> dict[str, Any]:
+    """List the MCP connections available this run, so you can discover them.
+
+    Read-only. Returns one entry per connection with its ``id`` (the exact name
+    you pass to ``describe_mcp`` and ``call_mcp``), ``name``, ``description``, and
+    ``tool_count`` — no tool schemas. The three MCP tools work in order: call
+    ``list_mcps`` to discover the available connections, then ``describe_mcp`` on
+    one connection to inspect its tools and their input schemas, then ``call_mcp``
+    to run one of its tools. Returns an empty ``connections`` list when the run has
+    no MCP connections.
+    """
+    registry = _registry_from_ctx(ctx)
+    if registry is None or not registry:
+        return {"connections": []}
+    return {
+        "connections": [
+            {
+                "id": summary.name,
+                "name": summary.name,
+                "description": summary.purpose,
+                "tool_count": summary.tool_count,
+            }
+            for summary in registry.summaries()
+        ]
+    }
+
+
+@function_tool(timeout=60)
 async def describe_mcp(ctx: RunContextWrapper, connection: str) -> str:
     """List the tools one MCP connection offers, with their input schemas.
 
-    Read-only. Look up a connection by the name shown in the MCP inventory in
-    your system prompt; this returns each of its tools with the tool's name,
-    description, and JSON input schema — the argument shape you pass to
-    ``call_mcp``. Call this before ``call_mcp`` on any connection you have not
-    used yet. Nothing is fetched from or run against the connection's data.
+    Read-only. Look up a connection by the id ``list_mcps`` reported for it; this
+    returns each of its tools with the tool's name, description, and JSON input
+    schema — the argument shape you pass to ``call_mcp``. Call this before
+    ``call_mcp`` on any connection you have not used yet. Nothing is fetched from
+    or run against the connection's data.
 
     Args:
-        connection: The connection name exactly as shown in the MCP inventory.
+        connection: The connection name exactly as reported by ``list_mcps``.
     """
     registry = _registry_from_ctx(ctx)
     if registry is None or not registry:
@@ -89,13 +119,13 @@ async def call_mcp(
 ) -> Any:
     """Call one tool on one MCP connection and return its result.
 
-    Address the tool by the connection name from the MCP inventory and the tool
-    name from ``describe_mcp`` on that connection. Pass the tool's arguments as an
+    Address the tool by the connection id from ``list_mcps`` and the tool name
+    from ``describe_mcp`` on that connection. Pass the tool's arguments as an
     object matching the input schema ``describe_mcp`` showed for it (omit it, or
     pass an empty object, for a tool that takes no arguments).
 
     Args:
-        connection: The connection name exactly as shown in the MCP inventory.
+        connection: The connection name exactly as reported by ``list_mcps``.
         tool: The tool name, exactly as reported by ``describe_mcp``.
         arguments: The tool's arguments as a JSON object of names to values (for
             example ``{"path": "app.py"}``), or omitted/empty for a tool that

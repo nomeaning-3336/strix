@@ -75,14 +75,13 @@ AUTHORIZED TARGETS:
 {% endfor %}
 {% endif %}
 
-{% if system_prompt_context and system_prompt_context.mcp_connections %}
+{% if system_prompt_context and system_prompt_context.mcp_available %}
 MCP CONNECTIONS (available this run):
-- The user connected these MCP (Model Context Protocol) servers — external tool providers you can reach on demand. Their individual tools do NOT appear in your tool list; the two dispatch tools are the only way in. To use one:
-  1. Call describe_mcp(connection="<name>") to list that connection's tools, each with its name, description, and JSON input schema.
-  2. Call call_mcp(connection="<name>", tool="<tool>", arguments={...}) to run one, passing an arguments object that matches the schema (omit arguments for a tool that takes none).
-{% for connection in system_prompt_context.mcp_connections %}
-- {{ connection.name }} ({{ connection.tool_count }} tool{{ '' if connection.tool_count == 1 else 's' }}){% if connection.purpose %}: {{ connection.purpose }}{% endif %}
-{% endfor %}
+- The user connected one or more MCP (Model Context Protocol) servers — external tool providers you can reach on demand. Their individual tools do NOT appear in your tool list; three dispatch tools are the only way in.
+  1. Call list_mcps() to discover the available connections.
+  2. Call describe_mcp(connection="<name>") to inspect one connection's tools, each with its name, description, and JSON input schema.
+  3. Call call_mcp(connection="<name>", tool="<tool>", arguments={...}) to run one, passing an arguments object that matches the schema (omit arguments for a tool that takes none).
+- Do not assume a connection or tool exists; discover it with list_mcps and describe it with describe_mcp before calling.
 {% endif %}
 
 AUTHORIZATION STATUS:

@@ -341,15 +341,14 @@ async def run_strix_scan(
         # ~/.strix/mcp-servers.json here. Either way one shared engine routine
         # does the connecting and populating. Nothing is registered as an agent
         # tool: every agent reaches these connections on demand through the
-        # describe_mcp / call_mcp tools, guided by a short inventory rendered into
-        # its prompt. Fail-open: a missing config, or a server that will not
-        # connect, must never break a run.
+        # list_mcps / describe_mcp / call_mcp tools, guided by brief static prompt
+        # guidance when any connection exists. Fail-open: a missing config, or a
+        # server that will not connect, must never break a run.
         from strix.tools.mcp import (
             McpConnectionRequest,
             McpRegistry,
             attach_mcp_requests,
             load_user_mcp_configs,
-            mcp_inventory_context,
         )
 
         mcp_registry = McpRegistry()
@@ -371,11 +370,13 @@ async def run_strix_scan(
                 _record_mcp_connections(connections)
                 if connections:
                     report(_mcp_startup_summary(connections))
-                    # The inventory reaches both the root context and the child
-                    # factory's context (both derive from scope_context), so
-                    # every agent renders it. Set only when a connection exists,
-                    # so a run with no MCP leaves the prompt context unchanged.
-                    scope_context["mcp_connections"] = mcp_inventory_context(mcp_registry)
+                    # Flag that MCP is reachable so both the root context and the
+                    # child factory's context (both derive from scope_context)
+                    # render the static three-tool guidance. Set only when a
+                    # connection exists, so a run with no MCP leaves the prompt
+                    # context unchanged. The connections themselves are discovered
+                    # at run time via list_mcps, not listed in the prompt.
+                    scope_context["mcp_available"] = bool(mcp_registry)
         except Exception:
             logger.exception("Failed to connect user MCP servers; continuing without them")
 
