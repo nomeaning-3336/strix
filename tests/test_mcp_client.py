@@ -1,4 +1,9 @@
-"""Tests for the generic MCP client: config contract, namespacing, and filtering."""
+"""Tests for the generic MCP dispatch model.
+
+Connections are connected without being registered as agent tools; their live
+sessions go into a per-run registry; and every agent reaches them through the
+two dispatch tools ``describe_mcp`` and ``call_mcp``.
+"""
 
 from __future__ import annotations
 
@@ -9,29 +14,30 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from agents.mcp import MCPServer, MCPServerStdio, MCPServerStreamableHttp
+from agents.tool_context import ToolContext
 from mcp.types import CallToolResult, TextContent
 from mcp.types import Tool as MCPTool
 from pydantic import ValidationError
 
 from strix.agents import factory
-from strix.core.runner import _mcp_connection_notes
-from strix.interface.tui.live_view import TuiLiveView, _tool_status_from_result
+from strix.interface.tui.live_view import TuiLiveView
 from strix.tools.mcp import (
+    MCP_REGISTRY_CONTEXT_KEY,
     BearerAuth,
-    ConnectedMcpServer,
     McpConnectionConfig,
+    McpRegistry,
+    call_mcp,
+    describe_mcp,
     load_user_mcp_configs,
+    mcp_inventory_context,
     namespaced_tool_name,
     resolve_mcp_tool,
 )
 from strix.tools.mcp import client as mcp_client
-from strix.tools.mcp.client import _auth_headers, _build_server, _register_server_tools
 
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-    from agents.tool import Tool
 
 
 class FakeMCPServer(MCPServer):
@@ -76,15 +82,31 @@ class FakeMCPServer(MCPServer):
         raise NotImplementedError
 
 
-def _mcp_tool(name: str) -> MCPTool:
+class ErroringMCPServer(FakeMCPServer):
+    """A connected server whose calls come back as MCP errors (isError=True)."""
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
+        self.calls.append((tool_name, arguments))
+        return CallToolResult(
+            content=[TextContent(type="text", text=f"boom:{tool_name}")],
+            isError=True,
+        )
+
+
+def _mcp_tool(name: str, *, description: str | None = None) -> MCPTool:
     return MCPTool(
         name=name,
-        description=f"remote tool {name}",
-        inputSchema={"type": "object", "properties": {}},
+        description=description if description is not None else f"remote tool {name}",
+        inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
     )
 
 
-def _config(name: str, allowed_tools: list[str]) -> McpConnectionConfig:
+def _config(name: str, allowed_tools: list[str] | None) -> McpConnectionConfig:
     return McpConnectionConfig(
         name=name,
         url="https://mcp.example.com",
@@ -93,26 +115,21 @@ def _config(name: str, allowed_tools: list[str]) -> McpConnectionConfig:
     )
 
 
+def _ctx(registry: McpRegistry | None) -> ToolContext[dict[str, Any]]:
+    context: dict[str, Any] = {} if registry is None else {MCP_REGISTRY_CONTEXT_KEY: registry}
+    return ToolContext(
+        context=context,
+        tool_name="mcp",
+        tool_call_id="call-1",
+        tool_arguments="{}",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clear_mcp_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hide any MCP settings the developer has exported in their own shell.
-
-    The loader reads these to resolve the config path and the per-run
-    include/exclude selection, so a shell that has them set (from using
-    --mcp-config or --mcp-server) would otherwise filter what these tests see.
-    """
+    """Hide any MCP settings the developer has exported in their own shell."""
     for name in ("STRIX_MCP_CONFIG", "STRIX_MCP_ONLY", "STRIX_MCP_EXCLUDE"):
         monkeypatch.delenv(name, raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _reset_registry() -> Any:
-    saved = list(factory._EXTRA_TOOLS)
-    factory._EXTRA_TOOLS.clear()
-    try:
-        yield
-    finally:
-        factory._EXTRA_TOOLS[:] = saved
 
 
 # --- config contract ---------------------------------------------------------
@@ -160,7 +177,6 @@ def test_stdio_config_parses_from_dict() -> None:
     assert config.command == "npx"
     assert config.args == ["-y", "@modelcontextprotocol/server-filesystem", "/srv/data"]
     assert config.env == {"FOO": "bar"}
-    # A local stdio server needs no auth, and omitting allowed_tools means "all".
     assert config.auth is None
     assert config.allowed_tools is None
 
@@ -178,12 +194,7 @@ def test_http_config_without_url_is_rejected() -> None:
 
 def test_stdio_config_without_command_is_rejected() -> None:
     with pytest.raises(ValidationError):
-        McpConnectionConfig.model_validate(
-            {
-                "name": "x",
-                "transport": "stdio",
-            }
-        )
+        McpConnectionConfig.model_validate({"name": "x", "transport": "stdio"})
 
 
 def test_empty_name_is_rejected() -> None:
@@ -213,221 +224,61 @@ def test_unknown_field_is_rejected() -> None:
 
 
 def test_bearer_auth_builds_authorization_header() -> None:
-    headers = _auth_headers(_config("files_main", []))
+    headers = mcp_client._auth_headers(_config("files_main", []))
 
     assert headers == {"Authorization": "Bearer run-token"}
 
 
-# --- namespacing and filtering -----------------------------------------------
-
-
-def _registered_names() -> list[str]:
-    return [tool.name for tool in factory.registered_agent_tools()]
+# --- connect without global registration -------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_tools_are_namespaced_per_connection() -> None:
-    server_a = FakeMCPServer("conn_a", [_mcp_tool("describe")])
-    server_b = FakeMCPServer("conn_b", [_mcp_tool("describe")])
+async def test_connect_returns_sessions_without_registering_agent_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before = list(factory.registered_agent_tools())
+    servers = {
+        "fs": FakeMCPServer("fs", [_mcp_tool("read_file"), _mcp_tool("write_file")]),
+        "db": FakeMCPServer("db", [_mcp_tool("query")]),
+    }
+    monkeypatch.setattr(mcp_client, "_build_server", lambda config: servers[config.name])
 
-    await _register_server_tools(_config("conn_a", ["describe"]), server_a)
-    await _register_server_tools(_config("conn_b", ["describe"]), server_b)
-
-    # Same remote tool name on two connections does not collide.
-    assert _registered_names() == ["conn_a_describe", "conn_b_describe"]
-
-
-@pytest.mark.asyncio
-async def test_registered_names_are_valid_tool_names() -> None:
-    # Model APIs reject a tool name containing anything but letters, digits,
-    # underscores and hyphens, and reject the whole request rather than the one
-    # tool. A server naming its own tools with dots, or a connection named with
-    # a space in the user's config, must not be able to break a run.
-    server = FakeMCPServer("my server", [_mcp_tool("db.query"), _mcp_tool("ok_tool")])
-
-    await _register_server_tools(_config("my server", None), server)
-
-    names = _registered_names()
-    assert names == ["my_server_db_query", "my_server_ok_tool"]
-    assert all(re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", name) for name in names)
-
-
-@pytest.mark.asyncio
-async def test_a_rename_does_not_change_which_tool_is_called() -> None:
-    # Only the model-facing name is sanitized; the server is always asked for the
-    # tool name it reported.
-    server = FakeMCPServer("my server", [_mcp_tool("db.query")])
-
-    tools = await _register_server_tools(_config("my server", None), server)
-
-    assert tools[0].name == "my_server_db_query"
-    await tools[0].on_invoke_tool(None, "{}")
-    assert server.calls == [("db.query", {})]
-
-
-@pytest.mark.asyncio
-async def test_disallowed_tool_is_not_registered() -> None:
-    server = FakeMCPServer(
-        "files_main",
-        [_mcp_tool("list_files"), _mcp_tool("search")],
+    connections = await mcp_client.connect_mcp_servers(
+        [_config("fs", None), _config("db", ["query"])]
     )
 
-    await _register_server_tools(_config("files_main", ["list_files"]), server)
-
-    names = _registered_names()
-    assert "files_main_list_files" in names
-    assert "files_main_search" not in names
-
-
-@pytest.mark.asyncio
-async def test_allowed_tools_none_registers_every_listed_tool() -> None:
-    server = FakeMCPServer(
-        "local_fs",
-        [_mcp_tool("read_file"), _mcp_tool("write_file")],
-    )
-    config = McpConnectionConfig(name="local_fs", url="https://mcp.example.com", allowed_tools=None)
-
-    await _register_server_tools(config, server)
-
-    names = _registered_names()
-    assert "local_fs_read_file" in names
-    assert "local_fs_write_file" in names
+    # The live sessions come back with their tool counts, and nothing was added
+    # to the global agent-tool registry that pro shares.
+    assert [(c.name, c.tool_count) for c in connections] == [("fs", 2), ("db", 1)]
+    assert list(factory.registered_agent_tools()) == before
 
 
 @pytest.mark.asyncio
-async def test_allowed_tools_list_restricts_registration() -> None:
-    server = FakeMCPServer(
-        "local_fs",
-        [_mcp_tool("read_file"), _mcp_tool("write_file")],
-    )
+async def test_tool_count_honors_the_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = FakeMCPServer("fs", [_mcp_tool("read_file"), _mcp_tool("write_file")])
+    monkeypatch.setattr(mcp_client, "_build_server", lambda _config: server)
 
-    await _register_server_tools(_config("local_fs", ["read_file"]), server)
+    connections = await mcp_client.connect_mcp_servers([_config("fs", ["read_file"])])
 
-    names = _registered_names()
-    assert names == ["local_fs_read_file"]
+    assert connections[0].tool_count == 1
 
 
 @pytest.mark.asyncio
-async def test_registered_tool_routes_to_its_server_with_the_original_name() -> None:
-    server = FakeMCPServer("files_main", [_mcp_tool("list_files")])
-
-    tools: list[Tool] = await _register_server_tools(_config("files_main", ["list_files"]), server)
-    tool = tools[0]
-
-    output = await tool.on_invoke_tool(None, "{}")  # type: ignore[union-attr]
-
-    # The call reaches the right server, addressed by the unprefixed remote name.
-    assert server.calls == [("list_files", {})]
-    assert output == {"type": "text", "text": "routed:list_files"}
-
-
-# --- result transform --------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_result_transform_receives_namespaced_name_and_structured_result() -> None:
-    server = FakeMCPServer("files_main", [_mcp_tool("list_files")])
-    seen: list[tuple[str, Any]] = []
-
-    def transform(name: str, structured: Any) -> Any:
-        seen.append((name, structured))
-        return {"kept": structured["content"][0]["text"]}
-
-    tools: list[Tool] = await _register_server_tools(
-        _config("files_main", ["list_files"]), server, result_transform=transform
+async def test_connection_notes_ride_on_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = FakeMCPServer("db", [_mcp_tool("query")])
+    monkeypatch.setattr(mcp_client, "_build_server", lambda _config: server)
+    config = McpConnectionConfig(
+        name="db",
+        url="https://mcp.example.com",
+        notes="Staging analytics DB; read-only.",
+        allowed_tools=["query"],
     )
 
-    output = await tools[0].on_invoke_tool(None, "{}")  # type: ignore[union-attr]
+    connections = await mcp_client.connect_mcp_servers([config])
 
-    # The underlying MCP call still routes by the unprefixed remote name.
-    assert server.calls == [("list_files", {})]
-
-    # The transform is called with the namespaced name and the parsed result.
-    assert len(seen) == 1
-    name, structured = seen[0]
-    assert name == "files_main_list_files"
-    # A parsed CallToolResult (dict/list), not a pre-serialized string.
-    assert structured["content"][0]["text"] == "routed:list_files"
-    assert structured["isError"] is False
-
-    # The transform's return value is exactly what the tool yields.
-    assert output == {"kept": "routed:list_files"}
-
-
-@pytest.mark.asyncio
-async def test_result_transform_can_rewrite_the_tool_output() -> None:
-    server = FakeMCPServer("files_main", [_mcp_tool("list_files")])
-
-    def transform(_name: str, structured: Any) -> Any:
-        # Keep only a truncated view of the text field.
-        return structured["content"][0]["text"][:6]
-
-    tools: list[Tool] = await _register_server_tools(
-        _config("files_main", ["list_files"]), server, result_transform=transform
-    )
-
-    output = await tools[0].on_invoke_tool(None, "{}")  # type: ignore[union-attr]
-
-    assert output == "routed"
-
-
-@pytest.mark.asyncio
-async def test_without_result_transform_output_is_unchanged() -> None:
-    server = FakeMCPServer("files_main", [_mcp_tool("list_files")])
-
-    tools: list[Tool] = await _register_server_tools(
-        _config("files_main", ["list_files"]), server, result_transform=None
-    )
-
-    output = await tools[0].on_invoke_tool(None, "{}")  # type: ignore[union-attr]
-
-    # Same shape the SDK produces today: no transform in the path.
-    assert server.calls == [("list_files", {})]
-    assert output == {"type": "text", "text": "routed:list_files"}
-
-
-# --- error status capture ----------------------------------------------------
-
-
-class ErroringMCPServer(FakeMCPServer):
-    """A connected server whose calls come back as MCP errors (isError=True)."""
-
-    async def call_tool(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any] | None,
-        meta: dict[str, Any] | None = None,
-    ) -> CallToolResult:
-        self.calls.append((tool_name, arguments))
-        return CallToolResult(
-            content=[TextContent(type="text", text=f"boom:{tool_name}")],
-            isError=True,
-        )
-
-
-@pytest.mark.asyncio
-async def test_errored_mcp_result_is_flagged_failed_for_the_tui() -> None:
-    server = ErroringMCPServer("files_main", [_mcp_tool("list_files")])
-
-    tools: list[Tool] = await _register_server_tools(_config("files_main", ["list_files"]), server)
-    output = await tools[0].on_invoke_tool(None, "{}")  # type: ignore[union-attr]
-
-    # The error text stays exactly what the agent gets today; a success:False tag
-    # rides alongside it purely so the TUI can tell the call apart from a success.
-    assert output == {"type": "text", "text": "boom:list_files", "success": False}
-    assert _tool_status_from_result(output) == "failed"
-
-
-@pytest.mark.asyncio
-async def test_successful_mcp_result_stays_completed_for_the_tui() -> None:
-    server = FakeMCPServer("files_main", [_mcp_tool("list_files")])
-
-    tools: list[Tool] = await _register_server_tools(_config("files_main", ["list_files"]), server)
-    output = await tools[0].on_invoke_tool(None, "{}")  # type: ignore[union-attr]
-
-    # A non-error result is untouched and keeps rendering as done.
-    assert output == {"type": "text", "text": "routed:list_files"}
-    assert _tool_status_from_result(output) == "completed"
+    assert connections[0].notes == "Staging analytics DB; read-only."
 
 
 # --- server build branch -----------------------------------------------------
@@ -442,9 +293,8 @@ def test_build_server_stdio_branch() -> None:
         env={"TOKEN": "x"},
     )
 
-    server = _build_server(config)
+    server = mcp_client._build_server(config)
 
-    # Built, not connected: no subprocess is launched here.
     assert isinstance(server, MCPServerStdio)
     assert server.name == "local_fs"
     assert server.params.command == "my-server"
@@ -453,10 +303,231 @@ def test_build_server_stdio_branch() -> None:
 
 
 def test_build_server_http_branch() -> None:
-    server = _build_server(_config("files_main", ["list_files"]))
+    server = mcp_client._build_server(_config("files_main", ["list_files"]))
 
     assert isinstance(server, MCPServerStreamableHttp)
     assert server.name == "files_main"
+
+
+# --- registry ----------------------------------------------------------------
+
+
+def test_registry_add_get_and_names() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file")])
+
+    registry.add(name="fs", server=server, purpose="local files", tool_count=1)
+
+    entry = registry.get("fs")
+    assert entry is not None
+    assert entry.server is server
+    assert entry.purpose == "local files"
+    assert entry.tool_count == 1
+    assert registry.get("missing") is None
+    assert registry.names() == ["fs"]
+    assert bool(registry) is True
+    assert len(registry) == 1
+
+
+def test_registry_summaries_and_inventory() -> None:
+    registry = McpRegistry()
+    registry.add(name="fs", server=FakeMCPServer("fs", []), purpose="local files", tool_count=2)
+    registry.add(name="db", server=FakeMCPServer("db", []), purpose=None, tool_count=1)
+
+    summaries = registry.summaries()
+    assert [(s.name, s.purpose, s.tool_count) for s in summaries] == [
+        ("fs", "local files", 2),
+        ("db", None, 1),
+    ]
+
+    # The prompt inventory carries name/purpose/tool_count and no schemas.
+    assert mcp_inventory_context(registry) == [
+        {"name": "fs", "purpose": "local files", "tool_count": 2},
+        {"name": "db", "purpose": None, "tool_count": 1},
+    ]
+
+
+def test_inventory_is_empty_without_a_registry() -> None:
+    assert mcp_inventory_context(None) == []
+    assert mcp_inventory_context(McpRegistry()) == []
+
+
+# --- describe_mcp ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_describe_mcp_returns_tool_names_and_schemas() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file", description="Read a file")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    out = await describe_mcp.on_invoke_tool(_ctx(registry), json.dumps({"connection": "fs"}))
+
+    assert "read_file" in out
+    assert "Read a file" in out
+    # The tool's JSON input schema is shown so the model can build call arguments.
+    assert '"path"' in out
+
+
+@pytest.mark.asyncio
+async def test_describe_mcp_errors_clearly_on_unknown_connection() -> None:
+    registry = McpRegistry()
+    registry.add(name="fs", server=FakeMCPServer("fs", []), purpose=None, tool_count=0)
+
+    out = await describe_mcp.on_invoke_tool(_ctx(registry), json.dumps({"connection": "nope"}))
+
+    assert "Unknown MCP connection 'nope'" in out
+    assert "fs" in out
+
+
+@pytest.mark.asyncio
+async def test_describe_mcp_without_any_connections() -> None:
+    out = await describe_mcp.on_invoke_tool(_ctx(None), json.dumps({"connection": "fs"}))
+
+    assert out == "No MCP connections are configured for this run."
+
+
+# --- call_mcp ----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_dispatches_and_returns_converted_output() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry),
+        json.dumps({"connection": "fs", "tool": "read_file", "arguments": {"path": "/etc/hosts"}}),
+    )
+
+    # The call reaches the server by the unprefixed tool name with its arguments.
+    assert server.calls == [("read_file", {"path": "/etc/hosts"})]
+    assert out == {"type": "text", "text": "routed:read_file"}
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_defaults_missing_arguments_to_empty_object() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("ping")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    await call_mcp.on_invoke_tool(_ctx(registry), json.dumps({"connection": "fs", "tool": "ping"}))
+
+    assert server.calls == [("ping", {})]
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_errors_on_unknown_connection() -> None:
+    registry = McpRegistry()
+    registry.add(name="fs", server=FakeMCPServer("fs", []), purpose=None, tool_count=0)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry), json.dumps({"connection": "nope", "tool": "x"})
+    )
+
+    assert "Unknown MCP connection 'nope'" in out
+    assert "fs" in out
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_errors_on_unknown_tool() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry), json.dumps({"connection": "fs", "tool": "delete_everything"})
+    )
+
+    assert "Unknown tool 'delete_everything'" in out
+    assert "read_file" in out
+    # A rejected tool name never reaches the server.
+    assert server.calls == []
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_errors_on_non_dict_arguments() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry),
+        json.dumps({"connection": "fs", "tool": "read_file", "arguments": ["not", "a", "dict"]}),
+    )
+
+    assert "expected a JSON object" in out
+    assert server.calls == []
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_applies_a_connection_result_transform() -> None:
+    registry = McpRegistry()
+    server = FakeMCPServer("fs", [_mcp_tool("read_file")])
+    seen: list[tuple[str, Any]] = []
+
+    def transform(label: str, structured: Any) -> Any:
+        seen.append((label, structured))
+        return {"kept": structured["content"][0]["text"]}
+
+    registry.add(name="fs", server=server, purpose=None, tool_count=1, result_transform=transform)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry), json.dumps({"connection": "fs", "tool": "read_file"})
+    )
+
+    # The transform sees the model-facing <connection>_<tool> label and the
+    # parsed CallToolResult, and its return becomes the tool output.
+    assert seen[0][0] == "fs_read_file"
+    assert seen[0][1]["content"][0]["text"] == "routed:read_file"
+    assert out == {"kept": "routed:read_file"}
+
+
+@pytest.mark.asyncio
+async def test_call_mcp_flags_an_errored_result_failed_for_the_tui() -> None:
+    registry = McpRegistry()
+    server = ErroringMCPServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, purpose=None, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry), json.dumps({"connection": "fs", "tool": "read_file"})
+    )
+
+    # The agent content is unchanged; success:False rides alongside so the TUI
+    # can tell an errored call from a done one.
+    assert out == {"type": "text", "text": "boom:read_file", "success": False}
+
+
+# --- the two tools are the only MCP surface every agent gets -----------------
+
+
+def test_agent_carries_exactly_the_two_dispatch_tools_regardless_of_connections() -> None:
+    """No matter how many MCP connections a run makes, an agent's tool list gains
+    exactly describe_mcp and call_mcp and never a per-connection provider tool."""
+    root = factory.build_strix_agent(is_root=True)
+    child = factory.build_strix_agent(is_root=False)
+
+    root_names = [t.name for t in root.tools]
+    child_names = [t.name for t in child.tools]
+
+    assert {"describe_mcp", "call_mcp"} <= set(root_names)
+    assert {"describe_mcp", "call_mcp"} <= set(child_names)
+
+    # Five hypothetical connections would once have added ~all their tools as
+    # namespaced provider tools; none of those names may appear now.
+    provider_names = {
+        namespaced_tool_name(f"conn{i}", tool)
+        for i in range(5)
+        for tool in ("read_file", "write_file", "query")
+    }
+    assert provider_names.isdisjoint(root_names)
+    assert provider_names.isdisjoint(child_names)
+
+    # The tool list does not grow with connection count: it is the same set of
+    # names whether or not any connection exists, because connections never
+    # contribute tools.
+    assert root_names == [t.name for t in factory.build_strix_agent(is_root=True).tools]
 
 
 # --- loader ------------------------------------------------------------------
@@ -497,12 +568,8 @@ def test_loader_skips_bad_entry_but_keeps_good_ones(tmp_path: Path) -> None:
     config_file.write_text(
         json.dumps(
             [
-                {"name": "broken", "transport": "http"},  # missing url
-                {
-                    "name": "local_fs",
-                    "transport": "stdio",
-                    "command": "npx",
-                },
+                {"name": "broken", "transport": "http"},
+                {"name": "local_fs", "transport": "stdio", "command": "npx"},
             ]
         ),
         encoding="utf-8",
@@ -530,51 +597,54 @@ def test_loader_reads_env_var_override(tmp_path: Path, monkeypatch: pytest.Monke
     assert [c.name for c in configs] == ["local_fs"]
 
 
-# --- connection notes --------------------------------------------------------
+def _names_file(tmp_path: Path, *names: str) -> Path:
+    config_file = tmp_path / "mcp-servers.json"
+    config_file.write_text(
+        json.dumps([{"name": n, "transport": "stdio", "command": "npx"} for n in names]),
+        encoding="utf-8",
+    )
+    return config_file
 
 
-@pytest.mark.asyncio
-async def test_connection_notes_are_carried_on_the_connection(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    server = FakeMCPServer("db", [_mcp_tool("query")])
-    monkeypatch.setattr(mcp_client, "_build_server", lambda _config: server)
-    config = McpConnectionConfig(
-        name="db",
-        url="https://mcp.example.com",
-        notes="Staging analytics DB; read-only.",
-        allowed_tools=["query"],
+def test_loader_drops_duplicate_named_connections(tmp_path: Path) -> None:
+    config_file = tmp_path / "mcp-servers.json"
+    config_file.write_text(
+        json.dumps(
+            [
+                {"name": "dup", "transport": "stdio", "command": "first"},
+                {"name": "dup", "transport": "stdio", "command": "second"},
+                {"name": "other", "transport": "stdio", "command": "npx"},
+            ]
+        ),
+        encoding="utf-8",
     )
 
-    connections = await mcp_client.connect_mcp_servers([config])
+    configs = load_user_mcp_configs(config_file)
 
-    # Notes ride on the connection (surfaced once), not stapled onto each tool.
-    assert connections[0].notes == "Staging analytics DB; read-only."
-
-
-def test_connection_notes_block_lists_only_noted_connections() -> None:
-    connections = [
-        ConnectedMcpServer(
-            server=FakeMCPServer("db", []), name="db", tool_count=2, notes="staging, read-only"
-        ),
-        ConnectedMcpServer(server=FakeMCPServer("fs", []), name="fs", tool_count=1, notes=None),
-    ]
-
-    block = _mcp_connection_notes(connections)
-
-    assert block is not None
-    assert "db" in block
-    assert "staging, read-only" in block
-    # A connection without notes is not listed.
-    assert "fs" not in block
+    assert [c.name for c in configs] == ["dup", "other"]
+    assert configs[0].command == "first"
 
 
-def test_connection_notes_block_is_none_without_notes() -> None:
-    connections = [
-        ConnectedMcpServer(server=FakeMCPServer("db", []), name="db", tool_count=1, notes=None)
-    ]
+def test_loader_include_selection_keeps_only_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _names_file(tmp_path, "a", "b", "c")
+    monkeypatch.setenv("STRIX_MCP_ONLY", "a,c")
 
-    assert _mcp_connection_notes(connections) is None
+    configs = load_user_mcp_configs(config_file)
+
+    assert [c.name for c in configs] == ["a", "c"]
+
+
+def test_loader_exclude_selection_drops_named(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _names_file(tmp_path, "a", "b", "c")
+    monkeypatch.setenv("STRIX_MCP_EXCLUDE", "b")
+
+    configs = load_user_mcp_configs(config_file)
+
+    assert [c.name for c in configs] == ["a", "c"]
 
 
 # --- cancellation cleanup ----------------------------------------------------
@@ -614,61 +684,10 @@ async def test_connect_cleans_up_when_cancelled_mid_connect(
     assert cleaned == ["bad", "good"]
 
 
-# --- duplicate names and run selection ---------------------------------------
-
-
-def _names_file(tmp_path: Path, *names: str) -> Path:
-    config_file = tmp_path / "mcp-servers.json"
-    config_file.write_text(
-        json.dumps([{"name": n, "transport": "stdio", "command": "npx"} for n in names]),
-        encoding="utf-8",
-    )
-    return config_file
-
-
-def test_loader_drops_duplicate_named_connections(tmp_path: Path) -> None:
-    config_file = tmp_path / "mcp-servers.json"
-    config_file.write_text(
-        json.dumps(
-            [
-                {"name": "dup", "transport": "stdio", "command": "first"},
-                {"name": "dup", "transport": "stdio", "command": "second"},
-                {"name": "other", "transport": "stdio", "command": "npx"},
-            ]
-        ),
-        encoding="utf-8",
-    )
-
-    configs = load_user_mcp_configs(config_file)
-
-    # Duplicate name is dropped; the first entry wins.
-    assert [c.name for c in configs] == ["dup", "other"]
-    assert configs[0].command == "first"
-
-
-def test_loader_include_selection_keeps_only_named(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config_file = _names_file(tmp_path, "a", "b", "c")
-    monkeypatch.setenv("STRIX_MCP_ONLY", "a,c")
-
-    configs = load_user_mcp_configs(config_file)
-
-    assert [c.name for c in configs] == ["a", "c"]
-
-
-def test_loader_exclude_selection_drops_named(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    config_file = _names_file(tmp_path, "a", "b", "c")
-    monkeypatch.setenv("STRIX_MCP_EXCLUDE", "b")
-
-    configs = load_user_mcp_configs(config_file)
-
-    assert [c.name for c in configs] == ["a", "c"]
-
-
 # --- reading a tool call back to the server it went out to -------------------
+# resolve_mcp_tool / namespaced_tool_name stay in strix.tools.mcp.naming: the
+# TUI reads them to attribute a call to its connection, and call_mcp builds the
+# result_transform label with namespaced_tool_name.
 
 
 def test_resolve_mcp_tool_splits_against_the_run_connections() -> None:
@@ -679,12 +698,10 @@ def test_resolve_mcp_tool_splits_against_the_run_connections() -> None:
 
 
 def test_resolve_mcp_tool_prefers_the_longest_matching_connection() -> None:
-    # One connection's name being a prefix of another's must not misattribute.
     assert resolve_mcp_tool("files_main_list", ["files", "files_main"]) == ("files_main", "list")
 
 
 def test_resolve_mcp_tool_matches_a_connection_name_it_had_to_sanitize() -> None:
-    # "my server" reaches the model as "my_server_db_query".
     tool_name = namespaced_tool_name("my server", "db.query")
 
     assert resolve_mcp_tool(tool_name, ["my server"]) == ("my server", "db_query")
@@ -692,8 +709,16 @@ def test_resolve_mcp_tool_matches_a_connection_name_it_had_to_sanitize() -> None
 
 def test_resolve_mcp_tool_ignores_tools_that_are_not_a_connection_s() -> None:
     assert resolve_mcp_tool("exec_command", ["local_fs"]) is None
-    # A name that merely starts like a connection is not one of its tools.
     assert resolve_mcp_tool("local_fsx", ["local_fs"]) is None
+
+
+def test_namespaced_name_is_a_valid_tool_name() -> None:
+    # A connection named with a space and a server tool named with a dot still
+    # sanitize to a valid model-facing label for the result_transform.
+    name = namespaced_tool_name("my server", "db.query")
+
+    assert name == "my_server_db_query"
+    assert re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", name)
 
 
 def test_projected_tool_call_names_the_server_it_went_out_to() -> None:
@@ -711,5 +736,4 @@ def test_projected_tool_call_names_the_server_it_went_out_to() -> None:
 
     mcp_call, built_in = (event["data"] for event in view.events)
     assert (mcp_call["mcp_connection"], mcp_call["mcp_tool"]) == ("local_fs", "read_file")
-    # A built-in call carries no connection, which is what keeps it rendering as one.
     assert "mcp_connection" not in built_in

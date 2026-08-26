@@ -75,6 +75,16 @@ AUTHORIZED TARGETS:
 {% endfor %}
 {% endif %}
 
+{% if system_prompt_context and system_prompt_context.mcp_connections %}
+MCP CONNECTIONS (available this run):
+- The user connected these MCP (Model Context Protocol) servers — external tool providers you can reach on demand. Their individual tools do NOT appear in your tool list; the two dispatch tools are the only way in. To use one:
+  1. Call describe_mcp(connection="<name>") to list that connection's tools, each with its name, description, and JSON input schema.
+  2. Call call_mcp(connection="<name>", tool="<tool>", arguments={...}) to run one, passing an arguments object that matches the schema (omit arguments for a tool that takes none).
+{% for connection in system_prompt_context.mcp_connections %}
+- {{ connection.name }} ({{ connection.tool_count }} tool{{ '' if connection.tool_count == 1 else 's' }}){% if connection.purpose %}: {{ connection.purpose }}{% endif %}
+{% endfor %}
+{% endif %}
+
 AUTHORIZATION STATUS:
 - You have FULL AUTHORIZATION for authorized security validation on in-scope targets to help secure the target systems/app
 - All permission checks have been COMPLETED and APPROVED - never question your authority
