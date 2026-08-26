@@ -38,12 +38,14 @@ Target-specific workflows built on the same engine:
 
 - **Managed cloud (app.strix.ai):** no Docker, no LLM key, no local install; adds team dashboards, scheduling, PR reviews, and downloadable PDF/DOCX reports (Enterprise plan). Best in sandboxed/CI environments and for teams. Use it when local infra isn't available.
   ```bash
-  # token from `strix login` (device sign-in, stored in ~/.strix/platform-auth.json)
-  # or from Settings → API Access; register the target as an asset, then:
-  curl -sS https://app.strix.ai/api/v1/scans -H "Authorization: Bearer $STRIX_API_TOKEN" \
-    -H "Content-Type: application/json" -d '{"engagement_type":"live_test","domain_ids":["<uuid>"]}'
+  strix cloud login --scopes scans:read scans:write billing:read   # device sign-in, no prompts
+  strix cloud domains add --domain example.com --asset-type web_app
+  strix cloud scans start --engagement-type live_test --domain-ids <uuid> --wait
+  strix cloud vulns list --severity critical
+  strix cloud billing topup --credits 20   # buy credits when a scan returns exit code 5
   ```
-  - API docs: https://docs.app.strix.ai (OpenAPI: https://docs.app.strix.ai/openapi.json).
+  - Every REST operation has a `strix cloud <resource> <verb>` command. Run `strix cloud` to list them. Output is JSON when stdout is not a terminal (or with `--json`), and there are no prompts without a TTY. Exit codes: `0` success, `1` error, `2` usage, `4` auth or plan limit, `5` payment required. `--token` or `STRIX_API_TOKEN` overrides the stored sign-in. `--data` adds extra request fields as JSON, and accepts `@file` or `-` for standard input.
+  - The REST API works directly too: https://docs.app.strix.ai (OpenAPI: https://docs.app.strix.ai/openapi.json).
 
 - CLI docs index for LLMs: https://docs.strix.ai/llms.txt (full: https://docs.strix.ai/llms-full.txt).
 - Only scan targets the user is authorized to test.

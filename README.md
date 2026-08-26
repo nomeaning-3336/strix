@@ -320,19 +320,41 @@ strix auth status             # show the active sign-in
 strix auth logout             # forget the sign-in
 ```
 
-#### Sign in to the managed platform
+#### Use the managed platform: `strix cloud`
 
-To use the managed platform ([app.strix.ai](https://app.strix.ai)) from the terminal, run the device sign-in. It creates your account and workspace on first use and stores a personal API token in `~/.strix/platform-auth.json`:
+The `strix cloud` commands drive the managed platform ([app.strix.ai](https://app.strix.ai)) from the terminal. Sign in once with the device flow. The sign-in creates your account and workspace on first use and stores a personal API token in `~/.strix/platform-auth.json`:
 
 ```bash
-strix login                   # opens the browser, then pick a workspace and scopes
-strix login --scopes scans:read scans:write   # request specific token scopes
-strix login --workspace "My Team"             # select a workspace by name or ID
-strix login status            # show the active sign-in
-strix login logout            # forget the sign-in
+strix cloud login                   # opens the browser, then pick a workspace and scopes
+strix cloud login --scopes scans:read scans:write   # request specific token scopes
+strix cloud login --workspace "My Team"             # select a workspace by name or ID
+strix cloud whoami                  # show the active sign-in
+strix cloud logout                  # forget the sign-in
 ```
 
-The token authorizes the [REST API](https://docs.app.strix.ai) — scans, vulnerabilities, credits, and top-ups — with no dashboard visit.
+Every operation of the [REST API](https://docs.app.strix.ai) has a matching command in the form `strix cloud <resource> <verb>`:
+
+```bash
+strix cloud                                   # list all resources
+strix cloud scans                             # list the verbs of a resource
+strix cloud domains add --domain example.com --asset-type web_app
+strix cloud scans start --engagement-type live_test --domain-ids <uuid> --wait
+strix cloud vulns list --severity critical
+strix cloud credits                           # credit balance
+strix cloud billing topup --credits 20        # buy credits (agent payment, HTTP 402)
+```
+
+The commands are agent friendly. Output is JSON when stdout is not a terminal or when you pass `--json`. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication required, `5` payment required. Set the token with `--token` or `STRIX_API_TOKEN` to skip the stored sign-in.
+
+Write commands take request fields as flags, and every write command also accepts one JSON object with `--data`:
+
+```bash
+strix cloud scans start --data '{"engagement_type":"code_review"}'   # literal JSON
+strix cloud scans start --data @request.json                         # read a file
+cat request.json | strix cloud scans start --data -                  # read standard input
+```
+
+The platform enforces plan and role limits. Report downloads need the Enterprise plan, schedules need the Pro plan, and billing writes need an admin token. Those commands return the platform message and exit code `4`.
 
 #### Connect your own MCP servers
 

@@ -431,12 +431,12 @@ def main() -> None:
 
         sys.exit(run_auth(sys.argv[2:]))
 
-    # `strix login …` manages managed-platform sign-in (app.strix.ai) and
-    # exits; it needs no target, Docker, or scan setup.
-    if len(sys.argv) > 1 and sys.argv[1] == "login":
-        from strix.interface.platform_cli import run_login
+    # `strix cloud …` drives the managed platform (app.strix.ai) and exits;
+    # it needs no target, Docker, or scan setup.
+    if len(sys.argv) > 1 and sys.argv[1] == "cloud":
+        from strix.interface.cloud import run_cloud
 
-        sys.exit(run_login(sys.argv[2:]))
+        sys.exit(run_cloud(sys.argv[2:]))
 
     from strix.llm.warmup import start_import_warmup
 

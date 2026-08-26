@@ -1,4 +1,4 @@
-"""`strix login` — managed platform sign-in (app.strix.ai).
+"""`strix cloud login` — managed platform sign-in (app.strix.ai).
 
 Signing in runs an OAuth 2.0 device authorization flow in the browser, creates
 the Strix account and workspace when they do not exist yet, and stores a
@@ -35,8 +35,9 @@ _MAX_POLL_INTERVAL_S = 60
 _MAX_EXPIRES_IN_S = 30 * 60
 
 _LOGIN_USAGE = (
-    "Usage:\n  strix login [--no-browser] [--scopes SCOPE ...] [--workspace WORKSPACE]\n"
-    "  strix login status\n  strix login logout"
+    "Usage:\n"
+    "  strix cloud login [--no-browser] [--scopes SCOPE ...] [--workspace WORKSPACE]\n"
+    "  strix cloud whoami\n  strix cloud logout"
 )
 
 _ROLE_RANK = {"viewer": 0, "analyst": 1, "admin": 2}
@@ -78,7 +79,7 @@ def logout() -> bool:
 
 
 def run_login(argv: list[str]) -> int:
-    """Entry point for ``strix login …``. Returns a process exit code."""
+    """Entry point for ``strix cloud login``. Returns a process exit code."""
     console = Console()
     subcommand = argv[0] if argv else None
 
@@ -93,7 +94,7 @@ def run_login(argv: list[str]) -> int:
 
 
 def _login(console: Console, argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="strix login", add_help=True)
+    parser = argparse.ArgumentParser(prog="strix cloud login", add_help=True)
     parser.add_argument(
         "--no-browser",
         action="store_true",
@@ -123,7 +124,7 @@ def _login(console: Console, argv: list[str]) -> int:
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse already printed the message
-        return int(exc.code or 2)
+        return exc.code if isinstance(exc.code, int) else 2
 
     console.print()
     host = urlparse(_app_url()).netloc or _app_url()
@@ -152,7 +153,8 @@ def _login(console: Console, argv: list[str]) -> int:
     except OSError as exc:
         console.print(f"[red]Sign-in succeeded, but the token could not be stored:[/] {exc}")
         console.print(
-            f"[dim]Check that {AUTH_PATH.parent} is writable, then run `strix login` again.[/]"
+            f"[dim]Check that {AUTH_PATH.parent} is writable, "
+            "then run `strix cloud login` again.[/]"
         )
         return 1
     _print_success(console, record)
@@ -237,7 +239,7 @@ def _run_device_flow(
             break
         interval += delta
 
-    raise PlatformAuthError("the sign-in request expired. Run `strix login` again.")
+    raise PlatformAuthError("the sign-in request expired. Run `strix cloud login` again.")
 
 
 def _handle_poll_error(poll: requests.Response) -> int | None:
@@ -461,15 +463,15 @@ def _print_success(console: Console, record: dict[str, Any]) -> None:
     console.print(f"  Token:     stored in [dim]{AUTH_PATH}[/]")
     console.print()
     console.print(
-        "[dim]The managed API is ready. "
-        "See https://docs.app.strix.ai for scans, credits, and top-ups.[/]"
+        "[dim]The managed platform is ready. Run `strix cloud` to list the commands. "
+        "See https://docs.app.strix.ai for the API reference.[/]"
     )
 
 
 def _status(console: Console) -> int:
     record = read_record()
     if record is None:
-        console.print("[yellow]Not signed in.[/] Run [bold]strix login[/] to sign in.")
+        console.print("[yellow]Not signed in.[/] Run [bold]strix cloud login[/] to sign in.")
         return 1
     email = record.get("email", "unknown")
     organization = record.get("organization_name") or record.get("organization_id", "")
