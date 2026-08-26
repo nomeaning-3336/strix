@@ -265,7 +265,8 @@ def _signed_in_record(response: requests.Response) -> dict[str, Any]:
 
 
 def _require_api_token(record: dict[str, Any]) -> dict[str, Any]:
-    if not str(record.get("api_token") or ""):
+    api_token = record.get("api_token")
+    if not isinstance(api_token, str) or not api_token.strip():
         raise PlatformAuthError("the server returned a sign-in response without an API token")
     return record
 
