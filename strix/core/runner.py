@@ -58,7 +58,7 @@ if TYPE_CHECKING:
     from agents.result import RunResultBase
 
     from strix.runtime.status import StatusSink
-    from strix.tools.mcp import ConnectedMcpServer
+    from strix.tools.mcp import ConnectedMcpServer, McpConnectionRequest
 
 
 logger = logging.getLogger(__name__)
@@ -156,6 +156,7 @@ async def run_strix_scan(
     root_instructions_override: str | None = None,
     extra_system_prompt_context: dict[str, Any] | None = None,
     status_sink: StatusSink | None = None,
+    mcp_connection_requests: list[McpConnectionRequest] | None = None,
 ) -> RunResultBase | None:
     """Run or resume one Strix scan against a sandbox.
 
@@ -167,6 +168,11 @@ async def run_strix_scan(
     ``extra_system_prompt_context`` is merged into the root agent's scan
     context before prompt rendering. Child agents keep the standard scan prompt
     and context.
+    ``mcp_connection_requests`` supplies the run's MCP connections from any
+    source: when given, the engine connects those requests; when ``None`` (the
+    command-line default) it reads ``~/.strix/mcp-servers.json`` itself. Either
+    way the engine does the connecting, so the caller passes inert configs plus
+    metadata and never live sessions.
     """
 
     def report(phase: str) -> None:
@@ -328,32 +334,38 @@ async def run_strix_scan(
 
         scope_context = build_scope_context(scan_config)
 
-        # Connect any MCP servers the user listed in ~/.strix/mcp-servers.json and
-        # hold their live sessions in a per-run registry. Nothing is registered as
-        # an agent tool: every agent reaches these connections on demand through
-        # the describe_mcp / call_mcp tools, guided by a short inventory rendered
-        # into its prompt. Fail-open: a missing config, or a server that will not
+        # Attach the run's MCP connections and hold their live sessions in a
+        # per-run registry. The connections are source-agnostic: a caller
+        # (the SaaS/pro product) can supply them as mcp_connection_requests, and
+        # when it does not the command-line path reads them from
+        # ~/.strix/mcp-servers.json here. Either way one shared engine routine
+        # does the connecting and populating. Nothing is registered as an agent
+        # tool: every agent reaches these connections on demand through the
+        # describe_mcp / call_mcp tools, guided by a short inventory rendered into
+        # its prompt. Fail-open: a missing config, or a server that will not
         # connect, must never break a run.
         from strix.tools.mcp import (
+            McpConnectionRequest,
             McpRegistry,
-            connect_mcp_servers,
+            attach_mcp_requests,
             load_user_mcp_configs,
             mcp_inventory_context,
         )
 
         mcp_registry = McpRegistry()
         try:
-            user_mcp_configs = load_user_mcp_configs()
-            if user_mcp_configs:
-                connections = await connect_mcp_servers(user_mcp_configs)
+            if mcp_connection_requests is None:
+                # Command-line default: read the user's file and wrap each config
+                # in a bare request (no provider or transform), so this path is
+                # exactly the old behavior.
+                mcp_requests = [
+                    McpConnectionRequest(config=config) for config in load_user_mcp_configs()
+                ]
+            else:
+                mcp_requests = mcp_connection_requests
+            if mcp_requests:
+                connections = await attach_mcp_requests(mcp_requests, mcp_registry)
                 mcp_servers = [c.server for c in connections]
-                for connection in connections:
-                    mcp_registry.add(
-                        name=connection.name,
-                        server=connection.server,
-                        purpose=connection.notes,
-                        tool_count=connection.tool_count,
-                    )
                 # Recorded even when nothing connected, so a resumed run does not
                 # keep attributing tool calls to servers it no longer has.
                 _record_mcp_connections(connections)

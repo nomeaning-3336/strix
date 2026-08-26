@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from strix.tools.mcp.config import McpConnectionConfig
+    from strix.tools.mcp.registry import McpConnectionRequest, McpRegistry
 
     # Runs on one tool call's structured result before it reaches the agent.
     # Called ``result_transform(label, structured_result)`` and its return value
@@ -188,19 +189,42 @@ async def dispatch_mcp_call(
       returns whatever the transform returns; or
     - without one, serializes the result the way the agents SDK does (see
       :func:`_mcp_result_to_tool_output`) and, when the result is an MCP error,
-      tags the returned output dict with ``success: False`` so the TUI can tell it
-      from a success. That tag rides on the human-facing status only: the SDK
-      re-projects the value through its ToolOutput schema before the agent sees
-      it, which keeps just the known ``type``/``text`` fields and drops
-      ``success``, so the agent receives exactly the error content it would have.
+      normalizes it through :func:`_errored_tool_output` so the failure reaches
+      the interfaces (see that function for the representation and why it does not
+      corrupt the content the agent receives).
     """
     result = await server.call_tool(tool_name, arguments)
     if result_transform is not None:
         return result_transform(label, result.model_dump(mode="json"))
     tool_output = _mcp_result_to_tool_output(server, result)
-    if getattr(result, "isError", False) and isinstance(tool_output, dict):
-        return {**tool_output, "success": False}
+    if getattr(result, "isError", False):
+        return _errored_tool_output(tool_output)
     return tool_output
+
+
+def _errored_tool_output(tool_output: Any) -> dict[str, Any]:
+    """Tag a serialized MCP error so the interfaces render it as failed.
+
+    Both the TUI and the run viewer decide a tool call failed by reading a
+    ``success`` key off a top-level dict in the result (``success is False`` means
+    failed). :func:`_mcp_result_to_tool_output` returns a dict only for a single
+    content block; a structured-content result comes back as a string and a
+    multi-block result as a list, and on those the failure flag had nowhere to
+    ride, so the interfaces showed a failed call as done. This normalizes every
+    errored result to a top-level dict carrying ``success: False``:
+
+    - a single content block (already a dict) keeps its ``type``/``text`` and gains
+      ``success: False`` alongside. The SDK's ToolOutput projection keeps the known
+      ``type``/``text`` fields and drops ``success`` before the agent sees it, so
+      the agent still receives exactly the error content;
+    - a list (multiple blocks) or a string (structured content) is placed under a
+      stable ``content`` key so the flag has a top-level dict to ride on. The agent
+      still receives the full error content, under ``content``, rather than losing
+      it.
+    """
+    if isinstance(tool_output, dict):
+        return {**tool_output, "success": False}
+    return {"success": False, "content": tool_output}
 
 
 async def _count_server_tools(config: McpConnectionConfig, server: MCPServer) -> int:
@@ -265,3 +289,39 @@ async def connect_mcp_servers(
         )
 
     return connected
+
+
+async def attach_mcp_requests(
+    requests: list[McpConnectionRequest],
+    registry: McpRegistry,
+) -> list[ConnectedMcpServer]:
+    """Connect a caller's MCP requests and populate the run's registry.
+
+    The one shared attach-and-populate path both the command-line and the
+    SaaS/pro product go through, so all connecting and cleanup lives in one owner.
+    The caller supplies inert :class:`McpConnectionRequest` objects (a config plus
+    a provider label, an optional per-connection ``result_transform``, and an
+    optional ``purpose``) and never a live session: the engine connects each
+    config here, reusing :func:`connect_mcp_servers` so the fail-open behavior (a
+    connection that will not connect is logged and skipped) and the cancellation
+    cleanup are preserved unchanged.
+
+    For each connection that came up, this registers it under its config name with
+    its tool count, its ``provider`` label, its ``result_transform``, and a purpose
+    of ``request.purpose`` when set else the connection's notes. Returns the
+    connected servers (the runner records them and cleans them up when the run
+    ends).
+    """
+    request_by_name = {request.config.name: request for request in requests}
+    connections = await connect_mcp_servers([request.config for request in requests])
+    for connection in connections:
+        request = request_by_name[connection.name]
+        registry.add(
+            name=connection.name,
+            server=connection.server,
+            tool_count=connection.tool_count,
+            purpose=request.purpose or connection.notes,
+            provider=request.provider,
+            result_transform=request.result_transform,
+        )
+    return connections

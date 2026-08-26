@@ -24,13 +24,17 @@ from strix.interface.tui.live_view import TuiLiveView
 from strix.tools.mcp import (
     MCP_REGISTRY_CONTEXT_KEY,
     BearerAuth,
+    McpCallInfo,
     McpConnectionConfig,
+    McpConnectionRequest,
     McpRegistry,
+    attach_mcp_requests,
     call_mcp,
     describe_mcp,
     load_user_mcp_configs,
     mcp_inventory_context,
     namespaced_tool_name,
+    resolve_mcp_call,
 )
 from strix.tools.mcp import client as mcp_client
 
@@ -93,6 +97,48 @@ class ErroringMCPServer(FakeMCPServer):
         self.calls.append((tool_name, arguments))
         return CallToolResult(
             content=[TextContent(type="text", text=f"boom:{tool_name}")],
+            isError=True,
+        )
+
+
+class MultiBlockErrorServer(FakeMCPServer):
+    """An errored call whose serialized output is a list (multiple content blocks)."""
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
+        self.calls.append((tool_name, arguments))
+        return CallToolResult(
+            content=[
+                TextContent(type="text", text="first"),
+                TextContent(type="text", text="second"),
+            ],
+            isError=True,
+        )
+
+
+class StructuredErrorServer(FakeMCPServer):
+    """An errored call whose serialized output is a string (structured content)."""
+
+    def __init__(self, name: str, tools: list[MCPTool]) -> None:
+        super().__init__(name, tools)
+        # The base server sets this in __init__, so flip it on the instance to
+        # take the structured-content serialization branch.
+        self.use_structured_content = True
+
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any] | None,
+        meta: dict[str, Any] | None = None,
+    ) -> CallToolResult:
+        self.calls.append((tool_name, arguments))
+        return CallToolResult(
+            content=[TextContent(type="text", text="ignored")],
+            structuredContent={"error": "boom"},
             isError=True,
         )
 
@@ -766,3 +812,212 @@ def test_projected_describe_mcp_names_the_connection_with_no_tool() -> None:
     # the connection rather than as a call to a tool on it.
     assert describe["mcp_connection"] == "local_fs"
     assert describe["mcp_tool"] == ""
+
+
+# --- source-agnostic attach --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_attach_populates_registry_with_provider_and_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = FakeMCPServer("db", [_mcp_tool("query")])
+    monkeypatch.setattr(mcp_client, "_build_server", lambda _config: server)
+
+    def transform(_label: str, structured: Any) -> Any:
+        return {"kept": structured}
+
+    registry = McpRegistry()
+    request = McpConnectionRequest(
+        config=_config("db", ["query"]),
+        provider="supabase",
+        result_transform=transform,
+        purpose="Customer DB",
+    )
+
+    connections = await attach_mcp_requests([request], registry)
+
+    assert [(c.name, c.tool_count) for c in connections] == [("db", 1)]
+    entry = registry.get("db")
+    assert entry is not None
+    assert entry.server is server
+    assert entry.provider == "supabase"
+    assert entry.purpose == "Customer DB"
+    assert entry.result_transform is transform
+
+
+@pytest.mark.asyncio
+async def test_attach_bare_request_matches_the_command_line_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The command-line path wraps each config in a bare request (no provider or
+    # transform); purpose then falls back to the connection's notes.
+    server = FakeMCPServer("db", [_mcp_tool("query")])
+    monkeypatch.setattr(mcp_client, "_build_server", lambda _config: server)
+    config = McpConnectionConfig(
+        name="db",
+        url="https://mcp.example.com",
+        notes="Staging analytics DB; read-only.",
+        allowed_tools=["query"],
+    )
+
+    registry = McpRegistry()
+    await attach_mcp_requests([McpConnectionRequest(config=config)], registry)
+
+    entry = registry.get("db")
+    assert entry is not None
+    assert entry.provider is None
+    assert entry.result_transform is None
+    assert entry.purpose == "Staging analytics DB; read-only."
+
+
+@pytest.mark.asyncio
+async def test_attach_is_fail_open_and_skips_a_failed_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    good = FakeMCPServer("good", [_mcp_tool("t")])
+
+    class _Failing(FakeMCPServer):
+        async def connect(self) -> None:
+            raise RuntimeError("cannot reach server")
+
+    servers = {"good": good, "bad": _Failing("bad", [_mcp_tool("t")])}
+    monkeypatch.setattr(mcp_client, "_build_server", lambda config: servers[config.name])
+
+    registry = McpRegistry()
+    connections = await attach_mcp_requests(
+        [
+            McpConnectionRequest(config=_config("bad", ["t"]), provider="p"),
+            McpConnectionRequest(config=_config("good", ["t"]), provider="q"),
+        ],
+        registry,
+    )
+
+    # The failed connection is skipped without raising; the good one is attached.
+    assert [c.name for c in connections] == ["good"]
+    assert registry.names() == ["good"]
+    assert registry.get("good") is not None
+    assert registry.get("bad") is None
+
+
+# --- provider on the registry ------------------------------------------------
+
+
+def test_provider_round_trips_through_registry_and_summaries() -> None:
+    registry = McpRegistry()
+    registry.add(
+        name="db",
+        server=FakeMCPServer("db", []),
+        purpose="Customer DB",
+        tool_count=1,
+        provider="supabase",
+    )
+    registry.add(name="fs", server=FakeMCPServer("fs", []), purpose=None, tool_count=0)
+
+    assert registry.get("db").provider == "supabase"  # type: ignore[union-attr]
+    # A connection with no provider defaults to None, not an error.
+    assert registry.get("fs").provider is None  # type: ignore[union-attr]
+
+    summaries = {s.name: s.provider for s in registry.summaries()}
+    assert summaries == {"db": "supabase", "fs": None}
+
+
+# --- resolve_mcp_call --------------------------------------------------------
+
+
+def test_resolve_call_mcp_reads_connection_tool_and_provider() -> None:
+    registry = McpRegistry()
+    registry.add(name="db", server=FakeMCPServer("db", []), tool_count=1, provider="supabase")
+
+    info = resolve_mcp_call(
+        "call_mcp", {"connection": "db", "tool": "query", "arguments": {}}, registry
+    )
+
+    assert info == McpCallInfo(connection="db", tool="query", provider="supabase")
+
+
+def test_resolve_describe_mcp_has_an_empty_tool() -> None:
+    registry = McpRegistry()
+    registry.add(name="db", server=FakeMCPServer("db", []), tool_count=1, provider="supabase")
+
+    info = resolve_mcp_call("describe_mcp", {"connection": "db"}, registry)
+
+    assert info == McpCallInfo(connection="db", tool="", provider="supabase")
+
+
+def test_resolve_without_a_registry_omits_the_provider() -> None:
+    # The OSS viewer projects calls with no live registry: it still reads the
+    # connection and tool, and simply leaves the provider out.
+    info = resolve_mcp_call("call_mcp", {"connection": "db", "tool": "query"})
+
+    assert info == McpCallInfo(connection="db", tool="query", provider=None)
+
+
+def test_resolve_returns_none_for_a_non_dispatch_tool() -> None:
+    assert resolve_mcp_call("exec_command", {"cmd": "ls"}) is None
+
+
+def test_resolve_returns_none_for_an_unknown_connection_with_a_registry() -> None:
+    registry = McpRegistry()
+    registry.add(name="db", server=FakeMCPServer("db", []), tool_count=1)
+
+    assert resolve_mcp_call("call_mcp", {"connection": "nope", "tool": "x"}, registry) is None
+
+
+def test_resolve_returns_none_when_the_connection_is_missing_from_args() -> None:
+    assert resolve_mcp_call("call_mcp", {"tool": "query"}) is None
+
+
+# --- errored results surface as failed regardless of output shape ------------
+
+
+@pytest.mark.asyncio
+async def test_errored_dict_output_carries_success_false() -> None:
+    registry = McpRegistry()
+    server = ErroringMCPServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry), json.dumps({"connection": "fs", "tool": "read_file"})
+    )
+
+    # A single content block is a dict; success:False rides alongside and the
+    # SDK's ToolOutput projection drops it before the agent, so the agent keeps
+    # the exact error content.
+    assert out == {"type": "text", "text": "boom:read_file", "success": False}
+
+
+@pytest.mark.asyncio
+async def test_errored_list_output_is_wrapped_with_success_false() -> None:
+    registry = McpRegistry()
+    server = MultiBlockErrorServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry), json.dumps({"connection": "fs", "tool": "read_file"})
+    )
+
+    # Multiple content blocks serialize to a list, which has no top-level dict to
+    # carry the flag, so it is wrapped under ``content`` with success:False.
+    assert out == {
+        "success": False,
+        "content": [
+            {"type": "text", "text": "first"},
+            {"type": "text", "text": "second"},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+async def test_errored_structured_output_is_wrapped_with_success_false() -> None:
+    registry = McpRegistry()
+    server = StructuredErrorServer("fs", [_mcp_tool("read_file")])
+    registry.add(name="fs", server=server, tool_count=1)
+
+    out = await call_mcp.on_invoke_tool(
+        _ctx(registry), json.dumps({"connection": "fs", "tool": "read_file"})
+    )
+
+    # Structured content serializes to a JSON string; it too is wrapped under
+    # ``content`` so the failure flag has a top-level dict to ride on.
+    assert out == {"success": False, "content": json.dumps({"error": "boom"})}

@@ -14,11 +14,7 @@ from agents.tool import ToolOutputImage
 
 from strix.core.paths import runtime_state_dir
 from strix.interface.tui.history import load_session_history
-
-
-# Every MCP call the model makes goes through one of two dispatch tools, so a
-# call to a user's server is recognised by the tool's name alone.
-_MCP_DISPATCH_TOOLS = frozenset({"call_mcp", "describe_mcp"})
+from strix.tools.mcp import resolve_mcp_call
 
 
 class TuiLiveView:
@@ -35,26 +31,19 @@ class TuiLiveView:
     def _mcp_tool_fields(self, tool_name: str, args: dict[str, Any]) -> dict[str, str]:
         """Event fields naming the MCP server a tool call went out to, if any.
 
-        Every MCP call the model makes goes through one of two dispatch tools:
-        ``call_mcp`` runs a named tool on a connection, and ``describe_mcp``
-        inspects a connection's catalog. The connection, and for ``call_mcp`` the
-        server's own name for the tool, ride in the call's arguments rather than
-        in the tool name, so they are read from there. Empty for every other tool,
-        which is what tells an interface to render the call as one of its own
-        rather than as a call to a user's server.
+        Delegates to the shared engine resolver :func:`resolve_mcp_call` so a
+        dispatch call is attributed the same way here and in strix-pro's tracer.
+        The projection has no live registry, so it passes none: it reports the
+        connection and tool read from the call's arguments and leaves the provider
+        out. Empty for every other tool, which is what tells an interface to
+        render the call as one of its own rather than as a call to a user's
+        server. ``describe_mcp`` resolves with an empty tool, which tells both
+        renderers to present the row as inspecting the connection itself.
         """
-        if tool_name not in _MCP_DISPATCH_TOOLS:
+        info = resolve_mcp_call(tool_name, args)
+        if info is None:
             return {}
-        connection = args.get("connection")
-        if not isinstance(connection, str) or not connection:
-            return {}
-        # describe_mcp has no underlying tool; an empty tool tells both renderers
-        # to present the row as inspecting the connection itself.
-        tool = args.get("tool") if tool_name == "call_mcp" else ""
-        return {
-            "mcp_connection": connection,
-            "mcp_tool": tool if isinstance(tool, str) else "",
-        }
+        return {"mcp_connection": info.connection, "mcp_tool": info.tool}
 
     def set_user_instruction(self, text: str | None, *, timestamp: str | None = None) -> None:
         """Open the transcript with what the user asked for.
