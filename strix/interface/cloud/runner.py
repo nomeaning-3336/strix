@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -219,6 +220,15 @@ def _build_parser(group: str, verb_label: str, cmd: Cmd) -> argparse.ArgumentPar
             action="store_true",
             help="Print the payment challenge instead of paying it.",
         )
+        parser.add_argument(
+            "--payment-method",
+            default=None,
+            metavar="PM_ID",
+            help=(
+                "Stripe payment method for the card payment, for example pm_card_visa "
+                "in test mode. Defaults to MPPX_STRIPE_PAYMENT_METHOD."
+            ),
+        )
     return parser
 
 
@@ -362,8 +372,17 @@ def _topup(
 
     url = f"{http.app_url()}/api/v1/billing/topup"
     auth_header = f"Authorization: Bearer {http.api_token(token)}"
-    result = subprocess.run(  # noqa: S603
-        [npx, "--yes", "mppx", url, "-J", json.dumps(body), "-H", auth_header],
-        check=False,
+    command = [npx, "--yes", "mppx", url, "-J", json.dumps(body), "-H", auth_header]
+    payment_method = getattr(args, "payment_method", None) or os.environ.get(
+        "MPPX_STRIPE_PAYMENT_METHOD"
     )
+    if payment_method:
+        command += ["-M", f"paymentMethod={payment_method}"]
+    elif not os.environ.get("MPPX_ACCOUNT") and not os.environ.get("MPPX_STRIPE_SECRET_KEY"):
+        console.print(
+            "[dim]Tip: card payments need a wallet. Pass --payment-method, or set "
+            "MPPX_STRIPE_SECRET_KEY and MPPX_STRIPE_PAYMENT_METHOD, or create an "
+            "mppx account first with `npx mppx account create`.[/]"
+        )
+    result = subprocess.run(command, check=False)  # noqa: S603
     return http.EXIT_OK if result.returncode == 0 else http.EXIT_PAYMENT

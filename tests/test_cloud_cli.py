@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import shutil
+import subprocess
 import webbrowser
 from typing import TYPE_CHECKING, Any
 
@@ -298,6 +300,28 @@ def test_topup_success_without_payment(monkeypatch: pytest.MonkeyPatch, capsys: 
     code = cloud.run_cloud(["billing", "topup", "--credits", "5", "--json"])
     assert code == 0
     assert json.loads(capsys.readouterr().out) == receipt
+
+
+def test_topup_passes_payment_method_to_wallet(monkeypatch: pytest.MonkeyPatch) -> None:
+    challenge = {"payment_requirements": [{"amount": 500}]}
+    monkeypatch.setattr(
+        http, "request", lambda *_a, **_k: FakeResponse(status_code=402, payload=challenge)
+    )
+    monkeypatch.setattr(http, "api_token", lambda *_a, **_k: "tok")
+    monkeypatch.setattr(shutil, "which", lambda _name: "/usr/bin/npx")
+    commands: list[list[str]] = []
+
+    def fake_run(command: list[str], **_kwargs: Any) -> Any:
+        commands.append(command)
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    code = cloud.run_cloud(
+        ["billing", "topup", "--credits", "5", "--yes", "--payment-method", "pm_card_visa"]
+    )
+    assert code == 0
+    assert "-M" in commands[0]
+    assert "paymentMethod=pm_card_visa" in commands[0]
 
 
 def test_render_json_mode_when_not_a_tty() -> None:
