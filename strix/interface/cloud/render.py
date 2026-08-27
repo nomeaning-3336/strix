@@ -17,6 +17,16 @@ if TYPE_CHECKING:
 _MAX_TABLE_COLUMNS = 8
 _MAX_CELL_LENGTH = 60
 _NARROW_TABLE_WIDTH = 120
+_INTERNAL_COLUMNS = frozenset(
+    {
+        "organization_id",
+        "user_id",
+        "userId",
+        "installation_id",
+        "created_by",
+        "avatarUrl",
+    }
+)
 
 _PREFERRED_KEYS = (
     "name",
@@ -92,6 +102,9 @@ def emit(
     if isinstance(data, str):
         console.print(data)
         return
+    if isinstance(data, dict):
+        _print_detail(console, data)
+        return
     console.print_json(json.dumps(data, default=str))
 
 
@@ -116,6 +129,7 @@ def _print_table(
     omit_columns: frozenset[str] = frozenset(),
     hint: str | None = None,
 ) -> None:
+    omit_columns = omit_columns | _INTERNAL_COLUMNS
     columns: list[str] = [
         key
         for key in _PREFERRED_KEYS
@@ -169,6 +183,28 @@ def _print_cards(
         ]
         prefix = f"[cyan]{index}.[/] " if row_numbers else "[cyan]•[/] "
         console.print(prefix + "  [dim]·[/]  ".join(parts), soft_wrap=False)
+
+
+def _print_detail(console: Console, data: dict[str, Any]) -> None:
+    """Render one API record as a readable field/value view."""
+    keys = [key for key in _PREFERRED_KEYS if key in data and key not in _INTERNAL_COLUMNS]
+    keys.extend(
+        key for key in data if key not in keys and key not in _INTERNAL_COLUMNS
+    )
+    table = Table(show_header=False, show_edge=False, box=None, padding=(0, 2))
+    table.add_column("field", style="bold cyan", no_wrap=True)
+    table.add_column("value", overflow="fold")
+    for key in keys:
+        value = data.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(value, indent=2, default=str)
+        else:
+            rendered = _cell(value)
+        table.add_row(_human_label(key), rendered)
+    console.print(table)
+    console.print("[dim]Use --json for the lossless machine-readable record.[/]")
 
 
 def _human_label(column: str) -> str:

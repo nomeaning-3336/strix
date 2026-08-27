@@ -727,6 +727,36 @@ def test_pr_review_human_list_prioritizes_actionable_fields(
         assert value not in output
 
 
+def test_human_get_prioritizes_details_and_hides_internal_identity_fields(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "id": "review-id",
+                "organization_id": "org-id",
+                "user_id": "user-id",
+                "repository_full_name": "usestrix/strix",
+                "pr_number": 1177,
+                "pr_title": "Improve cloud CLI",
+                "verdict": "pass",
+                "findings": [{"severity": "high", "title": "Example"}],
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["pr-reviews", "get", "review-id"]) == 0
+    output = capsys.readouterr().out
+    for value in ("usestrix/strix", "1177", "Improve cloud CLI", "pass", "Example"):
+        assert value in output
+    assert "org-id" not in output
+    assert "user-id" not in output
+    assert "lossless machine-readable" in output
+
+
 def test_workspace_use_accepts_list_number(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
