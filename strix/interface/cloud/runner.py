@@ -118,6 +118,10 @@ def _execute(  # noqa: PLR0912
     source_upload_id: str | None = None
     try:
         if cmd.path == "/scans" and cmd.method == "POST":
+            _set_default_scan_engagement(
+                body,
+                has_local_source=getattr(args, "source", None) is not None,
+            )
             source_bundle = _prepare_scan_source(console, args, as_json=as_json)
             if source_bundle is not None and getattr(args, "dry_run", False):
                 emit(
@@ -183,6 +187,20 @@ def _execute(  # noqa: PLR0912
         hint=("Switch with `strix cloud workspaces use NUMBER`." if workspace_list else None),
     )
     return http.EXIT_OK
+
+
+def _set_default_scan_engagement(
+    body: dict[str, Any], *, has_local_source: bool = False
+) -> None:
+    """Infer the scan type from its targets when the caller did not choose one."""
+    if body.get("engagement_type"):
+        return
+    if body.get("internal_targets"):
+        body["engagement_type"] = "internal_infra"
+    elif body.get("domain_ids"):
+        body["engagement_type"] = "live_test"
+    elif has_local_source or body.get("repository_ids") or body.get("upload_ids"):
+        body["engagement_type"] = "code_review"
 
 
 def _handoff_link(

@@ -196,8 +196,60 @@ def test_source_upload_is_completed_and_attached_to_scan(
     assert payload["scan"]["scan_id"] == "scan-1"
     assert payload["source"]["files"] == ["app.py"]
     scan_call = next(call for call in calls if call[1] == "/scans")
-    assert scan_call[2]["body"]["upload_ids"] == ["upload-1"]
+    assert scan_call[2]["body"] == {
+        "engagement_type": "code_review",
+        "upload_ids": ["upload-1"],
+    }
     assert uploaded_path is not None and not uploaded_path.exists()
+
+
+def test_source_upload_with_domain_is_a_live_test(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    (tmp_path / "app.py").write_text("print('safe')\n", encoding="utf-8")
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    def fake_request(method: str, path: str, **kwargs: Any) -> FakeResponse:
+        calls.append((method, path, kwargs))
+        if path == "/uploads/request":
+            return FakeResponse(
+                {
+                    "upload_id": "upload-1",
+                    "signed_url": "https://storage.test/object",
+                    "token": "signed",
+                }
+            )
+        if path == "/uploads/complete":
+            return FakeResponse({"id": "upload-1"})
+        if path == "/scans":
+            return FakeResponse({"scan_id": "scan-1", "status": "pending"})
+        raise AssertionError(path)
+
+    monkeypatch.setattr(http, "request", fake_request)
+    monkeypatch.setattr(http, "upload_file", lambda *_args, **_kwargs: None)
+
+    assert (
+        cloud.run_cloud(
+            [
+                "scans",
+                "start",
+                "--source",
+                str(tmp_path),
+                "--domain-ids",
+                "domain-1",
+                "--yes",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    scan_call = next(call for call in calls if call[1] == "/scans")
+    assert scan_call[2]["body"] == {
+        "engagement_type": "live_test",
+        "domain_ids": ["domain-1"],
+        "upload_ids": ["upload-1"],
+    }
+    assert json.loads(capsys.readouterr().out)["scan"]["scan_id"] == "scan-1"
 
 
 def test_failed_scan_deletes_completed_source_upload(
