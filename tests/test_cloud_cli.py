@@ -485,6 +485,65 @@ def test_knowledge_policy_flags_use_the_api_field_names(
     }
 
 
+def test_pr_review_start_sends_provider_installation_and_pull_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
+        seen["body"] = kwargs.get("body")
+        return FakeResponse(payload={"review_id": "review-1", "status": "pending"})
+
+    monkeypatch.setattr(http, "request", fake_request)
+    code = cloud.run_cloud(
+        [
+            "pr-reviews",
+            "start",
+            "--provider",
+            "github",
+            "--installation-id",
+            "123",
+            "--repository-full-name",
+            "org/app",
+            "--pr-number",
+            "42",
+            "--json",
+        ]
+    )
+    assert code == 0
+    assert seen["body"] == {
+        "provider": "github",
+        "installation_id": 123,
+        "repository_full_name": "org/app",
+        "pr_number": 42,
+    }
+
+
+def test_llm_settings_uses_kebab_case_flag_for_camel_case_api_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
+        seen["body"] = kwargs.get("body")
+        return FakeResponse(payload={"ok": True})
+
+    monkeypatch.setattr(http, "request", fake_request)
+    code = cloud.run_cloud(
+        [
+            "llm-settings",
+            "update",
+            "--model-configs",
+            "[]",
+            "--assignments",
+            "{}",
+            "--json",
+        ]
+    )
+    assert code == 0
+    assert seen["body"] == {"modelConfigs": [], "assignments": {}}
+
+
 def test_integration_install_url_does_not_open_browser(
     monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:

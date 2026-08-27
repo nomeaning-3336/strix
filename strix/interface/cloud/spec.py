@@ -476,6 +476,8 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "/pr-reviews/start",
             "Start a PR review.",
             body=(
+                P("provider", required=True, help="Git provider: github, gitlab, or bitbucket."),
+                P("installation_id", "int", required=True, help="Provider installation ID."),
                 P("repository_full_name", required=True, help="Repository full name."),
                 P("pr_number", "int", required=True, help="Pull request number."),
             ),
@@ -816,7 +818,13 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "/llm-settings",
             "Update the LLM settings.",
             body=(
-                P("modelConfigs", "json", required=True, help="JSON list of model configurations."),
+                P(
+                    "modelConfigs",
+                    "json",
+                    required=True,
+                    flag="model-configs",
+                    help="JSON list of model configurations.",
+                ),
                 P("assignments", "json", required=True, help="JSON map of model assignments."),
             ),
         ),
