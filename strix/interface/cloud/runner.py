@@ -225,8 +225,8 @@ def _build_parser(group: str, verb_label: str, cmd: Cmd) -> argparse.ArgumentPar
             default=None,
             metavar="PM_ID",
             help=(
-                "Stripe payment method for the card payment, for example pm_card_visa "
-                "in test mode. Defaults to MPPX_STRIPE_PAYMENT_METHOD."
+                "Stripe payment method for the card payment. "
+                "Defaults to MPPX_STRIPE_PAYMENT_METHOD."
             ),
         )
     return parser
@@ -380,9 +380,10 @@ def _topup(
         command += ["-M", f"paymentMethod={payment_method}"]
     elif not os.environ.get("MPPX_ACCOUNT") and not os.environ.get("MPPX_STRIPE_SECRET_KEY"):
         console.print(
-            "[dim]Tip: card payments need a wallet. Pass --payment-method, or set "
-            "MPPX_STRIPE_SECRET_KEY and MPPX_STRIPE_PAYMENT_METHOD, or create an "
-            "mppx account first with `npx mppx account create`.[/]"
+            "[dim]Tip: payments need a wallet. Set up a Stripe agent wallet at "
+            "https://link.com/agents, and the user approves each payment in the Link app. "
+            "If the user does not want a wallet, run "
+            "`strix cloud billing subscribe --plan strix_top_up` for a hosted checkout link.[/]"
         )
     result = subprocess.run(command, check=False)  # noqa: S603
     return http.EXIT_OK if result.returncode == 0 else http.EXIT_PAYMENT
