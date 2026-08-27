@@ -98,6 +98,12 @@ def parsed(response: requests.Response) -> Any:
 def check(response: requests.Response) -> Any:
     data = parsed(response)
     if response.ok:
+        content_type = response.headers.get("content-type", "").lower()
+        if "application/json" not in content_type:
+            raise CloudError(
+                "the server returned a non-JSON response. Check STRIX_APP_URL and preview "
+                "access, then retry."
+            )
         return data
     detail = ""
     if isinstance(data, dict):

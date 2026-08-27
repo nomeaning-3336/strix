@@ -42,6 +42,8 @@ def run_cloud(argv: list[str]) -> int:
         return 0
 
     group, rest = argv[0], argv[1:]
+    if group == "workspace":
+        group = "workspaces"
     if group in ("login", "logout", "whoami"):
         return _run_session(console, group, rest)
     if group == "credits":

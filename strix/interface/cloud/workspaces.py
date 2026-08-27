@@ -25,7 +25,11 @@ def run_workspace_use(argv: list[str]) -> int:
         prog="strix cloud workspaces use",
         description="Switch the stored API token to another workspace.",
     )
-    parser.add_argument("workspace", metavar="WORKSPACE", help="Workspace ID or exact name.")
+    parser.add_argument(
+        "workspace",
+        metavar="WORKSPACE",
+        help="Workspace number from `workspaces list`, ID, or exact name.",
+    )
     parser.add_argument(
         "--scopes",
         nargs="+",
@@ -119,6 +123,14 @@ def _find_workspace(selector: str, *, token: str | None) -> dict[str, Any]:
     if not workspaces:
         raise http.CloudError("no workspaces found for this account.")
     wanted = selector.strip()
+    if wanted.isdigit():
+        index = int(wanted)
+        if 1 <= index <= len(workspaces):
+            return workspaces[index - 1]
+        raise http.CloudError(
+            f"workspace number must be between 1 and {len(workspaces)}. "
+            "Run `strix cloud workspaces` to see the numbered list."
+        )
     by_id = [w for w in workspaces if w.get("id") == wanted]
     if by_id:
         return by_id[0]
@@ -126,7 +138,16 @@ def _find_workspace(selector: str, *, token: str | None) -> dict[str, Any]:
     if len(by_name) == 1:
         return by_name[0]
     if len(by_name) > 1:
-        ids = ", ".join(str(w.get("id")) for w in by_name)
-        raise http.CloudError(f"multiple workspaces are named {wanted!r}. Use an ID: {ids}")
-    names = ", ".join(str(w.get("name")) for w in workspaces)
+        numbers = ", ".join(
+            str(index)
+            for index, workspace in enumerate(workspaces, start=1)
+            if workspace in by_name
+        )
+        raise http.CloudError(
+            f"multiple workspaces are named {wanted!r}. Use its list number: {numbers}"
+        )
+    names = ", ".join(
+        f"{index}: {workspace.get('name')}"
+        for index, workspace in enumerate(workspaces, start=1)
+    )
     raise http.CloudError(f"no workspace matches {wanted!r}. Your workspaces: {names}")

@@ -129,7 +129,19 @@ def _execute(
             result = _wait(console, cmd, result, token=token, as_json=as_json)
     if cmd.link:
         return _handoff_link(console, cmd, args, result, as_json=as_json)
-    emit(console, result, as_json=as_json)
+    workspace_list = cmd.method == "GET" and cmd.path == "/workspaces"
+    emit(
+        console,
+        result,
+        as_json=as_json,
+        row_numbers=workspace_list,
+        omit_columns=frozenset({"id"}) if workspace_list else frozenset(),
+        hint=(
+            "Switch with `strix cloud workspaces use NUMBER`."
+            if workspace_list
+            else None
+        ),
+    )
     return http.EXIT_OK
 
 

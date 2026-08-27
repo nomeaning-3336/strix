@@ -60,6 +60,22 @@ def test_unknown_verb_returns_usage_error() -> None:
     assert cloud.run_cloud(["scans", "bogus"]) == 2
 
 
+def test_successful_html_response_is_reported_without_dumping_html(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(text="<!DOCTYPE html><html>preview gate</html>"),
+    )
+
+    assert cloud.run_cloud(["workspaces", "list", "--json"]) == 1
+    output = capsys.readouterr().out
+    assert "non-JSON response" in output
+    assert "STRIX_APP_URL" in output
+    assert "<!DOCTYPE" not in output
+
+
 def test_group_without_verb_lists_verbs() -> None:
     assert cloud.run_cloud(["scans"]) == 0
 
@@ -634,6 +650,118 @@ def test_group_help_lists_all_verbs_instead_of_default_verb_help(capsys: Any) ->
     assert "list" in output
     assert "create" in output
     assert "use" in output
+
+
+def test_workspace_alias_routes_to_workspaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, str] = {}
+
+    def fake_request(method: str, path: str, **_kwargs: Any) -> FakeResponse:
+        seen.update(method=method, path=path)
+        return FakeResponse(payload={"workspaces": []})
+
+    monkeypatch.setattr(http, "request", fake_request)
+    assert cloud.run_cloud(["workspace", "list", "--json"]) == 0
+    assert seen == {"method": "GET", "path": "/workspaces"}
+
+
+def test_workspace_human_list_is_numbered_and_hides_ids(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "workspaces": [
+                    {"id": "org_secret", "name": "Team One", "role": "admin", "current": True}
+                ]
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["workspaces", "list"]) == 0
+    output = capsys.readouterr().out
+    assert "1." in output
+    assert "Team One" in output
+    assert "yes" in output
+    assert "org_secret" not in output
+    assert "workspaces use NUMBER" in output
+
+
+def test_pr_review_human_list_prioritizes_actionable_fields(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "items": [
+                    {
+                        "id": "review-id",
+                        "organization_id": "org-id",
+                        "user_id": "user-id",
+                        "installation_id": 42,
+                        "repository_full_name": "usestrix/strix",
+                        "pr_number": 1177,
+                        "pr_title": "Improve cloud CLI",
+                        "head_branch": "feature",
+                        "base_branch": "main",
+                        "verdict": "pass",
+                        "status": "posted",
+                        "findings_count": 0,
+                    }
+                ],
+                "meta": {"total": 1},
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["pr-reviews", "list"]) == 0
+    output = capsys.readouterr().out
+    for value in ("usestrix/strix", "1177", "Improve cloud CLI", "feature", "main", "pass"):
+        assert value in output
+    for value in ("org-id", "user-id", "installation_id"):
+        assert value not in output
+
+
+def test_workspace_use_accepts_list_number(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    auth_path = tmp_path / "platform-auth.json"
+    monkeypatch.setattr(platform_cli, "AUTH_PATH", auth_path)
+    monkeypatch.setattr(workspaces, "AUTH_PATH", auth_path)
+    platform_cli.save_record(
+        {"api_token": "old", "scopes": ["organizations:read", "tokens:write"]}
+    )
+    called_paths: list[str] = []
+
+    def fake_request(_method: str, path: str, **_kwargs: Any) -> FakeResponse:
+        called_paths.append(path)
+        if path == "/workspaces":
+            return FakeResponse(
+                payload={
+                    "workspaces": [
+                        {"id": "org_1", "name": "One"},
+                        {"id": "org_2", "name": "Two"},
+                    ]
+                }
+            )
+        return FakeResponse(
+            status_code=201,
+            payload={
+                "api_token": "new",
+                "organization_id": "org_2",
+                "organization_name": "Two",
+                "scopes": ["organizations:read", "tokens:write"],
+            },
+        )
+
+    monkeypatch.setattr(http, "request", fake_request)
+    assert cloud.run_cloud(["workspaces", "use", "2", "--json"]) == 0
+    assert called_paths == ["/workspaces", "/workspaces/org_2/token"]
 
 
 def test_logout_help_does_not_remove_stored_auth(
