@@ -28,6 +28,9 @@ def test_cloud_leaf_flag_candidates_come_from_command_spec() -> None:
     assert "--domain-ids" in candidates
     assert "--json" in candidates
     assert "--wait" in candidates
+    assert "--source" in candidates
+    assert "--dry-run" in candidates
+    assert "--include-hidden" in candidates
 
 
 def test_boolean_completion_includes_positive_and_negative_flags() -> None:

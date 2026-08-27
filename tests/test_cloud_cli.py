@@ -621,9 +621,7 @@ def test_workspaces_use_switches_stored_token(
     code = cloud.run_cloud(["workspaces", "use", "team one", "--json"])
     assert code == 0
     assert calls == [("GET", "/workspaces"), ("POST", "/workspaces/org_1/token")]
-    assert token_body == {
-        "scopes": ["scans:read", "organizations:read", "tokens:write"]
-    }
+    assert token_body == {"scopes": ["scans:read", "organizations:read", "tokens:write"]}
     record = platform_cli.read_record()
     assert record is not None
     assert record["api_token"] == "new-token"
@@ -757,15 +755,11 @@ def test_human_get_prioritizes_details_and_hides_internal_identity_fields(
     assert "lossless machine-readable" in output
 
 
-def test_workspace_use_accepts_list_number(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_workspace_use_accepts_list_number(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     auth_path = tmp_path / "platform-auth.json"
     monkeypatch.setattr(platform_cli, "AUTH_PATH", auth_path)
     monkeypatch.setattr(workspaces, "AUTH_PATH", auth_path)
-    platform_cli.save_record(
-        {"api_token": "old", "scopes": ["organizations:read", "tokens:write"]}
-    )
+    platform_cli.save_record({"api_token": "old", "scopes": ["organizations:read", "tokens:write"]})
     called_paths: list[str] = []
 
     def fake_request(_method: str, path: str, **_kwargs: Any) -> FakeResponse:

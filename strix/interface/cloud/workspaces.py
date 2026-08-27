@@ -36,8 +36,7 @@ def run_workspace_use(argv: list[str]) -> int:
         metavar="SCOPE",
         default=None,
         help=(
-            "API scopes for the new token. Without this option, preserve the stored token's "
-            "scopes."
+            "API scopes for the new token. Without this option, preserve the stored token's scopes."
         ),
     )
     parser.add_argument("--json", action="store_true", help="Print the raw JSON response.")
@@ -71,8 +70,10 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
         body["scopes"] = args.scopes
     elif args.token is None:
         stored_scopes = record.get("scopes")
-        if isinstance(stored_scopes, list) and stored_scopes and all(
-            isinstance(scope, str) for scope in stored_scopes
+        if (
+            isinstance(stored_scopes, list)
+            and stored_scopes
+            and all(isinstance(scope, str) for scope in stored_scopes)
         ):
             body["scopes"] = stored_scopes
     minted = http.check(
@@ -147,7 +148,6 @@ def _find_workspace(selector: str, *, token: str | None) -> dict[str, Any]:
             f"multiple workspaces are named {wanted!r}. Use its list number: {numbers}"
         )
     names = ", ".join(
-        f"{index}: {workspace.get('name')}"
-        for index, workspace in enumerate(workspaces, start=1)
+        f"{index}: {workspace.get('name')}" for index, workspace in enumerate(workspaces, start=1)
     )
     raise http.CloudError(f"no workspace matches {wanted!r}. Your workspaces: {names}")

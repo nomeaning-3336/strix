@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import os
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import requests
 
 from strix.config import load_settings
 from strix.interface.platform_cli import read_record
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 _DEFAULT_TIMEOUT_S = 120
@@ -83,6 +87,33 @@ def request(
     except requests.RequestException as exc:
         raise CloudError(f"could not reach {app_url()}: {exc}") from exc
     return response
+
+
+def upload_file(signed_url: str, upload_token: str, path: Path) -> None:
+    """Stream a file to a platform-issued storage URL."""
+    try:
+        with path.open("rb") as stream:
+            response = requests.put(
+                signed_url,
+                data=stream,
+                headers={
+                    "Authorization": f"Bearer {upload_token}",
+                    "Content-Type": "application/zip",
+                },
+                timeout=_timeout_s,
+            )
+    except (OSError, requests.RequestException) as exc:
+        raise CloudError(f"source upload failed: {exc}") from exc
+    if not response.ok:
+        detail = ""
+        try:
+            payload = response.json()
+            if isinstance(payload, dict):
+                fields = cast("dict[str, Any]", payload)
+                detail = str(fields.get("message") or fields.get("error") or "")
+        except ValueError:
+            pass
+        raise CloudError(detail or f"source upload failed (HTTP {response.status_code})")
 
 
 def parsed(response: requests.Response) -> Any:

@@ -108,6 +108,19 @@ def _command_flags(cmd: Cmd) -> tuple[str, ...]:
         flags.append("--wait")
     if cmd.path == "/billing/topup":
         flags.extend(("--yes", "--no-pay", "--payment-method"))
+    if cmd.path == "/scans" and cmd.method == "POST":
+        flags.extend(
+            (
+                "--source",
+                "--dry-run",
+                "--yes",
+                "--show-files",
+                "--exclude",
+                "--include-hidden",
+                "--include-sensitive",
+                "--include-archives",
+            )
+        )
     if cmd.path == "/billing/auto-topup" and cmd.method == "PUT":
         flags.append("--no-monthly-cap")
     return tuple(dict.fromkeys(flags))

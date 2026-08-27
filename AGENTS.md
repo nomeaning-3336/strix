@@ -41,11 +41,14 @@ Target-specific workflows built on the same engine:
   strix cloud login --scopes scans:read scans:write billing:read   # device sign-in, no prompts
   strix cloud domains add --domain example.com --asset-type web_app
   strix cloud scans start --engagement-type live_test --domain-ids <uuid> --wait
+  strix cloud scans start --source . --dry-run --show-files --json  # review local upload
+  strix cloud scans start --source . --yes --engagement-type code_review --wait
   strix cloud vulns list --severity critical
   strix cloud billing topup --credits 20   # buy credits when a scan returns exit code 5
   ```
   - Account setup runs from the CLI too: `strix cloud workspaces list|create|use`, `strix cloud org members invite`, `strix cloud billing subscribe --plan strix_cloud`, `strix cloud billing portal`, `strix cloud integrations install github`, and `strix cloud domains verify <id>`. The last four end at a person: the command prints a link or a DNS record for the user to open or add, and it never completes the payment, the installation, or the DNS change for them.
   - Every REST operation has a `strix cloud <resource> <verb>` command. Run `strix cloud` to list them. Output is JSON when stdout is not a terminal (or with `--json`), and there are no prompts without a TTY. Exit codes: `0` success, `1` error, `2` usage, `4` auth or plan limit, `5` payment required. `--token` or `STRIX_API_TOKEN` overrides the stored sign-in. `--data` adds extra request fields as JSON, and accepts `@file` or `-` for standard input.
+  - Local source uploads require `uploads:write`. Review with `scans start --source . --dry-run --show-files --json`, then approve with `--yes`. Git ignores, hidden files, `.git`, symlinks, dependency/build output, secret-like filenames, and nested archives are excluded by default; `.strixignore` and `--exclude` narrow the manifest further.
   - The REST API works directly too: https://docs.app.strix.ai (OpenAPI: https://docs.app.strix.ai/openapi.json).
 
 - CLI docs index for LLMs: https://docs.strix.ai/llms.txt (full: https://docs.strix.ai/llms-full.txt). Managed API docs for LLMs: https://docs.app.strix.ai/llms.txt.

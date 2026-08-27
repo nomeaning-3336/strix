@@ -15,6 +15,7 @@ import subprocess
 import sys
 import time
 import webbrowser
+from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import quote
@@ -23,6 +24,7 @@ from rich.console import Console
 
 from strix.interface.cloud import http
 from strix.interface.cloud.render import emit, json_mode
+from strix.interface.cloud.source_upload import SourceBundle, prepare_source, remove_bundle
 from strix.interface.cloud.spec import DEFAULT_VERBS, SPEC, Cmd, P
 
 
@@ -99,7 +101,7 @@ def run(group: str, verb_label: str, cmd: Cmd, argv: list[str]) -> int:
         return exc.exit_code
 
 
-def _execute(
+def _execute(  # noqa: PLR0912
     console: Console,
     cmd: Cmd,
     args: argparse.Namespace,
@@ -112,21 +114,63 @@ def _execute(
 ) -> int:
     if cmd.path == "/billing/topup":
         return _topup(console, args, body, as_json=as_json, token=token)
-    response = http.request(
-        cmd.method,
-        path,
-        token=token,
-        query=query or None,
-        body=body if cmd.method in ("POST", "PUT", "PATCH") else None,
-    )
+    source_bundle: SourceBundle | None = None
+    source_upload_id: str | None = None
+    try:
+        if cmd.path == "/scans" and cmd.method == "POST":
+            source_bundle = _prepare_scan_source(console, args, as_json=as_json)
+            if source_bundle is not None and getattr(args, "dry_run", False):
+                emit(
+                    console,
+                    {
+                        "source": source_bundle.summary(
+                            show_files=getattr(args, "show_files", False)
+                        )
+                    },
+                    as_json=as_json,
+                )
+                return http.EXIT_OK
+            if source_bundle is not None:
+                source_upload_id = _upload_scan_source(source_bundle, token=token)
+                existing = body.get("upload_ids")
+                body["upload_ids"] = [
+                    *(existing if isinstance(existing, list) else []),
+                    source_upload_id,
+                ]
+
+        response = http.request(
+            cmd.method,
+            path,
+            token=token,
+            query=query or None,
+            body=body if cmd.method in ("POST", "PUT", "PATCH") else None,
+        )
+    except BaseException:
+        if source_upload_id is not None:
+            _delete_upload(source_upload_id, token=token)
+        raise
+    finally:
+        if source_bundle is not None:
+            remove_bundle(source_bundle)
     if cmd.binary:
         return _emit_binary(console, response, getattr(args, "output", None))
-    result = http.check(response)
+    try:
+        result = http.check(response)
+    except BaseException:
+        if source_upload_id is not None:
+            _delete_upload(source_upload_id, token=token)
+        raise
     if getattr(args, "wait", False):
         if cmd.wait_self:
             result = _poll(console, path, token=token, as_json=as_json)
         elif cmd.wait_path:
             result = _wait(console, cmd, result, token=token, as_json=as_json)
+    if source_bundle is not None:
+        result = {
+            "source": source_bundle.summary(show_files=getattr(args, "show_files", False)),
+            "upload_id": source_upload_id,
+            "scan": result,
+        }
     if cmd.link:
         return _handoff_link(console, cmd, args, result, as_json=as_json)
     workspace_list = cmd.method == "GET" and cmd.path == "/workspaces"
@@ -136,11 +180,7 @@ def _execute(
         as_json=as_json,
         row_numbers=workspace_list,
         omit_columns=frozenset({"id"}) if workspace_list else frozenset(),
-        hint=(
-            "Switch with `strix cloud workspaces use NUMBER`."
-            if workspace_list
-            else None
-        ),
+        hint=("Switch with `strix cloud workspaces use NUMBER`." if workspace_list else None),
     )
     return http.EXIT_OK
 
@@ -149,7 +189,8 @@ def _handoff_link(
     console: Console, cmd: Cmd, args: argparse.Namespace, result: Any, *, as_json: bool
 ) -> int:
     """Print a hosted URL a person must open, and open the browser when interactive."""
-    url = result.get(cmd.link) if isinstance(result, dict) else None
+    fields = cast("dict[str, Any]", result) if isinstance(result, dict) else {}
+    url = fields.get(cmd.link) if cmd.link else None
     if not isinstance(url, str) or not url:
         emit(console, result, as_json=as_json)
         return http.EXIT_OK
@@ -243,7 +284,149 @@ def _build_parser(group: str, verb_label: str, cmd: Cmd) -> argparse.ArgumentPar
                 "Defaults to MPPX_STRIPE_PAYMENT_METHOD."
             ),
         )
+    if cmd.path == "/scans" and cmd.method == "POST":
+        parser.add_argument(
+            "--source",
+            default=None,
+            metavar="DIRECTORY",
+            help="Package a local directory, upload it, and attach it to this scan.",
+        )
+        parser.add_argument(
+            "--dry-run",
+            action="store_true",
+            help="Build and print the source manifest without uploading or starting a scan.",
+        )
+        parser.add_argument(
+            "--yes",
+            action="store_true",
+            help="Approve the displayed source upload without an interactive prompt.",
+        )
+        parser.add_argument(
+            "--show-files",
+            action="store_true",
+            help="Include every selected relative path in the source manifest.",
+        )
+        parser.add_argument(
+            "--exclude",
+            action="append",
+            default=[],
+            metavar="GLOB",
+            help="Exclude a path glob from the upload. May be repeated.",
+        )
+        parser.add_argument(
+            "--include-hidden",
+            action="store_true",
+            help="Include hidden files except .git and secret-like filenames.",
+        )
+        parser.add_argument(
+            "--include-sensitive",
+            action="store_true",
+            help="Include files with secret-like names. Use only after reviewing --dry-run.",
+        )
+        parser.add_argument(
+            "--include-archives",
+            action="store_true",
+            help="Include nested archives. Use only when they are required source inputs.",
+        )
     return parser
+
+
+def _prepare_scan_source(
+    console: Console, args: argparse.Namespace, *, as_json: bool
+) -> SourceBundle | None:
+    source = getattr(args, "source", None)
+    source_flags = (
+        "dry_run",
+        "show_files",
+        "include_hidden",
+        "include_sensitive",
+        "include_archives",
+    )
+    if source is None:
+        if any(getattr(args, name, False) for name in source_flags) or getattr(args, "exclude", []):
+            raise http.CloudError("source upload options require --source DIRECTORY.")
+        return None
+    bundle = prepare_source(
+        source,
+        include_hidden=bool(getattr(args, "include_hidden", False)),
+        include_sensitive=bool(getattr(args, "include_sensitive", False)),
+        include_archives=bool(getattr(args, "include_archives", False)),
+        exclude=cast("list[str]", getattr(args, "exclude", [])),
+    )
+    if getattr(args, "dry_run", False):
+        return bundle
+    if getattr(args, "yes", False):
+        return bundle
+    if as_json or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        remove_bundle(bundle)
+        raise http.CloudError(
+            "source upload requires explicit approval in non-interactive mode. "
+            "Review with --dry-run --show-files, then rerun with --yes."
+        )
+    console.print(
+        "[bold]Local source upload[/]\n"
+        f"  {len(bundle.manifest.files):,} file(s), "
+        f"{_format_bytes(bundle.manifest.total_bytes)} "
+        f"({_format_bytes(bundle.archive_bytes)} compressed)\n"
+        f"  {sum(bundle.manifest.excluded.values()):,} path(s) excluded\n"
+        "  Only the selected files will be sent to Strix Cloud."
+    )
+    answer = console.input("Upload this source and start the scan? [y/N]: ").strip().lower()
+    if answer not in ("y", "yes"):
+        remove_bundle(bundle)
+        raise http.CloudError("source upload cancelled.")
+    return bundle
+
+
+def _upload_scan_source(bundle: SourceBundle, *, token: str | None) -> str:
+    file_name = f"strix-source-{bundle.archive_sha256[:12]}.zip"
+    requested = http.check(
+        http.request(
+            "POST",
+            "/uploads/request",
+            token=token,
+            body={
+                "file_name": file_name,
+                "file_size": bundle.archive_bytes,
+                "category": "repository",
+            },
+        )
+    )
+    if not isinstance(requested, dict):
+        raise http.CloudError("the platform returned an invalid source upload response.")
+    fields = cast("dict[str, Any]", requested)
+    upload_id = fields.get("upload_id")
+    signed_url = fields.get("signed_url")
+    upload_token = fields.get("token")
+    if not all(isinstance(value, str) and value for value in (upload_id, signed_url, upload_token)):
+        raise http.CloudError("the platform did not return complete source upload credentials.")
+    try:
+        http.upload_file(cast("str", signed_url), cast("str", upload_token), bundle.archive_path)
+        http.check(
+            http.request(
+                "POST",
+                "/uploads/complete",
+                token=token,
+                body={"upload_id": upload_id},
+            )
+        )
+    except BaseException:
+        _delete_upload(cast("str", upload_id), token=token)
+        raise
+    return cast("str", upload_id)
+
+
+def _delete_upload(upload_id: str, *, token: str | None) -> None:
+    with suppress(http.CloudError):
+        http.request("DELETE", f"/uploads/{quote(upload_id, safe='')}", token=token)
+
+
+def _format_bytes(value: int) -> str:
+    if value < 1024:
+        return f"{value} B"
+    if value < 1024 * 1024:
+        return f"{value / 1024:.1f} KB"
+    return f"{value / (1024 * 1024):.1f} MB"
 
 
 def _add_option(parser: argparse.ArgumentParser, param: P) -> None:
@@ -342,10 +525,11 @@ def _poll(console: Console, path: str, *, token: str | None, as_json: bool) -> A
     """Poll a GET path until its status is final. Returns the last response."""
     while True:
         time.sleep(_WAIT_POLL_S)
-        current = http.check(http.request("GET", path, token=token))
-        status = str(current.get("status", "")) if isinstance(current, dict) else ""
+        current: Any = http.check(http.request("GET", path, token=token))
+        fields = cast("dict[str, Any]", current) if isinstance(current, dict) else {}
+        status = str(fields.get("status", ""))
         if status.lower() in _TERMINAL_STATUSES:
-            return current
+            return fields if isinstance(current, dict) else current
         if not as_json:
             console.print(f"[dim]  status: {status or 'unknown'}[/]")
 

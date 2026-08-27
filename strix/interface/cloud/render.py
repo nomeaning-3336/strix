@@ -188,9 +188,7 @@ def _print_cards(
 def _print_detail(console: Console, data: dict[str, Any]) -> None:
     """Render one API record as a readable field/value view."""
     keys = [key for key in _PREFERRED_KEYS if key in data and key not in _INTERNAL_COLUMNS]
-    keys.extend(
-        key for key in data if key not in keys and key not in _INTERNAL_COLUMNS
-    )
+    keys.extend(key for key in data if key not in keys and key not in _INTERNAL_COLUMNS)
     table = Table(show_header=False, show_edge=False, box=None, padding=(0, 2))
     table.add_column("field", style="bold cyan", no_wrap=True)
     table.add_column("value", overflow="fold")
