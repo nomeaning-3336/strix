@@ -350,7 +350,7 @@ Workspaces and account setup also work from the terminal:
 strix cloud workspaces list                   # your workspaces
 strix cloud workspaces create --name "My Team"
 strix cloud workspaces use "My Team"          # store a token for another workspace
-strix cloud billing subscribe --plan strix_pro   # opens the hosted checkout page
+strix cloud billing subscribe --plan strix_cloud # opens the hosted checkout page
 strix cloud billing portal                    # opens the billing portal
 strix cloud integrations install github       # opens the app installation page
 strix cloud domains verify <domain-id>        # prints the DNS record to add

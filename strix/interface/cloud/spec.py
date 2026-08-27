@@ -511,7 +511,7 @@ SPEC: dict[str, dict[str, Cmd]] = {
                     "product",
                     required=True,
                     flag="plan",
-                    help="Product to buy, for example strix_pro, strix_cloud, or strix_top_up.",
+                    help="Product to buy: strix_cloud, strix_startup, or strix_top_up.",
                 ),
                 P("success_url", help="Page to open after the payment."),
             ),
@@ -655,9 +655,11 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "/knowledge/policies",
             "Add a knowledge policy.",
             body=(
-                P("key", required=True, help="Policy key."),
-                P("content", help="Policy content."),
-                P("enabled", "bool", help="Turn the policy on or off."),
+                P("policy_key", required=True, flag="key", help="Policy key."),
+                P("policy_value", required=True, flag="content", help="Policy content."),
+                P("policy_type", help="Policy type. Defaults to constraint."),
+                P("is_active", "bool", flag="enabled", help="Turn the policy on or off."),
+                P("metadata", "json", help="JSON metadata for the policy."),
             ),
         ),
         "policies delete": Cmd(

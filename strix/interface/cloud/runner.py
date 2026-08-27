@@ -17,6 +17,7 @@ import time
 import webbrowser
 from pathlib import Path
 from typing import Any, cast
+from urllib.parse import quote
 
 from rich.console import Console
 
@@ -77,7 +78,8 @@ def run(group: str, verb_label: str, cmd: Cmd, argv: list[str]) -> int:
 
     path = cmd.path
     for name in _PLACEHOLDER.findall(cmd.path):
-        path = path.replace("{" + name + "}", str(getattr(args, _dest(name))))
+        value = quote(str(getattr(args, _dest(name))), safe="")
+        path = path.replace("{" + name + "}", value)
 
     as_json = json_mode(flag=bool(getattr(args, "json", False)))
     token = getattr(args, "token", None)
@@ -351,7 +353,11 @@ def _topup(
 
     challenge = http.parsed(response)
     if getattr(args, "no_pay", False):
-        emit(console, challenge, as_json=as_json)
+        emit(
+            console,
+            {"error": "Payment required", "challenge": challenge},
+            as_json=as_json,
+        )
         return http.EXIT_PAYMENT
 
     npx = shutil.which("npx")

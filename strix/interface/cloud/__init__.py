@@ -42,7 +42,11 @@ def run_cloud(argv: list[str]) -> int:
 
     group, rest = argv[0], argv[1:]
     if group in ("login", "logout", "whoami"):
-        session_argv = {"login": rest, "logout": ["logout"], "whoami": ["status"]}
+        session_argv = {
+            "login": rest,
+            "logout": ["logout"],
+            "whoami": ["status", *rest],
+        }
         return run_login(session_argv[group])
     if group == "credits":
         group, rest = "billing", ["credits", *rest]

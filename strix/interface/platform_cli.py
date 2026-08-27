@@ -87,7 +87,7 @@ def run_login(argv: list[str]) -> int:
         console.print(_LOGIN_USAGE)
         return 0
     if subcommand == "status":
-        return _status(console)
+        return _status(console, argv[1:])
     if subcommand == "logout":
         return _logout(console)
     return _login(console, argv)
@@ -468,14 +468,35 @@ def _print_success(console: Console, record: dict[str, Any]) -> None:
     )
 
 
-def _status(console: Console) -> int:
+def _status(console: Console, argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(prog="strix cloud whoami")
+    parser.add_argument("--json", action="store_true", help="Print the session as JSON.")
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exc:
+        return exc.code if isinstance(exc.code, int) else 2
+
     record = read_record()
     if record is None:
+        if args.json:
+            sys.stdout.write(json.dumps({"signed_in": False, "error": "Not signed in"}) + "\n")
+            return 1
         console.print("[yellow]Not signed in.[/] Run [bold]strix cloud login[/] to sign in.")
         return 1
     email = record.get("email", "unknown")
     organization = record.get("organization_name") or record.get("organization_id", "")
     expires_at = record.get("expires_at", "")
+    if args.json:
+        payload = {
+            "signed_in": True,
+            "email": email,
+            "organization_id": record.get("organization_id"),
+            "organization_name": record.get("organization_name"),
+            "scopes": record.get("scopes", []),
+            "expires_at": expires_at or None,
+        }
+        sys.stdout.write(json.dumps(payload, indent=2, default=str) + "\n")
+        return 0
     console.print(f"[green]Signed in[/] as [bold]{email}[/]")
     if organization:
         console.print(f"  Workspace: {organization}")

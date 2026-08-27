@@ -102,6 +102,21 @@ def test_placeholder_substitution(monkeypatch: pytest.MonkeyPatch, capsys: Any) 
     assert json.loads(capsys.readouterr().out) == {"id": "abc"}
 
 
+def test_placeholder_substitution_percent_encodes_path_segments(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_request(_method: str, path: str, **_kwargs: Any) -> FakeResponse:
+        seen["path"] = path
+        return FakeResponse(payload={"entries": []})
+
+    monkeypatch.setattr(http, "request", fake_request)
+    code = cloud.run_cloud(["knowledge", "repos", "entries", "usestrix/.github", "--json"])
+    assert code == 0
+    assert seen["path"] == "/knowledge/repos/usestrix%2F.github/entries"
+
+
 def test_query_and_body_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
@@ -282,6 +297,35 @@ def test_credits_alias_routes_to_billing(monkeypatch: pytest.MonkeyPatch) -> Non
     assert seen["path"] == "/billing/credits"
 
 
+def test_whoami_json_is_machine_readable_and_omits_the_token(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any
+) -> None:
+    monkeypatch.delenv("STRIX_API_TOKEN", raising=False)
+    monkeypatch.setattr(platform_cli, "AUTH_PATH", tmp_path / "platform-auth.json")
+    platform_cli.save_record(
+        {
+            "api_token": "strix_pat_secret",
+            "email": "agent@example.test",
+            "organization_id": "org_1",
+            "organization_name": "Example",
+            "scopes": ["scans:read"],
+            "expires_at": "2026-09-01T00:00:00Z",
+        }
+    )
+
+    assert cloud.run_cloud(["whoami", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "signed_in": True,
+        "email": "agent@example.test",
+        "organization_id": "org_1",
+        "organization_name": "Example",
+        "scopes": ["scans:read"],
+        "expires_at": "2026-09-01T00:00:00Z",
+    }
+    assert "api_token" not in payload
+
+
 def test_topup_no_pay_prints_challenge(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
     challenge = {"payment_requirements": [{"amount": 500}]}
     monkeypatch.setattr(
@@ -289,7 +333,10 @@ def test_topup_no_pay_prints_challenge(monkeypatch: pytest.MonkeyPatch, capsys: 
     )
     code = cloud.run_cloud(["billing", "topup", "--credits", "5", "--no-pay", "--json"])
     assert code == http.EXIT_PAYMENT
-    assert json.loads(capsys.readouterr().out) == challenge
+    assert json.loads(capsys.readouterr().out) == {
+        "error": "Payment required",
+        "challenge": challenge,
+    }
 
 
 def test_topup_success_without_payment(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
@@ -393,12 +440,49 @@ def test_billing_subscribe_prints_checkout_url(
         return FakeResponse(status_code=200, payload={"checkout_url": "https://pay.test/session"})
 
     monkeypatch.setattr(http, "request", fake_request)
-    code = cloud.run_cloud(["billing", "subscribe", "--plan", "strix_pro", "--json"])
+    code = cloud.run_cloud(["billing", "subscribe", "--plan", "strix_cloud", "--json"])
     assert code == 0
     assert seen["method"] == "POST"
     assert seen["path"] == "/billing/checkout"
-    assert seen["body"] == {"product": "strix_pro"}
+    assert seen["body"] == {"product": "strix_cloud"}
     assert "https://pay.test/session" in capsys.readouterr().out
+
+
+def test_knowledge_policy_flags_use_the_api_field_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
+        seen["body"] = kwargs.get("body")
+        return FakeResponse(payload={"success": True})
+
+    monkeypatch.setattr(http, "request", fake_request)
+    code = cloud.run_cloud(
+        [
+            "knowledge",
+            "policies",
+            "add",
+            "--key",
+            "no-production-data",
+            "--content",
+            "Never test production data.",
+            "--policy-type",
+            "constraint",
+            "--no-enabled",
+            "--metadata",
+            '{"owner":"security"}',
+            "--json",
+        ]
+    )
+    assert code == 0
+    assert seen["body"] == {
+        "policy_key": "no-production-data",
+        "policy_value": "Never test production data.",
+        "policy_type": "constraint",
+        "is_active": False,
+        "metadata": {"owner": "security"},
+    }
 
 
 def test_integration_install_url_does_not_open_browser(
