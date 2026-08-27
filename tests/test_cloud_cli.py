@@ -571,17 +571,26 @@ def test_workspaces_use_switches_stored_token(
     auth_path = tmp_path / "platform-auth.json"
     monkeypatch.setattr(platform_cli, "AUTH_PATH", auth_path)
     monkeypatch.setattr(workspaces, "AUTH_PATH", auth_path)
-    platform_cli.save_record({"api_token": "old", "email": "a@b.test"})
+    platform_cli.save_record(
+        {
+            "api_token": "old",
+            "email": "a@b.test",
+            "scopes": ["scans:read", "organizations:read", "tokens:write"],
+        }
+    )
 
     calls: list[tuple[str, str]] = []
+    token_body: dict[str, Any] | None = None
 
     def fake_request(method: str, path: str, **kwargs: Any) -> FakeResponse:
+        nonlocal token_body
         calls.append((method, path))
         if path == "/workspaces":
             return FakeResponse(
                 status_code=200,
                 payload={"workspaces": [{"id": "org_1", "name": "Team One", "role": "admin"}]},
             )
+        token_body = kwargs.get("body")
         return FakeResponse(
             status_code=201,
             payload={
@@ -596,6 +605,9 @@ def test_workspaces_use_switches_stored_token(
     code = cloud.run_cloud(["workspaces", "use", "team one", "--json"])
     assert code == 0
     assert calls == [("GET", "/workspaces"), ("POST", "/workspaces/org_1/token")]
+    assert token_body == {
+        "scopes": ["scans:read", "organizations:read", "tokens:write"]
+    }
     record = platform_cli.read_record()
     assert record is not None
     assert record["api_token"] == "new-token"
@@ -613,3 +625,12 @@ def test_workspaces_use_reports_unknown_workspace(monkeypatch: pytest.MonkeyPatc
         ),
     )
     assert cloud.run_cloud(["workspaces", "use", "missing", "--json"]) == 1
+
+
+def test_group_help_lists_all_verbs_instead_of_default_verb_help(capsys: Any) -> None:
+    assert cloud.run_cloud(["workspaces", "-h"]) == 0
+    output = capsys.readouterr().out
+    assert "workspaces verbs" in output
+    assert "list" in output
+    assert "create" in output
+    assert "use" in output

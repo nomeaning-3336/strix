@@ -27,7 +27,8 @@ _USAGE_HEADER = """[bold]Usage:[/] strix cloud <command> [arguments]
 [bold]Resource commands:[/]"""
 
 _USAGE_FOOTER = """
-Run [bold]strix cloud <command>[/] without a verb to list its verbs.
+Run [bold]strix cloud <command> help[/] to list its verbs. Common read-only
+commands may also run their default verb when no verb is given.
 Every command accepts [bold]--json[/] and [bold]--token[/]. Write commands
 accept [bold]--data[/] with a JSON object of extra request fields.
 API reference: https://docs.app.strix.ai"""
@@ -57,7 +58,8 @@ def run_cloud(argv: list[str]) -> int:
         console.print(f"[red]Unknown command:[/] {group}")
         _print_usage(console)
         return 2
-    resolved = resolve(group, rest)
+    group_help = bool(rest and rest[0] in ("-h", "--help", "help"))
+    resolved = None if group_help else resolve(group, rest)
     if resolved is None:
         _print_verbs(console, group)
         return 0 if not rest or rest[0] in ("-h", "--help", "help") else 2

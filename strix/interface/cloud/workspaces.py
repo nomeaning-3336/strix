@@ -31,7 +31,10 @@ def run_workspace_use(argv: list[str]) -> int:
         nargs="+",
         metavar="SCOPE",
         default=None,
-        help="API scopes for the new token. Without this option the server grants the defaults.",
+        help=(
+            "API scopes for the new token. Without this option, preserve the stored token's "
+            "scopes."
+        ),
     )
     parser.add_argument("--json", action="store_true", help="Print the raw JSON response.")
     parser.add_argument("--token", default=None, help="API token override.")
@@ -58,9 +61,16 @@ def run_workspace_use(argv: list[str]) -> int:
 
 def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
     workspace = _find_workspace(args.workspace, token=args.token)
+    record = read_record() or {}
     body: dict[str, Any] = {}
     if args.scopes:
         body["scopes"] = args.scopes
+    elif args.token is None:
+        stored_scopes = record.get("scopes")
+        if isinstance(stored_scopes, list) and stored_scopes and all(
+            isinstance(scope, str) for scope in stored_scopes
+        ):
+            body["scopes"] = stored_scopes
     minted = http.check(
         http.request(
             "POST",
@@ -73,7 +83,6 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
         raise http.CloudError("the platform did not return a token.")
     minted_record = cast("dict[str, Any]", minted)
 
-    record = read_record() or {}
     record.update(
         {
             "api_token": minted_record["api_token"],
