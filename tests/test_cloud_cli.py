@@ -320,6 +320,8 @@ def test_topup_passes_payment_method_to_wallet(monkeypatch: pytest.MonkeyPatch) 
         ["billing", "topup", "--credits", "5", "--yes", "--payment-method", "pm_card_visa"]
     )
     assert code == 0
+    assert "X-Strix-Authorization: Bearer tok" in commands[0]
+    assert "Authorization: Bearer tok" not in commands[0]
     assert "-M" in commands[0]
     assert "paymentMethod=pm_card_visa" in commands[0]
 

@@ -371,8 +371,17 @@ def _topup(
             return http.EXIT_PAYMENT
 
     url = f"{http.app_url()}/api/v1/billing/topup"
-    auth_header = f"Authorization: Bearer {http.api_token(token)}"
-    command = [npx, "--yes", "mppx", url, "-J", json.dumps(body), "-H", auth_header]
+    auth_header = f"X-Strix-Authorization: Bearer {http.api_token(token)}"
+    command = [
+        npx,
+        "--yes",
+        "mppx",
+        url,
+        "-J",
+        json.dumps(body),
+        "-H",
+        auth_header,
+    ]
     payment_method = getattr(args, "payment_method", None) or os.environ.get(
         "MPPX_STRIPE_PAYMENT_METHOD"
     )
