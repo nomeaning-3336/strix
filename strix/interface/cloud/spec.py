@@ -649,12 +649,6 @@ SPEC: dict[str, dict[str, Cmd]] = {
             ),
         ),
         "delete": Cmd("DELETE", "/knowledge/{documentId}", "Delete a knowledge document."),
-        "query": Cmd(
-            "GET",
-            "/knowledge/query",
-            "Query the knowledge base.",
-            query=(P("q", help="Query text."), P("limit", "int")),
-        ),
         "policies": Cmd("GET", "/knowledge/policies", "List knowledge policies."),
         "policies add": Cmd(
             "POST",
@@ -677,13 +671,6 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "PATCH",
             "/knowledge/repos/{repo}/profile",
             "Update the knowledge profile of a repository. Use --data for the fields.",
-        ),
-        "settings": Cmd("GET", "/knowledge/settings", "Get the knowledge settings."),
-        "settings update": Cmd(
-            "PATCH",
-            "/knowledge/settings",
-            "Update the knowledge settings.",
-            body=(P("org_knowledge_enabled", "bool", help="Use organization knowledge in scans."),),
         ),
     },
     "org": {
