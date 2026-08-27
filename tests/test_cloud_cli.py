@@ -634,3 +634,26 @@ def test_group_help_lists_all_verbs_instead_of_default_verb_help(capsys: Any) ->
     assert "list" in output
     assert "create" in output
     assert "use" in output
+
+
+def test_logout_help_does_not_remove_stored_auth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any
+) -> None:
+    auth_path = tmp_path / "platform-auth.json"
+    monkeypatch.setattr(platform_cli, "AUTH_PATH", auth_path)
+    platform_cli.save_record({"api_token": "keep-me"})
+
+    assert cloud.run_cloud(["logout", "--help"]) == 0
+    assert platform_cli.read_record() == {"api_token": "keep-me"}
+    assert "Usage:" in capsys.readouterr().out
+
+
+def test_logout_rejects_unknown_arguments_without_removing_stored_auth(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    auth_path = tmp_path / "platform-auth.json"
+    monkeypatch.setattr(platform_cli, "AUTH_PATH", auth_path)
+    platform_cli.save_record({"api_token": "keep-me"})
+
+    assert cloud.run_cloud(["logout", "--bogus"]) == 2
+    assert platform_cli.read_record() == {"api_token": "keep-me"}

@@ -43,12 +43,7 @@ def run_cloud(argv: list[str]) -> int:
 
     group, rest = argv[0], argv[1:]
     if group in ("login", "logout", "whoami"):
-        session_argv = {
-            "login": rest,
-            "logout": ["logout"],
-            "whoami": ["status", *rest],
-        }
-        return run_login(session_argv[group])
+        return _run_session(console, group, rest)
     if group == "credits":
         group, rest = "billing", ["credits", *rest]
     if group == "workspaces" and rest and rest[0] == "use":
@@ -66,6 +61,20 @@ def run_cloud(argv: list[str]) -> int:
     cmd, remaining = resolved
     verb_label = " ".join(rest[: len(rest) - len(remaining)]) or DEFAULT_VERBS.get(group, "")
     return run(group, verb_label, cmd, remaining)
+
+
+def _run_session(console: Console, group: str, rest: list[str]) -> int:
+    if rest and rest[0] in ("-h", "--help", "help"):
+        return run_login(["--help"])
+    if group == "logout" and rest:
+        console.print("[red]Unknown argument for logout:[/] " + " ".join(rest))
+        return 2
+    session_argv = {
+        "login": rest,
+        "logout": ["logout"],
+        "whoami": ["status", *rest],
+    }
+    return run_login(session_argv[group])
 
 
 def _print_usage(console: Console) -> None:
