@@ -431,6 +431,12 @@ def main() -> None:
 
         sys.exit(run_auth(sys.argv[2:]))
 
+    # Generate native shell completion scripts before scan argument parsing.
+    if len(sys.argv) > 1 and sys.argv[1] in ("completion", "completions"):
+        from strix.interface.completions import run_completions
+
+        sys.exit(run_completions(sys.argv[2:]))
+
     # `strix cloud …` drives the managed platform (app.strix.ai) and exits;
     # it needs no target, Docker, or scan setup.
     if len(sys.argv) > 1 and sys.argv[1] == "cloud":
