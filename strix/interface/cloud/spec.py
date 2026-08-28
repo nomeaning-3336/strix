@@ -710,7 +710,13 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/chat/{chatId}/files/download",
             "Download one file of a chat session.",
-            query=(P("path", required=True, help="File path inside the session."),),
+            query=(
+                P(
+                    "path",
+                    required=True,
+                    help="Relative path in the session, or an absolute path under /workspace.",
+                ),
+            ),
             binary=True,
         ),
         "files archive": Cmd(

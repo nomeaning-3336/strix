@@ -1272,6 +1272,12 @@ def test_corrected_help_distinguishes_inboxes_reports_and_self_hosted_commands()
     assert "triaged" not in vulnerability_update["status"]
     assert "false_positive" not in vulnerability_update["status"]
 
+    chat_download = {
+        param.name: param.help for param in SPEC["chat"]["files download"].query
+    }
+    assert "Relative path" in chat_download["path"]
+    assert "/workspace" in chat_download["path"]
+
     report = {param.name: param.help for param in SPEC["scans"]["report"].query}
     assert "Report content" in report["format"]
     assert "file type" in report["type"]
