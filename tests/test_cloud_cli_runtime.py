@@ -1026,7 +1026,7 @@ def test_source_upload_rejects_untrusted_destinations_before_reading_file(
     [
         (
             "https://app.strix.ai",
-            "https://project-ref.supabase.co/storage/v1/object/upload/sign/bucket/file",
+            "https://project-ref.supabase.co/storage/v1/object/upload/sign/bucket/file?token=signed%2Fvalue",
         ),
         (
             "https://strix.corp.internal",

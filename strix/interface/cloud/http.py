@@ -201,7 +201,14 @@ def upload_file(signed_url: str, upload_token: str, path: Path) -> None:
 
 def _validate_upload_url(signed_url: str) -> None:
     """Allow uploads only to the trusted app origin or managed Supabase storage."""
-    target = _parse_origin_url(signed_url, label="source upload URL")
+    # Supabase signed upload URLs carry their signature in the query string.
+    # Keep every origin/path restriction below, but allow that opaque query on
+    # this one platform-issued URL type.
+    target = _parse_origin_url(
+        signed_url,
+        label="source upload URL",
+        allow_query=True,
+    )
     if not target.path.startswith(_STORAGE_PATH_PREFIX):
         raise CloudError("source upload refused a URL outside the storage API")
 
@@ -226,7 +233,12 @@ def _validate_upload_url(signed_url: str) -> None:
     )
 
 
-def _parse_origin_url(value: str, *, label: str) -> SplitResult:
+def _parse_origin_url(
+    value: str,
+    *,
+    label: str,
+    allow_query: bool = False,
+) -> SplitResult:
     try:
         parsed = urlsplit(value)
         port = parsed.port
@@ -238,7 +250,7 @@ def _parse_origin_url(value: str, *, label: str) -> SplitResult:
         or not hostname
         or parsed.username is not None
         or parsed.password is not None
-        or parsed.query
+        or (parsed.query and not allow_query)
         or parsed.fragment
         or "\\" in value
         or any(character.isspace() for character in value)
