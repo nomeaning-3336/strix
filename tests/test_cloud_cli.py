@@ -1264,6 +1264,14 @@ def test_corrected_help_distinguishes_inboxes_reports_and_self_hosted_commands()
         assert "magic_link" in parameters["mfa_method"]
         assert " or email." not in parameters["mfa_method"]
 
+    vulnerability_update = {
+        param.name: param.help for param in SPEC["vulns"]["update"].body
+    }
+    assert "in_progress" in vulnerability_update["status"]
+    assert "not_affected" in vulnerability_update["status"]
+    assert "triaged" not in vulnerability_update["status"]
+    assert "false_positive" not in vulnerability_update["status"]
+
     report = {param.name: param.help for param in SPEC["scans"]["report"].query}
     assert "Report content" in report["format"]
     assert "file type" in report["type"]

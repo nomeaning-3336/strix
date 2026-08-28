@@ -296,7 +296,13 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "/vulnerabilities/{vulnerabilityId}",
             "Update the status or severity of a vulnerability.",
             body=(
-                P("status", help="New status, for example triaged or false_positive."),
+                P(
+                    "status",
+                    help=(
+                        "New status: open, in_progress, snoozed, fixed, ignored, or "
+                        "not_affected."
+                    ),
+                ),
                 P("note", help="Note that explains the change."),
                 P("severity", help="New severity."),
                 P("severity_reason", help="Reason for the severity change."),
