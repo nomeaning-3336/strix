@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 import requests
+from rich.console import Console
 
 from strix.interface import cloud, platform_cli
 from strix.interface.cloud import billing, http, payment_proxy, render, runner, workspaces
@@ -81,8 +82,21 @@ def test_successful_html_response_is_reported_without_dumping_html(
     assert "<!DOCTYPE" not in output
 
 
-def test_group_without_verb_lists_verbs() -> None:
-    assert cloud.run_cloud(["scans"]) == 0
+def test_successful_malformed_json_response_is_rejected(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    response = FakeResponse(text="accepted")
+    response.headers = {"content-type": "application/json"}
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: response)
+
+    assert cloud.run_cloud(["workspaces", "list", "--json"]) == 1
+    output = capsys.readouterr().out
+    assert "malformed JSON" in output
+    assert "accepted" not in output
+
+
+def test_group_without_safe_read_default_lists_verbs() -> None:
+    assert cloud.run_cloud(["uploads"]) == 0
 
 
 def test_resolve_prefers_two_word_verbs() -> None:
@@ -99,6 +113,41 @@ def test_resolve_default_verb() -> None:
     assert resolved is not None
     cmd, remaining = resolved
     assert cmd.method == "GET"
+    assert remaining == []
+
+
+@pytest.mark.parametrize(
+    ("group", "verb"),
+    [
+        ("scans", "list"),
+        ("vulns", "list"),
+        ("domains", "list"),
+        ("repos", "list"),
+        ("schedules", "list"),
+        ("pr-reviews", "list"),
+        ("billing", "credits"),
+        ("chat", "list"),
+        ("knowledge", "list"),
+        ("org", "get"),
+        ("integrations", "list"),
+        ("connectors", "list"),
+        ("webhooks", "list"),
+        ("analytics", "overview"),
+        ("audit", "list"),
+        ("costs", "overview"),
+        ("llm-settings", "get"),
+        ("settings", "notifications"),
+        ("license", "show"),
+        ("tokens", "list"),
+        ("supply-chain", "summary"),
+        ("workspaces", "list"),
+    ],
+)
+def test_read_groups_have_safe_defaults(group: str, verb: str) -> None:
+    resolved = runner.resolve(group, [])
+    assert resolved is not None
+    command, remaining = resolved
+    assert command is runner.SPEC[group][verb]
     assert remaining == []
 
 
@@ -141,8 +190,10 @@ def test_placeholder_substitution_percent_encodes_path_segments(
 def test_query_and_body_collection(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, Any] = {}
 
-    def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
+    def fake_request(method: str, path: str, **kwargs: Any) -> FakeResponse:
         seen.update(query=kwargs.get("query"), body=kwargs.get("body"))
+        if method == "POST" and path == "/scans":
+            return FakeResponse(payload={"scan_id": "scan-1", "status": "pending"})
         return FakeResponse(payload={"ok": True})
 
     monkeypatch.setattr(http, "request", fake_request)
@@ -172,7 +223,7 @@ def test_data_merges_extra_fields(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
         seen["body"] = kwargs.get("body")
-        return FakeResponse(payload={"ok": True})
+        return FakeResponse(payload={"scan_id": "scan-1", "status": "pending"})
 
     monkeypatch.setattr(http, "request", fake_request)
     code = cloud.run_cloud(
@@ -264,7 +315,7 @@ def test_data_reads_a_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
     def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
         seen["body"] = kwargs.get("body")
-        return FakeResponse(payload={"ok": True})
+        return FakeResponse(payload={"scan_id": "scan-1", "status": "pending"})
 
     monkeypatch.setattr(http, "request", fake_request)
     request_file = tmp_path / "request.json"
@@ -278,7 +329,7 @@ def test_data_reads_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
 
     def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
         seen["body"] = kwargs.get("body")
-        return FakeResponse(payload={"ok": True})
+        return FakeResponse(payload={"scan_id": "scan-1", "status": "pending"})
 
     monkeypatch.setattr(http, "request", fake_request)
     monkeypatch.setattr("sys.stdin", io.StringIO('{"context": "staging"}'))
@@ -437,6 +488,42 @@ def test_ambiguous_scan_request_warns_before_retry(
     payload = json.loads(capsys.readouterr().out)
     assert payload["launch_outcome_unknown"] is True
     assert "scans list" in payload["error"]
+
+
+@pytest.mark.parametrize("response_payload", [{}, "accepted"])
+def test_malformed_scan_success_is_reported_as_ambiguous(
+    response_payload: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_args, **_kwargs: FakeResponse(payload=response_payload),
+    )
+
+    assert cloud.run_cloud(["scans", "start", "--domain-ids", "d1", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["launch_outcome_unknown"] is True
+    assert payload["retry_safe"] is True
+    assert payload["idempotency_key"]
+    assert "scans list" in payload["error"]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["scans", "rerun", "scan-1", "--wait", "--json"],
+        ["vulns", "retest", "vuln-1", "--wait", "--json"],
+    ],
+)
+def test_waitable_scan_mutation_requires_an_operation_id(
+    command: list[str], monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: FakeResponse(payload={}))
+
+    assert cloud.run_cloud(command) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["launch_outcome_unknown"] is True
+    assert "successful operation response without an operation ID" in payload["error"]
 
 
 def test_insufficient_credits_exits_with_payment_code(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1351,6 +1438,8 @@ def test_created_id_reads_resource_id() -> None:
     assert runner._created_id({"scan_id": "abc", "status": "pending"}) == "abc"
     assert runner._created_id({"id": "xyz"}) == "xyz"
     assert runner._created_id({"status": "pending"}) is None
+    assert runner._created_id({"scan_id": ""}) is None
+    assert runner._created_id({"id": "   "}) is None
 
 
 def test_billing_subscribe_prints_checkout_url(
@@ -1893,10 +1982,81 @@ def test_pr_review_human_list_prioritizes_actionable_fields(
                         "pr_title": "Improve cloud CLI",
                         "head_branch": "feature",
                         "base_branch": "main",
-                        "verdict": "pass",
+                        "pr_state": "merged",
+                        "verdict": "request_changes",
                         "status": "posted",
-                        "findings_count": 0,
-                        "open_findings_count": 0,
+                        "findings_count": 99,
+                        "open_findings_count": 88,
+                        "findings": {
+                            "total": 7,
+                            "critical": 1,
+                            "high": 2,
+                            "medium": 3,
+                            "low": 1,
+                            "unresolved": {"total": 2},
+                            "snoozed": 1,
+                            "fixed": 4,
+                        },
+                    }
+                ],
+                "meta": {"total": 1},
+                "counts": {
+                    "all": 12,
+                    "open": 3,
+                    "attention": 2,
+                    "merged_open": 1,
+                    "passed": 6,
+                    "running": 1,
+                },
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["pr-reviews", "list", "--include-counts"]) == 0
+    output = capsys.readouterr().out
+    for value in (
+        "usestrix/strix",
+        "1177",
+        "Improve cloud CLI",
+        "merged",
+        "feature",
+        "main",
+        "posted",
+        "request_changes",
+        "2 open / 7 total",
+        "Review counts",
+        "attention 2",
+        "passed 6",
+        "review-id",
+    ):
+        assert value in output
+    for value in ("org-id", "user-id", "installation_id"):
+        assert value not in output
+
+
+@pytest.mark.parametrize("pr_state", ("open", "merged", "closed"))
+def test_pr_review_human_list_shows_pull_request_state(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    pr_state: str,
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "items": [
+                    {
+                        "id": f"{pr_state}-review-id",
+                        "repository_full_name": "usestrix/strix",
+                        "pr_number": 1177,
+                        "pr_title": "Renderer test",
+                        "head_branch": "feature",
+                        "base_branch": "main",
+                        "pr_state": pr_state,
+                        "status": "posted",
+                        "findings": {"total": 0, "unresolved": {"total": 0}},
                     }
                 ],
                 "meta": {"total": 1},
@@ -1905,26 +2065,94 @@ def test_pr_review_human_list_prioritizes_actionable_fields(
     )
 
     assert cloud.run_cloud(["pr-reviews", "list"]) == 0
+    assert f"[{pr_state}]" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("record", "expected_targets"),
+    [
+        (
+            {
+                "id": "internal-scan-id",
+                "title": "Private network review",
+                "engagement_type": "internal_infra",
+                "scan_type": "blackbox",
+                "status": "running",
+                "internal_targets": ["10.24.0.0/16", "db.internal"],
+                "findings": {"total": 0},
+            },
+            ("10.24.0.0/16", "db.internal"),
+        ),
+        (
+            {
+                "id": "upload-scan-id",
+                "title": "Local source review",
+                "engagement_type": "code_review",
+                "scan_type": "whitebox",
+                "status": "pending",
+                "has_code_upload": True,
+                "findings": {"total": 0},
+            },
+            ("uploaded source",),
+        ),
+    ],
+)
+def test_scan_human_list_identifies_internal_and_uploaded_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    record: dict[str, Any],
+    expected_targets: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "items": [record],
+                "meta": {
+                    "page": 1,
+                    "limit": 20,
+                    "total_items": 1,
+                    "total_pages": 1,
+                    "has_next": False,
+                },
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["scans", "list"]) == 0
     output = capsys.readouterr().out
-    for value in (
-        "usestrix/strix",
-        "1177",
-        "Improve cloud CLI",
-        "feature",
-        "main",
-        "posted",
-        "pass",
-        "0 open / 0 total",
-        "review-id",
-    ):
-        assert value in output
-    for value in ("org-id", "user-id", "installation_id"):
-        assert value not in output
+    for target in expected_targets:
+        assert target in output
 
 
 @pytest.mark.parametrize(
     ("command", "payload", "visible", "hidden"),
     [
+        (
+            ["vulns", "list"],
+            {
+                "items": [
+                    {
+                        "id": "vuln-id",
+                        "scan_id": "scan-secret",
+                        "display_number": 17,
+                        "title": "Missing authorization",
+                        "severity": "high",
+                        "status": "open",
+                        "target": None,
+                        "method": "get",
+                        "endpoint": "/api/admin",
+                        "cvss": 8.2,
+                        "finding_type": "dynamic",
+                    }
+                ],
+                "meta": {"total_items": 1},
+            },
+            ("17", "Missing authorization", "GET /api/admin", "vuln-id"),
+            ("scan-secret",),
+        ),
         (
             ["domains", "list"],
             {
@@ -1956,7 +2184,6 @@ def test_pr_review_human_list_prioritizes_actionable_fields(
                         "organization_id": "org-secret",
                         "full_name": "usestrix/strix",
                         "provider": "github",
-                        "default_branch": "main",
                         "pr_review_enabled": True,
                         "tags": ["core"],
                         "business_unit": "product",
@@ -1966,7 +2193,7 @@ def test_pr_review_human_list_prioritizes_actionable_fields(
                 ],
                 "meta": {"total_items": 1},
             },
-            ("usestrix/strix", "github", "main", "yes", "repo-id"),
+            ("usestrix/strix", "github", "yes", "repo-id"),
             ("org-secret", "user-secret", "added by"),
         ),
         (
@@ -1997,7 +2224,7 @@ def test_pr_review_human_list_prioritizes_actionable_fields(
                 "manual",
                 "dashboard/notes/auth.md",
                 "doc-id-that-is-deliberately-long-enough-to-require-a-lossless-copyable-value",
-                "Copyable IDs",
+                "Copyable selectors",
             ),
             ("org-secret", "Long private content"),
         ),
@@ -2067,6 +2294,7 @@ def test_token_human_list_shows_lifecycle_status(
                         "name": "Active CI",
                         "type": "service",
                         "scopes": ["scans:read"],
+                        "rbac_scopes": [],
                         "secret_prefix": "strix_svc_a",
                         "expires_at": "2099-01-01T00:00:00Z",
                         "last_used_at": None,
@@ -2078,6 +2306,7 @@ def test_token_human_list_shows_lifecycle_status(
                         "name": "Old CI",
                         "type": "service",
                         "scopes": ["scans:read"],
+                        "rbac_scopes": [{"type": "tag", "value": "staging"}],
                         "secret_prefix": "strix_svc_r",
                         "expires_at": None,
                         "last_used_at": None,
@@ -2089,6 +2318,7 @@ def test_token_human_list_shows_lifecycle_status(
                         "name": "Expired CI",
                         "type": "service",
                         "scopes": ["scans:read"],
+                        "rbac_scopes": [{"type": "business_unit", "value": "payments"}],
                         "secret_prefix": "strix_svc_e",
                         "expires_at": "2000-01-01T00:00:00Z",
                         "last_used_at": None,
@@ -2101,9 +2331,1146 @@ def test_token_human_list_shows_lifecycle_status(
 
     assert cloud.run_cloud(["tokens", "list"]) == 0
     output = capsys.readouterr().out
-    for value in ("Active CI", "active", "Old CI", "revoked", "Expired CI", "expired"):
+    for value in (
+        "Active CI",
+        "active",
+        "all assets",
+        "Old CI",
+        "revoked",
+        "tag:staging",
+        "Expired CI",
+        "expired",
+        "business_unit:payments",
+        "scans:read",
+    ):
         assert value in output
     assert "org-secret" not in output
+
+
+@pytest.mark.parametrize(
+    ("command", "payload", "visible", "hidden"),
+    [
+        (
+            ["chat", "list"],
+            {
+                "chats": [
+                    {
+                        "id": "chat-id",
+                        "title": "Investigate auth",
+                        "status": "running",
+                        "created_at": "2026-08-27T10:00:00Z",
+                        "last_message_at": "2026-08-27T11:00:00Z",
+                    }
+                ]
+            },
+            ("Investigate auth", "running", "chat-id"),
+            (),
+        ),
+        (
+            ["chat", "files", "chat-id"],
+            {
+                "files": [
+                    {
+                        "path": "/workspace/" + "nested/" * 12 + "report.md",
+                        "size": 42,
+                    }
+                ]
+            },
+            (
+                "/workspace/" + "nested/" * 12 + "report.md",
+                "Copyable selectors",
+                "42",
+            ),
+            (),
+        ),
+        (
+            ["chat", "findings", "chat-id"],
+            {
+                "findings": [
+                    {
+                        "id": "finding-id",
+                        "chat_id": "chat-secret",
+                        "filed_by": "user-secret",
+                        "title": "Broken access control",
+                        "severity": "high",
+                        "status": "open",
+                        "target": None,
+                        "method": "post",
+                        "endpoint": "/admin/users",
+                        "cvss": 8.1,
+                        "filed_at": "2026-08-27T11:00:00Z",
+                        "created_at": "2026-08-27T10:00:00Z",
+                    }
+                ]
+            },
+            ("Broken access control", "high", "POST /admin/users", "finding-id"),
+            ("chat-secret", "user-secret"),
+        ),
+        (
+            ["scans", "agents", "scan-id"],
+            {
+                "scan_id": "scan-secret",
+                "agents": [
+                    {
+                        "id": "agent-id",
+                        "name": "Authorization tester",
+                        "status": "completed",
+                        "task": "Test object ownership",
+                        "parent_id": None,
+                        "created_at": "2026-08-27T10:00:00Z",
+                        "finding_count": 2,
+                    }
+                ],
+            },
+            ("Authorization tester", "completed", "Test object ownership", "agent-id"),
+            ("scan-secret",),
+        ),
+        (
+            ["scans", "retests", "scan-id"],
+            {
+                "runs": [
+                    {
+                        "vulnerability_id": "vuln-id",
+                        "title": "IDOR",
+                        "severity": "high",
+                        "issue_status": "open",
+                        "retest_scan_id": "retest-id",
+                        "retest_status": "running",
+                        "created_at": "2026-08-27T10:00:00Z",
+                    }
+                ],
+                "total": 1,
+                "completed": 0,
+                "running": 1,
+            },
+            ("IDOR", "high", "vuln-id", "retest-id", "0/1 retest(s) complete"),
+            (),
+        ),
+        (
+            ["pr-reviews", "findings", "--include-stats"],
+            {
+                "items": [
+                    {
+                        "id": "pr-finding-id",
+                        "pr_review_id": "review-secret",
+                        "provider": "github",
+                        "repository_full_name": "usestrix/strix",
+                        "pr_number": 1177,
+                        "pr_title": "Improve cloud CLI",
+                        "pr_state": "open",
+                        "title": "Unsafe redirect",
+                        "severity": "medium",
+                        "status": "open",
+                        "created_at": "2026-08-27T10:00:00Z",
+                    }
+                ],
+                "meta": {"total_items": 1},
+                "stats": {
+                    "prs_reviewed": 9,
+                    "issues_found": 1,
+                    "critical_high_found": 1,
+                    "merges_blocked": 2,
+                },
+            },
+            (
+                "usestrix/strix",
+                "1177",
+                "Improve cloud CLI",
+                "Unsafe redirect",
+                "pr-finding-id",
+                "Impact",
+                "prs reviewed 9",
+                "merges blocked 2",
+            ),
+            ("review-secret",),
+        ),
+        (
+            ["vulns", "history", "vuln-id"],
+            [
+                {
+                    "id": "history-secret",
+                    "vulnerability_id": "vuln-secret",
+                    "previous_status": "snoozed",
+                    "new_status": "snoozed",
+                    "previous_severity": "high",
+                    "new_severity": "medium",
+                    "previous_snoozed_until": "2026-09-01T00:00:00Z",
+                    "new_snoozed_until": "2026-09-15T00:00:00Z",
+                    "changed_by": "user-secret",
+                    "note": "Extended pending vendor fix",
+                    "reason": "Vendor ETA changed",
+                    "created_at": "2026-08-27T10:00:00Z",
+                },
+                {
+                    "id": "history-clear-secret",
+                    "vulnerability_id": "vuln-secret",
+                    "previous_status": "snoozed",
+                    "new_status": "snoozed",
+                    "previous_severity": "medium",
+                    "new_severity": "medium",
+                    "previous_snoozed_until": "2026-09-15T00:00:00Z",
+                    "new_snoozed_until": None,
+                    "changed_by": "user-secret",
+                    "note": "Snooze removed",
+                    "reason": "Fix available",
+                    "created_at": "2026-08-28T10:00:00Z",
+                },
+            ],
+            (
+                "snoozed",
+                "high",
+                "medium",
+                "2026-09-01T00:00:00Z",
+                "2026-09-15T00:00:00Z",
+                "cleared",
+                "Extended pending vendor fix",
+                "Vendor ETA changed",
+                "Snooze removed",
+                "Fix available",
+            ),
+            ("history-secret", "history-clear-secret", "vuln-secret", "user-secret"),
+        ),
+        (
+            ["repos", "supply-chain", "findings", "repo-id"],
+            {
+                "snapshot": {"id": "snapshot-secret"},
+                "findings": [
+                    {
+                        "id": "dependency-id",
+                        "repository_id": "repo-secret",
+                        "title": "Vulnerable package",
+                        "package_name": "lodash",
+                        "package_version": "1.0.0",
+                        "severity": "high",
+                        "status": "open",
+                        "fixed_version": "4.17.21",
+                        "manifest_path": "package-lock.json",
+                        "direct": True,
+                    }
+                ],
+            },
+            ("Vulnerable package", "lodash@1.0.0", "4.17.21", "dependency-id"),
+            ("snapshot-secret", "repo-secret"),
+        ),
+        (
+            ["repos", "supply-chain", "components", "repo-id"],
+            {
+                "snapshot": {"id": "snapshot-secret"},
+                "components": [
+                    {
+                        "id": "component-id",
+                        "snapshot_id": "snapshot-secret",
+                        "name": "requests",
+                        "version": "2.0.0",
+                        "ecosystem": "pypi",
+                        "relationship": "direct",
+                        "status": "active",
+                        "highest_open_severity": "critical",
+                        "manifest_path": "requirements.txt",
+                    }
+                ],
+                "meta": {"total": 3, "limit": 1, "offset": 0},
+            },
+            ("requests", "2.0.0", "pypi", "critical", "component-id", "--offset 1"),
+            ("snapshot-secret",),
+        ),
+        (
+            ["domains", "test-users", "inbox", "domain-id", "test-user-id"],
+            {
+                "address": "inbox@security-mail.strix.ai",
+                "messages": [
+                    {
+                        "id": "message-id",
+                        "from": "login@example.com",
+                        "subject": "Your code",
+                        "preview": "Code 123456",
+                        "timestamp": "2026-08-27T10:00:00Z",
+                        "detected_code": "123456",
+                    }
+                ],
+            },
+            (
+                "login@example.com",
+                "Your code",
+                "123456",
+                "message-id",
+                "Inbox: inbox@security-mail.strix.ai",
+            ),
+            (),
+        ),
+        (
+            ["knowledge", "repos", "entries", "usestrix/strix"],
+            {
+                "organization_id": "org-secret",
+                "repo_key": "usestrix/strix",
+                "profile": {"id": "profile-secret", "title": "Profile"},
+                "docs": [
+                    {
+                        "id": "doc-id",
+                        "title": "Auth notes",
+                        "source_type": "system",
+                        "source_id": "repos/usestrix__strix/auth.md",
+                        "tags": [],
+                        "updated_at": "2026-08-27T10:00:00Z",
+                    }
+                ],
+                "insights": [],
+                "policies": [{"id": "policy-secret", "policy_key": "no-prod"}],
+                "stats": {"docs_count": 1},
+            },
+            (
+                "Auth notes",
+                "system",
+                "repos/usestrix__strix/auth.md",
+                "doc-id",
+                "Repository profile: Profile",
+                "1 policy apply",
+            ),
+            ("org-secret", "profile-secret", "policy-secret", "nested field"),
+        ),
+    ],
+)
+def test_nonstandard_human_list_envelopes_are_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    command: list[str],
+    payload: Any,
+    visible: tuple[str, ...],
+    hidden: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: FakeResponse(payload=payload))
+
+    assert cloud.run_cloud(command) == 0
+    output = capsys.readouterr().out
+    for value in visible:
+        assert value in output
+    for value in hidden:
+        assert value not in output
+
+
+def test_chat_credentials_human_view_separates_attached_and_available_sources(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    payload = {
+        "credentials": [
+            {
+                "label": "Attached admin",
+                "username": "admin@example.com",
+                "login_url": "https://example.com/login",
+                "mfa_method": "totp",
+                "has_password": True,
+                "has_totp_secret": True,
+                "test_user_id": "attached-test-user-id",
+            }
+        ],
+        "available_test_users": [
+            {
+                "id": "available-test-user-id",
+                "label": "Saved analyst",
+                "username": "analyst@example.com",
+                "domain": "example.com",
+                "login_url": "https://example.com/login",
+                "mfa_method": "email_otp",
+                "has_password": False,
+                "has_totp_secret": False,
+            }
+        ],
+        "available_scan_credentials": [
+            {
+                "scan_id": "source-scan-id",
+                "scan_title": "August staging pentest",
+                "username": "scan-user@example.com",
+                "login_url": "https://staging.example.com/login",
+                "mfa_method": "none",
+                "has_password": True,
+                "has_totp_secret": False,
+            }
+        ],
+    }
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: FakeResponse(payload=payload))
+
+    command = ["chat", "credentials", "chat-id", "--scan-ids", "source-scan-id"]
+    assert cloud.run_cloud(command) == 0
+    output = capsys.readouterr().out
+    for value in (
+        "Attached credentials",
+        "Attached admin",
+        "attached-test-user-id",
+        "Available saved test users",
+        "Saved analyst",
+        "available-test-user-id",
+        "Credentials from requested scans",
+        "August staging pentest",
+        "source-scan-id",
+        "password: set",
+        "password: not set",
+        "--test-user-ids ID",
+        "--scan-ids SCAN_ID",
+    ):
+        assert value in output
+
+    assert cloud.run_cloud([*command, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+@pytest.mark.parametrize(
+    ("command", "payload", "visible", "hidden"),
+    [
+        (
+            ["schedules", "list"],
+            {
+                "schedules": [
+                    {
+                        "id": "schedule-id",
+                        "organization_id": "org-secret",
+                        "created_by": "user-secret",
+                        "name": "Weekly staging",
+                        "cron": "0 9 * * 1",
+                        "timezone": "America/New_York",
+                        "isPaused": True,
+                        "supply_chain": True,
+                        "domain_ids": [],
+                        "repository_ids": ["repo-id"],
+                        "internal_targets": ["10.24.0.0/16"],
+                        "connector_id": "connector-secret",
+                        "last_run_status": "ok",
+                        "next_run_at": "2026-08-31T13:00:00Z",
+                        "run_count": 4,
+                    }
+                ]
+            },
+            (
+                "Weekly staging",
+                "supply chain",
+                "1 repo",
+                "10.24.0.0/16",
+                "network connector",
+                "0 9 * * 1",
+                "paused",
+                "ok",
+                "schedule-id",
+                "schedules get ID",
+            ),
+            ("org-secret", "user-secret", "connector-secret"),
+        ),
+        (
+            ["connectors", "list"],
+            [
+                {
+                    "id": "connector-id",
+                    "name": "Private network",
+                    "last_status": "healthy",
+                    "last_status_checked_at": "2026-08-27T10:00:00Z",
+                    "created_at": "2026-08-20T10:00:00Z",
+                    "unexpected": "hidden",
+                }
+            ],
+            ("Private network", "healthy", "connector-id"),
+            ("unexpected", "hidden"),
+        ),
+        (
+            ["org", "members"],
+            {
+                "members": [
+                    {
+                        "id": "membership-id",
+                        "userId": "user-secret",
+                        "email": "analyst@example.com",
+                        "firstName": "Ada",
+                        "lastName": "Lovelace",
+                        "role": "analyst",
+                        "scopes": [
+                            {"type": "tag", "value": "production"},
+                            {"type": "business_unit", "value": "payments"},
+                        ],
+                        "status": "active",
+                        "joinedAt": "2026-08-20T10:00:00Z",
+                    }
+                ]
+            },
+            (
+                "analyst@example.com",
+                "Ada",
+                "Lovelace",
+                "tag:production",
+                "business_unit:payments",
+                "active",
+                "membership-id",
+            ),
+            ("user-secret",),
+        ),
+        (
+            ["org", "invitations"],
+            {
+                "invitations": [
+                    {
+                        "id": "invitation-id",
+                        "email": "invitee@example.com",
+                        "role": "analyst",
+                        "scopes": [],
+                        "state": "pending",
+                        "expiresAt": "2026-09-01T10:00:00Z",
+                        "createdAt": "2026-08-27T10:00:00Z",
+                    }
+                ]
+            },
+            ("invitee@example.com", "analyst", "all assets", "pending", "invitation-id"),
+            (),
+        ),
+        (
+            ["webhooks", "list"],
+            {
+                "webhooks": [
+                    {
+                        "id": "webhook-id",
+                        "organization_id": "org-secret",
+                        "url": "https://example.com/hook",
+                        "events": ["scan.completed"],
+                        "business_unit": "product",
+                        "is_active": True,
+                        "last_success_at": "2026-08-27T10:00:00Z",
+                        "last_failure_at": None,
+                        "created_at": "2026-08-20T10:00:00Z",
+                    }
+                ]
+            },
+            ("https://example.com/hook", "scan.completed", "product", "webhook-id"),
+            ("org-secret", "last delivery"),
+        ),
+        (
+            ["webhooks", "deliveries", "webhook-id"],
+            {
+                "items": [
+                    {
+                        "id": "delivery-id",
+                        "subscription_id": "subscription-secret",
+                        "organization_id": "org-secret",
+                        "event_type": "scan.completed",
+                        "status": "delivered",
+                        "response_status": 200,
+                        "last_error": "temporary timeout",
+                        "attempts": 1,
+                        "sent_at": "2026-08-27T10:01:00Z",
+                        "next_attempt_at": None,
+                        "created_at": "2026-08-27T10:00:00Z",
+                    }
+                ],
+                "meta": {"total_items": 1},
+            },
+            ("scan.completed", "delivered", "200", "temporary timeout", "delivery-id"),
+            ("subscription-secret", "org-secret"),
+        ),
+        (
+            ["knowledge", "repos"],
+            {
+                "repos": [
+                    {
+                        "repo_key": "usestrix/strix",
+                        "docs_count": 4,
+                        "last_updated_at": "2026-08-27T10:00:00Z",
+                        "future_internal_field": "hidden",
+                    }
+                ]
+            },
+            ("usestrix/strix", "4", "2026-08-27"),
+            ("future_internal_field", "hidden"),
+        ),
+        (
+            ["audit", "list"],
+            {
+                "data": [
+                    {
+                        "id": "audit-row-secret",
+                        "organization_id": "org-secret",
+                        "actor_id": "actor-secret",
+                        "actor_email": "ada@example.com",
+                        "action": "scan.started",
+                        "resource_type": "scan",
+                        "resource_id": "scan-id",
+                        "metadata": {"private": "details"},
+                        "ip_address": "192.0.2.1",
+                        "created_at": "2026-08-27T10:00:00Z",
+                    }
+                ],
+                "pagination": {
+                    "page": 1,
+                    "limit": 20,
+                    "total": 41,
+                    "total_pages": 3,
+                },
+            },
+            ("scan.started", "scan", "scan-id", "ada@example.com", "192.0.2.1", "--page 2"),
+            ("audit-row-secret", "org-secret", "actor-secret", "private"),
+        ),
+    ],
+)
+def test_named_human_list_views_match_api_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    command: list[str],
+    payload: Any,
+    visible: tuple[str, ...],
+    hidden: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: FakeResponse(payload=payload))
+
+    assert cloud.run_cloud(command) == 0
+    output = capsys.readouterr().out
+    for value in visible:
+        assert value in output
+    for value in hidden:
+        assert value not in output
+
+
+def test_supply_chain_org_summary_human_view_shows_totals_and_repository_risk(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "totals": {
+                    "repositories": 2,
+                    "components": 145,
+                    "findings": 9,
+                    "open_issues": 4,
+                    "malicious": 1,
+                    "suspicious": 2,
+                    "vulnerable": 6,
+                    "ecosystems": {"npm": 100, "pypi": 45},
+                    "severities": {"critical": 1, "high": 3, "medium": 5},
+                },
+                "repositories": [
+                    {
+                        "repository": {
+                            "id": "repo-id",
+                            "organization_id": "org-secret",
+                            "full_name": "usestrix/strix",
+                            "provider": "github",
+                        },
+                        "summary": {
+                            "component_count": 100,
+                            "finding_count": 7,
+                            "malicious_count": 1,
+                            "suspicious_count": 2,
+                            "vulnerable_count": 4,
+                            "severity_counts": {"critical": 1, "high": 2, "medium": 4},
+                            "policy": {
+                                "enabled": True,
+                                "pr_checks_enabled": False,
+                                "mode": "block",
+                            },
+                        },
+                        "latest_supply_chain_scan": {
+                            "id": "scan-secret",
+                            "status": "completed",
+                            "created_at": "2026-08-27T10:00:00Z",
+                        },
+                    },
+                    {
+                        "repository": {
+                            "id": "repo-id-2",
+                            "organization_id": "org-secret",
+                            "full_name": "usestrix/sdk",
+                            "provider": "github",
+                        },
+                        "summary": {
+                            "component_count": 45,
+                            "finding_count": 2,
+                            "malicious_count": 0,
+                            "suspicious_count": 0,
+                            "vulnerable_count": 2,
+                            "severity_counts": {"high": 1, "medium": 1},
+                            "policy": {"enabled": False},
+                        },
+                        "latest_supply_chain_scan": None,
+                    },
+                ],
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["supply-chain", "summary"]) == 0
+    output = capsys.readouterr().out
+    for value in (
+        "Supply-chain totals",
+        "145",
+        "open issues",
+        "usestrix/strix",
+        "critical 1",
+        "1 malicious",
+        "completed",
+        "block",
+        "PR checks off",
+        "usestrix/sdk",
+        "not run",
+        "disabled",
+        "repo-id",
+    ):
+        assert value in output
+    for value in ("org-secret", "scan-secret", "ecosystems"):
+        assert value not in output
+    assert "Use --json for complete totals and repository records" in output
+
+
+@pytest.mark.parametrize(
+    ("command", "payload", "visible", "hidden"),
+    [
+        (
+            ["webhooks", "get", "webhook-id"],
+            {
+                "webhook": {
+                    "id": "webhook-id",
+                    "organization_id": "org-secret",
+                    "url": "https://example.com/hook",
+                    "events": ["scan.completed", "scan.failed"],
+                    "business_unit": None,
+                    "secret_prefix": "whsec_1234",
+                    "is_active": True,
+                    "last_success_at": "2026-08-27T10:00:00Z",
+                    "last_failure_at": "2026-08-26T10:00:00Z",
+                    "created_by": "user-secret",
+                    "created_at": "2026-08-20T10:00:00Z",
+                    "updated_at": "2026-08-27T10:00:00Z",
+                }
+            },
+            (
+                "webhook-id",
+                "https://example.com/hook",
+                "scan.completed",
+                "scan.failed",
+                "all organization",
+                "whsec_1234",
+                "yes",
+                "2026-08-26T10:00:00Z",
+            ),
+            ("org-secret", "user-secret", "nested field"),
+        ),
+        (
+            ["chat", "get", "chat-id"],
+            {
+                "chat": {
+                    "workspace_state": "running",
+                    "id": "chat-id",
+                    "title": "Investigate auth",
+                    "status": "active",
+                    "run_id": "run-id",
+                    "sandbox_api_url": True,
+                    "created_at": "2026-08-20T10:00:00Z",
+                    "updated_at": "2026-08-27T10:00:00Z",
+                    "last_message_at": "2026-08-27T09:59:00Z",
+                }
+            },
+            (
+                "chat-id",
+                "Investigate auth",
+                "active",
+                "workspace state",
+                "running",
+                "run-id",
+                "sandbox attached",
+                "yes",
+                "2026-08-27T09:59:00Z",
+            ),
+            ("sandbox api url", "nested field"),
+        ),
+    ],
+)
+def test_wrapped_detail_human_views_are_unwrapped_and_actionable(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    command: list[str],
+    payload: dict[str, Any],
+    visible: tuple[str, ...],
+    hidden: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: FakeResponse(payload=payload))
+
+    assert cloud.run_cloud(command) == 0
+    output = capsys.readouterr().out
+    for value in visible:
+        assert value in output
+    for value in hidden:
+        assert value not in output
+
+
+def test_trace_human_view_summarizes_events_and_preserves_selector(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    seen_query: dict[str, Any] = {}
+
+    def fake_trace_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
+        seen_query.update(kwargs.get("query") or {})
+        return FakeResponse(
+            payload={
+                "scan_id": "scan-id",
+                "agent_id": "agent-id",
+                "steps": [
+                    {
+                        "timestamp": "2026-08-27T10:00:00Z",
+                        "kind": "tool_call",
+                        "event_id": "event-id",
+                        "tool_name": "browser",
+                        "args": {
+                            "url": "https://example.com",
+                            "password": "trace-password-must-not-render",
+                            "headers": {"Authorization": "Bearer trace-token-must-not-render"},
+                            "sk_live_secret-as-dictionary-key": True,
+                        },
+                        "truncated": True,
+                    },
+                    {
+                        "timestamp": "2026-08-27T10:01:00Z",
+                        "kind": "finding",
+                        "event_id": "finding-event-id",
+                        "finding": {"title": "IDOR", "severity": "high"},
+                    },
+                    {
+                        "timestamp": "2026-08-27T10:02:00Z",
+                        "kind": "tool_result",
+                        "event_id": "result-event-id",
+                        "tool_name": "browser",
+                        "status": "completed",
+                        "result": "result-token-must-not-render",
+                    },
+                ],
+                "cursor": "next-secret",
+                "has_more": True,
+                "note": "Older trace events remain available.",
+            }
+        )
+
+    monkeypatch.setattr(
+        http,
+        "request",
+        fake_trace_request,
+    )
+
+    assert (
+        cloud.run_cloud(
+            [
+                "scans",
+                "trace",
+                "scan-id",
+                "--agent-id",
+                "agent-id",
+                "--tool-name",
+                "browser",
+                "--limit",
+                "25",
+            ]
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    for value in (
+        "tool_call",
+        "browser",
+        "arguments: 4 field(s)",
+        "high: IDOR",
+        "event-id",
+        "tool_result",
+        "result: text (",
+    ):
+        assert value in output
+    assert seen_query == {"agent_id": "agent-id", "tool_name": "browser", "limit": 25}
+    for secret in (
+        "trace-password-must-not-render",
+        "trace-token-must-not-render",
+        "result-token-must-not-render",
+        "password",
+        "sk_live_secret-as-dictionary-key",
+    ):
+        assert secret not in output
+    assert "scans trace-event scan-id EVENT_ID" in output
+    normalized_output = " ".join(output.replace("`", "").split())
+    assert "same trace command with --cursor next-secret" in normalized_output
+    assert "keep its --agent-id, --tool-name, and --limit options" in normalized_output
+    assert "Older trace events remain available." in normalized_output
+
+
+def test_paginated_human_list_shows_total_and_continuation_command(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "items": [
+                    {
+                        "id": "domain-id",
+                        "domain": "staging.example.com",
+                        "asset_type": "web_app",
+                    }
+                ],
+                "meta": {
+                    "page": 1,
+                    "limit": 20,
+                    "total_items": 51,
+                    "total_pages": 3,
+                    "has_next": True,
+                },
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["domains", "list"]) == 0
+    output = capsys.readouterr().out
+    assert "Page 1/3" in output
+    assert "51 total" in output
+    assert "--page 2" in output
+
+
+def test_empty_paginated_human_list_does_not_claim_page_one_of_zero() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, width=120, color_system=None, force_terminal=False)
+
+    render.emit(
+        console,
+        {
+            "items": [],
+            "meta": {
+                "page": 1,
+                "limit": 25,
+                "total_items": 0,
+                "total_pages": 0,
+                "has_next": False,
+            },
+        },
+        as_json=False,
+        view="GET /domains",
+    )
+
+    output = stream.getvalue()
+    assert "0 total." in output
+    assert "Page 1/0" not in output
+
+
+def test_offset_pagination_explains_an_out_of_range_page() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, width=120, color_system=None, force_terminal=False)
+
+    render.emit(
+        console,
+        {"components": [], "meta": {"total": 3, "limit": 2, "offset": 4}},
+        as_json=False,
+        view="GET /repositories/{repositoryId}/supply-chain/components",
+    )
+
+    output = stream.getvalue()
+    assert "No items at offset 4; 3 total." in output
+    assert "--offset 2" in output
+    assert "Showing 3-3" not in output
+
+
+def test_page_pagination_explains_an_out_of_range_page() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, width=120, color_system=None, force_terminal=False)
+
+    render.emit(
+        console,
+        {
+            "items": [],
+            "meta": {
+                "page": 4,
+                "limit": 20,
+                "total_items": 51,
+                "total_pages": 3,
+                "has_next": False,
+            },
+        },
+        as_json=False,
+        view="GET /domains",
+    )
+
+    output = stream.getvalue()
+    assert "No items on page 4; 51 total." in output
+    assert "--page 3" in output
+    assert "Page 4/3" not in output
+
+
+def test_human_detail_preserves_long_prose_beyond_table_cell_limit(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    description = (
+        " ".join(["authorization context"] * 12) + " final-description-marker\nsecond-line-marker"
+    )
+    assert len(description) > 60
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "id": "vuln-id",
+                "title": "Cross-tenant access",
+                "description": description,
+                "remediation_steps": "Validate tenant ownership before every object lookup.",
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["vulns", "get", "vuln-id"]) == 0
+    output = capsys.readouterr().out
+    assert "final-description-marker" in output
+    assert "second-line-marker" in output
+    assert "\\x0a" not in output
+    assert "Validate tenant ownership" in output
+
+
+def test_human_detail_bounds_extreme_scalar_values() -> None:
+    assert render._detail_cell("x" * 2500).endswith("… [truncated; use --json]")
+    assert len(render._detail_cell("x" * 2500)) == 2000
+    assert render._detail_cell("first\nsecond") == "first\nsecond"
+
+
+def test_large_vulnerability_detail_prioritizes_evidence_and_remediation() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, width=240, color_system=None, force_terminal=False)
+    payload: dict[str, Any] = {f"future_field_{index}": f"value-{index}" for index in range(45)}
+    payload.update(
+        {
+            "id": "vuln-id",
+            "title": "Cross-tenant access",
+            "status": "open",
+            "severity": "high",
+            "description": "A caller can read another tenant's object.",
+            "technical_analysis": "The object lookup omits the tenant predicate.",
+            "evidence": "GET /objects/other-tenant returned HTTP 200.",
+            "remediation_steps": "Bind every object lookup to the authenticated tenant.",
+            "cwe": ["CWE-639"],
+            "location_meta": {"path": "src/routes/objects.ts", "line": 42},
+            "fix_pr_eligible": True,
+            "fix_pr_reason": "A repository and exact code location are available.",
+            "fix_pr_url": "https://github.com/example/app/pull/42",
+            "filed_at": "2026-08-28T12:00:00Z",
+            "dependency_metadata": {"package": "example", "installed_version": "1.0.0"},
+        }
+    )
+
+    render.emit(console, payload, as_json=False, view="GET /vulnerabilities/{vulnerabilityId}")
+
+    output = stream.getvalue()
+    for value in (
+        "Cross-tenant access",
+        "The object lookup omits the tenant predicate.",
+        "GET /objects/other-tenant returned HTTP 200.",
+        "Bind every object lookup to the authenticated tenant.",
+        "CWE-639",
+        "src/routes/objects.ts",
+        "A repository and exact code location are available.",
+        "https://github.com/example/app/pull/42",
+        "2026-08-28T12:00:00Z",
+        "package: example",
+    ):
+        assert value in output
+    assert "additional field(s) omitted" in output
+
+
+def test_test_user_human_view_joins_latest_verification(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "items": [
+                    {
+                        "id": "test-user-id",
+                        "label": "Admin",
+                        "username": "admin@example.com",
+                        "mfa_method": "totp",
+                        "has_password": True,
+                        "has_totp_secret": True,
+                        "login_url": "https://example.com/login",
+                        "updated_at": "2026-08-27T10:00:00Z",
+                    }
+                ],
+                "auth_checks": {
+                    "test-user-id": {
+                        "status": "failed",
+                        "failure_code": "invalid_credentials",
+                    }
+                },
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["domains", "test-users", "list", "domain-id"]) == 0
+    output = capsys.readouterr().out
+    for value in ("password: set", "totp (secret set)", "failed: invalid_credentials"):
+        assert value in output
+
+
+def test_explicit_human_view_is_an_allowlist_and_preserves_uuid() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, width=120, color_system=None, force_terminal=False)
+    uuid = "4d3a33cc-5c96-4e91-921c-682093efe780"
+
+    render.emit(
+        console,
+        {
+            "items": [
+                {
+                    "id": uuid,
+                    "domain": "staging.example.com",
+                    "asset_type": "web_app",
+                    "verified": False,
+                    "unknown_internal_scalar": "must-not-render",
+                }
+            ],
+            "meta": {"total_items": 1},
+        },
+        as_json=False,
+        view="GET /domains",
+    )
+
+    output = stream.getvalue()
+    assert uuid in output
+    assert "must-not-render" not in output
+
+
+def test_wide_knowledge_table_keeps_title_readable_with_long_identifiers() -> None:
+    stream = io.StringIO()
+    console = Console(file=stream, width=120, color_system=None, force_terminal=False)
+    document_id = "document-selector-" + "x" * 80
+    source_id = "repos/usestrix__strix/" + "nested/" * 12 + "authentication.md"
+
+    render.emit(
+        console,
+        {
+            "organization_id": "org-secret",
+            "docs": [
+                {
+                    "id": document_id,
+                    "title": "Authentication guidance",
+                    "source_type": "system",
+                    "source_id": source_id,
+                    "tags": ["auth"],
+                    "updated_at": "2026-08-27T10:00:00Z",
+                }
+            ],
+            "total": 1,
+        },
+        as_json=False,
+        view="GET /knowledge",
+    )
+
+    output = stream.getvalue()
+    assert "Authentication guidance" in output
+    assert document_id in output
+    assert "Copyable selectors" in output
 
 
 def test_human_get_prioritizes_details_and_hides_internal_identity_fields(

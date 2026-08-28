@@ -32,6 +32,11 @@ class FakeResponse:
         return self._payload
 
 
+class MalformedJsonResponse(FakeResponse):
+    def json(self) -> Any:
+        raise ValueError("malformed JSON")
+
+
 @pytest.fixture(autouse=True)
 def _token_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STRIX_API_TOKEN", "test-token")
@@ -467,7 +472,10 @@ def test_failed_scan_deletes_completed_source_upload(
     assert ("DELETE", "/uploads/upload-1") in paths
 
 
-@pytest.mark.parametrize("failure", ["network", "server", "malformed_success"])
+@pytest.mark.parametrize(
+    "failure",
+    ["network", "server", "malformed_success", "malformed_json_success", "wrong_shape_success"],
+)
 def test_ambiguous_scan_launch_retains_completed_source_upload(
     failure: str,
     tmp_path: Path,
@@ -494,6 +502,10 @@ def test_ambiguous_scan_launch_retains_completed_source_upload(
                 raise http.CloudError("connection closed before a response")
             if failure == "server":
                 return FakeResponse({"detail": "temporary failure"}, status_code=500)
+            if failure == "malformed_json_success":
+                return MalformedJsonResponse("accepted")
+            if failure == "wrong_shape_success":
+                return FakeResponse({})
             response = FakeResponse("accepted")
             response.headers = {"content-type": "text/html"}
             return response
@@ -514,6 +526,37 @@ def test_ambiguous_scan_launch_retains_completed_source_upload(
     assert payload["launch_outcome_unknown"] is True
     assert "outcome is unknown" in payload["error"]
     assert ("DELETE", "/uploads/upload-ambiguous") not in paths
+
+
+def test_mismatched_upload_completion_response_is_cleaned_before_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "app.py").write_text("print('safe')\n", encoding="utf-8")
+    paths: list[tuple[str, str]] = []
+
+    def fake_request(method: str, path: str, **_kwargs: Any) -> FakeResponse:
+        paths.append((method, path))
+        if path == "/uploads/request":
+            return FakeResponse(
+                {
+                    "upload_id": "upload-expected",
+                    "signed_url": "https://storage.test/object",
+                    "token": "signed",
+                }
+            )
+        if path == "/uploads/complete":
+            return FakeResponse({"id": "upload-different"})
+        if path == "/uploads/upload-expected":
+            return FakeResponse({"ok": True})
+        if path == "/scans":
+            pytest.fail("a scan must not launch before upload completion is confirmed")
+        raise AssertionError(path)
+
+    monkeypatch.setattr(http, "request", fake_request)
+    monkeypatch.setattr(http, "upload_file", lambda *_args, **_kwargs: None)
+
+    assert cloud.run_cloud(["scans", "start", "--source", str(tmp_path), "--yes"]) == 1
+    assert ("DELETE", "/uploads/upload-expected") in paths
 
 
 def test_interrupted_scan_launch_retains_completed_source_upload(

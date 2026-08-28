@@ -339,7 +339,8 @@ Every operation of the [REST API](https://docs.app.strix.ai) has a matching comm
 
 ```bash
 strix cloud                                   # list all resources
-strix cloud scans                             # list the verbs of a resource
+strix cloud scans                             # run the safe default (`scans list`)
+strix cloud scans help                        # list the verbs of a resource
 strix cloud domains add --domain example.com --asset-type web_app
 strix cloud scans start --engagement-type live_test --domain-ids <uuid> --wait
 strix cloud scans start --source . --dry-run --show-files --json  # review + capture source.archive_sha256
@@ -354,7 +355,7 @@ Workspaces and account setup also work from the terminal:
 
 ```bash
 strix cloud workspaces list                   # numbered list; `workspace` is also accepted
-strix cloud workspaces create --name "My Team"
+strix cloud workspaces create --name "My Team" # admin + organizations:write
 strix cloud workspaces use 2                  # switch by list number, exact name, or ID
 strix cloud billing subscribe --plan strix_cloud # opens the hosted checkout page
 strix cloud billing portal                    # opens the billing portal
@@ -364,7 +365,7 @@ strix cloud domains verify <domain-id>        # prints the DNS record to add
 
 The last four commands end at a person. Strix creates the link, opens the browser for an interactive terminal, and always prints the URL. The user enters the card, approves the installation, or adds the DNS record. Pass `--no-browser` to print the URL only.
 
-The commands work for humans and agents: terminal output favors names, branches, lifecycle states, and numbered selectors, while redirected output (or `--json`) preserves complete machine-readable records and IDs. Human asset, knowledge, test-user, and token lists retain the record IDs needed by follow-up commands but omit internal organization/user IDs; token lists label credentials as active, expired, or revoked. Binary downloads are the exception: intentionally redirect their raw bytes, or use `--output FILE --json` to write the file and receive structured download metadata. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication or plan limit, `5` payment required. Set the token with `--token` or `STRIX_API_TOKEN` to skip the stored sign-in.
+The commands work for humans and agents: terminal output favors names, branches, lifecycle states, and numbered selectors, while redirected output (or `--json`) preserves complete machine-readable records and IDs. Human lists retain the selectors needed by follow-up commands but omit internal organization/user IDs; a selector too long for the compact table is repeated losslessly in a copyable block. Paginated lists print the next `--page` or `--offset`, and detail views preserve useful prose within a safe terminal bound; use `--json` for the complete record. Token lists label credentials as active, expired, or revoked. Binary downloads are the exception: intentionally redirect their raw bytes, or use `--output FILE --json` to write the file and receive structured download metadata. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication or plan limit, `5` payment required. Set the token with `--token` or `STRIX_API_TOKEN` to skip the stored sign-in.
 
 Write commands take request fields as flags, and every write command also accepts one JSON object with `--data`:
 
@@ -389,8 +390,8 @@ the service independently validates the archive. Source alone infers a code revi
 domain infers a live test. You can always pass `--engagement-type` explicitly.
 
 Strix removes the temporary local archive after every invocation. It deletes a staged remote
-upload after a definitive scan rejection. If a network error, `5xx` response, or interruption
-makes the launch outcome ambiguous, it retains the upload and reports its `upload_id` with
+upload after a definitive scan rejection. If a network error, `5xx` response, malformed
+success response, or interruption makes the launch outcome ambiguous, it retains the upload and reports its `upload_id` with
 `launch_outcome_unknown: true`; if automatic deletion cannot be confirmed, it reports the ID
 with `cleanup_unknown: true`. Check `strix cloud scans list` before retrying. If no scan is
 linked to the retained upload, delete it with `strix cloud uploads delete UPLOAD_ID`.

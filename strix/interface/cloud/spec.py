@@ -300,8 +300,7 @@ SPEC: dict[str, dict[str, Cmd]] = {
                 P(
                     "status",
                     help=(
-                        "New status: open, in_progress, snoozed, fixed, ignored, or "
-                        "not_affected."
+                        "New status: open, in_progress, snoozed, fixed, ignored, or not_affected."
                     ),
                 ),
                 P("note", help="Note that explains the change."),
@@ -1096,10 +1095,27 @@ SPEC: dict[str, dict[str, Cmd]] = {
 
 # Default verbs let a bare group name run its most common read command.
 DEFAULT_VERBS: dict[str, str] = {
+    "scans": "list",
+    "vulns": "list",
+    "domains": "list",
+    "repos": "list",
     "workspaces": "list",
+    "schedules": "list",
+    "pr-reviews": "list",
+    "billing": "credits",
+    "chat": "list",
+    "knowledge": "list",
+    "org": "get",
+    "integrations": "list",
+    "connectors": "list",
+    "webhooks": "list",
+    "analytics": "overview",
     "costs": "overview",
     "audit": "list",
+    "llm-settings": "get",
+    "settings": "notifications",
     "license": "show",
+    "tokens": "list",
     "supply-chain": "summary",
 }
 

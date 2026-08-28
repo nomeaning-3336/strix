@@ -251,7 +251,7 @@ def _upload_scan_source(bundle: SourceBundle, *, token: str | None) -> str:
         raise error
     try:
         http.upload_file(cast("str", signed_url), cast("str", upload_token), bundle.archive_path)
-        http.check(
+        completed = http.check(
             http.request(
                 "POST",
                 "/uploads/complete",
@@ -259,6 +259,7 @@ def _upload_scan_source(bundle: SourceBundle, *, token: str | None) -> str:
                 body={"upload_id": upload_id},
             )
         )
+        _validate_completed_upload(completed, expected_id=cast("str", upload_id))
     except BaseException as error:
         try:
             _delete_upload(cast("str", upload_id), token=token)
@@ -271,6 +272,12 @@ def _upload_scan_source(bundle: SourceBundle, *, token: str | None) -> str:
             ) from None
         raise
     return cast("str", upload_id)
+
+
+def _validate_completed_upload(completed: Any, *, expected_id: str) -> None:
+    fields = cast("dict[str, Any]", completed) if isinstance(completed, dict) else {}
+    if fields.get("id") != expected_id:
+        raise http.CloudError("the platform returned an invalid source upload completion response.")
 
 
 def _delete_upload(upload_id: str, *, token: str | None) -> None:

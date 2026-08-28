@@ -300,7 +300,13 @@ def check(response: requests.Response) -> Any:
                 "the server returned a non-JSON response. Check STRIX_APP_URL and preview "
                 "access, then retry."
             )
-        return data
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise CloudError(
+                "the server returned malformed JSON. Check STRIX_APP_URL and preview "
+                "access, then retry."
+            ) from exc
     detail = ""
     error_code = ""
     if isinstance(data, dict):

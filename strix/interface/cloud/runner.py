@@ -377,7 +377,10 @@ def _execute(  # noqa: PLR0912, PLR0915
                 return http.EXIT_OK
 
         source_workflow.mark_launch_started()
-        scan_request_started = cmd.idempotent
+        # Every wait-path mutation creates a scan, even when the endpoint has
+        # not yet adopted idempotency keys (for example vulnerability retests).
+        # Once sent, transport and malformed-success failures are ambiguous.
+        scan_request_started = cmd.idempotent or cmd.wait_path is not None
         response = _request_with_idempotency(
             cmd,
             path,
@@ -414,7 +417,7 @@ def _execute(  # noqa: PLR0912, PLR0915
             json_metadata=binary_json_metadata,
         )
     try:
-        result = http.check(response)
+        result = _validated_operation_result(http.check(response), cmd)
     except BaseException as exc:
         source_workflow.handle_response_failure(
             exc,
@@ -1044,9 +1047,18 @@ def _created_id(created: Any) -> str | None:
         return None
     fields = cast("dict[str, Any]", created)
     for key, value in fields.items():
-        if (key == "id" or key.endswith("_id")) and isinstance(value, str):
+        if (key == "id" or key.endswith("_id")) and isinstance(value, str) and value.strip():
             return value
     return None
+
+
+def _validated_operation_result(result: Any, cmd: Cmd) -> Any:
+    """Reject malformed success bodies for mutations that create a scan."""
+    if cmd.wait_path and _created_id(result) is None:
+        raise http.CloudError(
+            "the platform returned a successful operation response without an operation ID."
+        )
+    return result
 
 
 def _wait(
@@ -1059,8 +1071,12 @@ def _wait(
     wait_timeout: float,
 ) -> Any:
     item_id = _created_id(created)
-    if not item_id or not cmd.wait_path:
+    if not cmd.wait_path:
         return created
+    if not item_id:
+        raise http.CloudError(
+            "cannot wait because the platform response did not include an operation ID."
+        )
     path = cmd.wait_path.replace("{id}", str(item_id))
     if not as_json:
         console.print(

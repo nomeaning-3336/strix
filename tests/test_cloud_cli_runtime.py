@@ -940,10 +940,10 @@ def test_device_flow_accepts_external_authkit_url_and_binds_token_origin(
 
 
 def test_missing_verb_json_is_structured(capsys: Any) -> None:
-    assert cloud.run_cloud(["scans", "--json"]) == 0
+    assert cloud.run_cloud(["uploads", "--json"]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["command"] == "strix cloud scans"
-    assert any(item["name"] == "start" for item in payload["verbs"])
+    assert payload["command"] == "strix cloud uploads"
+    assert any(item["name"] == "request" for item in payload["verbs"])
 
 
 @pytest.mark.parametrize(
@@ -981,8 +981,8 @@ def test_non_tty_dispatcher_always_emits_structured_json(
     assert cloud.run_cloud([]) == 0
     assert json.loads(capsys.readouterr().out)["command"] == "strix cloud"
 
-    assert cloud.run_cloud(["scans"]) == 0
-    assert json.loads(capsys.readouterr().out)["command"] == "strix cloud scans"
+    assert cloud.run_cloud(["uploads"]) == 0
+    assert json.loads(capsys.readouterr().out)["command"] == "strix cloud uploads"
 
     assert cloud.run_cloud(["does-not-exist"]) == http.EXIT_USAGE
     assert json.loads(capsys.readouterr().out) == {"error": "unknown command: does-not-exist"}
