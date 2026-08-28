@@ -1019,6 +1019,9 @@ def test_render_list_extraction() -> None:
     rows = render._list_of_dicts({"scans": [{"id": "a"}, {"id": "b"}]})
     assert rows == [{"id": "a"}, {"id": "b"}]
     assert render._list_of_dicts({"scans": [], "total": 1}) == []
+    assert render._list_of_dicts(
+        {"organization_id": "org_1", "docs": [{"id": "doc_1"}], "total": 1}
+    ) == [{"id": "doc_1"}]
     assert render._list_of_dicts([{"id": "a"}, "x"]) is None
 
 
@@ -1299,17 +1302,13 @@ def test_corrected_help_distinguishes_inboxes_reports_and_self_hosted_commands()
         assert "magic_link" in parameters["mfa_method"]
         assert " or email." not in parameters["mfa_method"]
 
-    vulnerability_update = {
-        param.name: param.help for param in SPEC["vulns"]["update"].body
-    }
+    vulnerability_update = {param.name: param.help for param in SPEC["vulns"]["update"].body}
     assert "in_progress" in vulnerability_update["status"]
     assert "not_affected" in vulnerability_update["status"]
     assert "triaged" not in vulnerability_update["status"]
     assert "false_positive" not in vulnerability_update["status"]
 
-    chat_download = {
-        param.name: param.help for param in SPEC["chat"]["files download"].query
-    }
+    chat_download = {param.name: param.help for param in SPEC["chat"]["files download"].query}
     assert "Relative path" in chat_download["path"]
     assert "/workspace" in chat_download["path"]
 
@@ -1921,6 +1920,190 @@ def test_pr_review_human_list_prioritizes_actionable_fields(
         assert value in output
     for value in ("org-id", "user-id", "installation_id"):
         assert value not in output
+
+
+@pytest.mark.parametrize(
+    ("command", "payload", "visible", "hidden"),
+    [
+        (
+            ["domains", "list"],
+            {
+                "items": [
+                    {
+                        "id": "domain-id",
+                        "organization_id": "org-secret",
+                        "domain": "staging.example.com",
+                        "asset_type": "web_app",
+                        "verified": True,
+                        "context": "staging",
+                        "tags": ["customer-facing"],
+                        "business_unit": "product",
+                        "last_scan_at": "2026-08-27T12:00:00Z",
+                        "added_by": "user-secret",
+                    }
+                ],
+                "meta": {"total_items": 1},
+            },
+            ("staging.example.com", "web_app", "yes", "staging", "domain-id"),
+            ("org-secret", "user-secret", "added by"),
+        ),
+        (
+            ["repos", "list"],
+            {
+                "items": [
+                    {
+                        "id": "repo-id",
+                        "organization_id": "org-secret",
+                        "full_name": "usestrix/strix",
+                        "provider": "github",
+                        "default_branch": "main",
+                        "pr_review_enabled": True,
+                        "tags": ["core"],
+                        "business_unit": "product",
+                        "last_scan_at": "2026-08-27T12:00:00Z",
+                        "added_by": "user-secret",
+                    }
+                ],
+                "meta": {"total_items": 1},
+            },
+            ("usestrix/strix", "github", "main", "yes", "repo-id"),
+            ("org-secret", "user-secret", "added by"),
+        ),
+        (
+            ["knowledge", "list"],
+            {
+                "organization_id": "org-secret",
+                "docs": [
+                    {
+                        "id": (
+                            "doc-id-that-is-deliberately-long-enough-to-require-a-lossless-"
+                            "copyable-value"
+                        ),
+                        "organization_id": "org-secret",
+                        "title": "Authentication",
+                        "source_type": "manual",
+                        "source_id": "dashboard/notes/auth.md",
+                        "content": "Long private content should stay out of the list.",
+                        "tags": ["auth"],
+                        "severity": None,
+                        "status": None,
+                        "updated_at": "2026-08-27T12:00:00Z",
+                    }
+                ],
+                "total": 1,
+            },
+            (
+                "Authentication",
+                "manual",
+                "dashboard/notes/auth.md",
+                "doc-id-that-is-deliberately-long-enough-to-require-a-lossless-copyable-value",
+                "Copyable IDs",
+            ),
+            ("org-secret", "Long private content"),
+        ),
+        (
+            ["domains", "test-users", "list", "domain-id"],
+            {
+                "items": [
+                    {
+                        "id": "test-user-id",
+                        "organization_id": "org-secret",
+                        "domain_id": "domain-id",
+                        "label": "Staging admin",
+                        "username": "admin@example.com",
+                        "mfa_method": "email_otp",
+                        "mfa_email": "inbox@security-mail.strix.ai",
+                        "has_password": True,
+                        "login_url": "https://staging.example.com/login",
+                        "updated_at": "2026-08-27T12:00:00Z",
+                        "created_by": "user-secret",
+                    }
+                ],
+                "agentmail_configured": True,
+            },
+            (
+                "Staging admin",
+                "admin@example.com",
+                "email_otp",
+                "inbox@security-mail.strix.ai",
+                "test-user-id",
+            ),
+            ("org-secret", "user-secret", "domain id"),
+        ),
+    ],
+)
+def test_human_lists_prioritize_actionable_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: Any,
+    command: list[str],
+    payload: dict[str, Any],
+    visible: tuple[str, ...],
+    hidden: tuple[str, ...],
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(http, "request", lambda *_a, **_k: FakeResponse(payload=payload))
+
+    assert cloud.run_cloud(command) == 0
+    output = capsys.readouterr().out
+    for value in visible:
+        assert value in output
+    for value in hidden:
+        assert value not in output
+
+
+def test_token_human_list_shows_lifecycle_status(
+    monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    monkeypatch.setattr(render.sys.stdout, "isatty", lambda: True)
+    monkeypatch.setattr(
+        http,
+        "request",
+        lambda *_a, **_k: FakeResponse(
+            payload={
+                "tokens": [
+                    {
+                        "id": "active-id",
+                        "organization_id": "org-secret",
+                        "name": "Active CI",
+                        "type": "service",
+                        "scopes": ["scans:read"],
+                        "secret_prefix": "strix_svc_a",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                        "last_used_at": None,
+                        "revoked_at": None,
+                    },
+                    {
+                        "id": "revoked-id",
+                        "organization_id": "org-secret",
+                        "name": "Old CI",
+                        "type": "service",
+                        "scopes": ["scans:read"],
+                        "secret_prefix": "strix_svc_r",
+                        "expires_at": None,
+                        "last_used_at": None,
+                        "revoked_at": "2026-08-27T12:00:00Z",
+                    },
+                    {
+                        "id": "expired-id",
+                        "organization_id": "org-secret",
+                        "name": "Expired CI",
+                        "type": "service",
+                        "scopes": ["scans:read"],
+                        "secret_prefix": "strix_svc_e",
+                        "expires_at": "2000-01-01T00:00:00Z",
+                        "last_used_at": None,
+                        "revoked_at": None,
+                    },
+                ]
+            }
+        ),
+    )
+
+    assert cloud.run_cloud(["tokens", "list"]) == 0
+    output = capsys.readouterr().out
+    for value in ("Active CI", "active", "Old CI", "revoked", "Expired CI", "expired"):
+        assert value in output
+    assert "org-secret" not in output
 
 
 def test_human_get_prioritizes_details_and_hides_internal_identity_fields(

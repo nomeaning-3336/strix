@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 from rich.markup import escape
@@ -31,8 +32,11 @@ _INTERNAL_COLUMNS = frozenset(
         "user_id",
         "userId",
         "installation_id",
+        "added_by",
         "created_by",
         "connected_by",
+        "invited_by",
+        "uploaded_by",
         "avatarUrl",
     }
 )
@@ -119,6 +123,7 @@ _LIST_ENVELOPE_KEYS = frozenset(
         "deliveries",
         "entries",
         "documents",
+        "docs",
         "policies",
         "tokens",
         "uploads",
@@ -146,6 +151,7 @@ _ENVELOPE_METADATA_KEYS = frozenset(
         "summary",
         "stats",
         "scansThisMonth",
+        "organization_id",
     }
 )
 
@@ -189,6 +195,75 @@ _VIEW_COLUMNS: dict[str, tuple[str, ...]] = {
         "repository_selection",
         "default_collection_name",
         "connected_at",
+    ),
+    "GET /domains": (
+        "domain",
+        "asset_type",
+        "verified",
+        "last_scan_at",
+        "context",
+        "tags",
+        "business_unit",
+        "id",
+    ),
+    "GET /repositories": (
+        "full_name",
+        "provider",
+        "default_branch",
+        "pr_review_enabled",
+        "last_scan_at",
+        "tags",
+        "business_unit",
+        "id",
+    ),
+    "GET /knowledge": (
+        "title",
+        "source_type",
+        "source_id",
+        "tags",
+        "severity",
+        "status",
+        "updated_at",
+        "id",
+    ),
+    "GET /knowledge/repos/{repo}/entries": (
+        "title",
+        "source_type",
+        "source_id",
+        "tags",
+        "severity",
+        "status",
+        "updated_at",
+        "id",
+    ),
+    "GET /knowledge/policies": (
+        "policy_key",
+        "policy_type",
+        "is_active",
+        "policy_value",
+        "updated_at",
+        "created_at",
+        "id",
+    ),
+    "GET /domains/{domainId}/test-users": (
+        "label",
+        "username",
+        "mfa_method",
+        "mfa_email",
+        "has_password",
+        "login_url",
+        "updated_at",
+        "id",
+    ),
+    "GET /tokens": (
+        "name",
+        "type",
+        "status",
+        "scopes",
+        "secret_prefix",
+        "expires_at",
+        "last_used_at",
+        "id",
     ),
     "GET /webhooks": ("url", "events", "is_active", "last_delivery_at", "created_at", "id"),
     "GET /webhooks/{webhookId}/deliveries": (
@@ -247,6 +322,18 @@ def emit(  # noqa: PLR0911, PLR0912
             _print_table(
                 console,
                 integration_rows,
+                row_numbers=row_numbers,
+                omit_columns=omit_columns,
+                hint=hint,
+                view=view,
+            )
+            return
+    if view == "GET /tokens":
+        token_rows = _token_rows(data)
+        if token_rows is not None:
+            _print_table(
+                console,
+                token_rows,
                 row_numbers=row_numbers,
                 omit_columns=omit_columns,
                 hint=hint,
@@ -364,6 +451,36 @@ def _integration_rows(data: Any) -> list[dict[str, Any]] | None:
     return rows if found_collection else None
 
 
+def _token_rows(data: Any) -> list[dict[str, Any]] | None:
+    """Add an explicit lifecycle state to token rows for the human view."""
+    records = _list_of_dicts(data)
+    if records is None:
+        return None
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        row = dict(record)
+        if record.get("revoked_at"):
+            row["status"] = "revoked"
+        elif _timestamp_has_passed(record.get("expires_at")):
+            row["status"] = "expired"
+        else:
+            row["status"] = "active"
+        rows.append(row)
+    return rows
+
+
+def _timestamp_has_passed(value: Any) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed <= datetime.now(UTC)
+
+
 def _scan_rows(data: Any) -> list[dict[str, Any]] | None:
     """Flatten the nested target and finding summaries returned by scan lists."""
     records = _list_of_dicts(data)
@@ -470,6 +587,7 @@ def _print_table(
     columns = columns[:_MAX_TABLE_COLUMNS]
     if console.width < _NARROW_TABLE_WIDTH:
         _print_cards(console, rows, columns, row_numbers=row_numbers)
+        _print_long_identifiers(console, rows)
         console.print(f"[dim]{len(rows)} item(s). Use --json for the full records.[/]")
         if hint:
             console.print(f"[dim]{escape(sanitize_terminal_text(hint))}[/]")
@@ -485,6 +603,7 @@ def _print_table(
             cells.insert(0, str(index))
         table.add_row(*cells)
     console.print(table)
+    _print_long_identifiers(console, rows)
     console.print(f"[dim]{len(rows)} item(s). Use --json for the full records.[/]")
     if hint:
         console.print(f"[dim]{escape(sanitize_terminal_text(hint))}[/]")
@@ -512,6 +631,32 @@ def _print_cards(
         continuation = "   " if row_numbers else "  "
         for part in parts[1:]:
             console.print(continuation + part, soft_wrap=True)
+
+
+def _print_long_identifiers(console: Console, rows: list[dict[str, Any]]) -> None:
+    """Print opaque IDs losslessly when the compact cell view shortens them."""
+    identifiers = [
+        (index, row, str(row["id"]))
+        for index, row in enumerate(rows, start=1)
+        if row.get("id") is not None and len(str(row["id"])) > _MAX_CELL_LENGTH
+    ]
+    if not identifiers:
+        return
+    console.print("[dim]Copyable IDs:[/]")
+    for index, row, identifier in identifiers:
+        label = next(
+            (
+                str(row[key])
+                for key in ("title", "name", "label", "domain", "full_name")
+                if row.get(key)
+            ),
+            f"item {index}",
+        )
+        console.print(
+            f"  {index}. {sanitize_terminal_text(label)}: {sanitize_terminal_text(identifier)}",
+            markup=False,
+            soft_wrap=True,
+        )
 
 
 def _print_detail(console: Console, data: dict[str, Any]) -> None:
