@@ -244,6 +244,8 @@ ignore = [
 "tests/test_report_pdf.py" = ["S105", "S106"]
 # Fake MCP server matches the SDK's MCPServer signature; its args are unused.
 "tests/test_mcp_client.py" = ["S105", "S106", "ARG002"]
+# MCP connection request in a test carries a dummy bearer token.
+"tests/test_runner_root_prompt.py" = ["S106"]
 # Stdlib HTTP handler overrides (do_GET/do_POST) and lazy imports that avoid a
 # circular dependency with strix.telemetry / strix.interface.viewer.report_pdf.
 "strix/interface/viewer/server.py" = ["N802", "PLC0415"]
@@ -254,6 +256,11 @@ ignore = [
 "strix/tools/notes/tools.py" = ["PLC0415", "TC002"]
 "strix/tools/finish/tool.py" = ["PLC0415", "TC002"]
 "strix/tools/reporting/tool.py" = ["PLC0415", "TC002"]
+# Lazy imports of strix.tools.mcp.client avoid a circular import (client imports
+# the session module at module load).
+"strix/tools/mcp/session.py" = ["PLC0415"]
+# call_mcp is a chain of guard clauses that each return an error string.
+"strix/tools/mcp/agent_tools.py" = ["PLR0911"]
 "strix/tools/**/*.py" = [
     "ARG001", # Unused function argument (tools may have unused args for interface consistency)
 ]

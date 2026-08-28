@@ -185,6 +185,7 @@ class GoTuiRuntime:
                 max_turns=self.args.max_turns,
                 max_budget_usd=self.args.max_budget_usd,
                 event_sink=self.capture_event,
+                mcp_status_sink=self.capture_mcp_status,
             )
             await self._sync_agent_state()
             if self.controller.scan_state == "running":
@@ -207,22 +208,17 @@ class GoTuiRuntime:
             self.controller.notify_changed()
 
     def capture_event(self, agent_id: str, event: Any) -> None:
-        self._refresh_mcp_connections()
         self.live_view.ingest_sdk_event(agent_id, event)
         self.controller.notify_changed()
 
-    def _refresh_mcp_connections(self) -> None:
-        """Hand the projection the MCP servers the scan connected.
+    def capture_mcp_status(self, roster: list[dict[str, Any]]) -> None:
+        """Receive the engine's MCP connection roster and hand it to the controller.
 
-        The scan records them as it connects, which is before the agent can call
-        anything, and the projection needs them to say which server a tool call
-        went out to. Read on the way in rather than pushed, so no tool call can
-        be projected before they arrive.
-        """
-        if self.report_state is None:
-            return
-        connections = self.report_state.run_record.get("mcp_connections") or []
-        self.live_view.set_mcp_connections(connections)
+        Runs on the scan's event loop (called from the runner at establishment
+        and from a session's on-dead callback), the same loop that drives
+        ``capture_event``, so updating the controller and repainting here is
+        safe. The controller renders it as the sidebar MCP connections panel."""
+        self.controller.set_mcp_connections(roster)
 
     async def _sync_agent_state(self) -> bool:
         parent_of, statuses, names, errors = await self.coordinator.graph_snapshot()
