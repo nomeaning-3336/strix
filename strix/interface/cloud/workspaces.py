@@ -86,12 +86,13 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
         body["scopes"] = args.scopes
     elif not external_token:
         stored_scopes = stored_record.get("requested_scopes", stored_record.get("scopes"))
+        stored_scope_items = cast("list[Any]", cast("Any", stored_scopes))
         if (
             isinstance(stored_scopes, list)
-            and stored_scopes
-            and all(isinstance(scope, str) for scope in stored_scopes)
+            and stored_scope_items
+            and all(isinstance(scope, str) for scope in stored_scope_items)
         ):
-            body["scopes"] = [scope for scope in stored_scopes if isinstance(scope, str)]
+            body["scopes"] = [scope for scope in stored_scope_items if isinstance(scope, str)]
     switched = _switch_workspace_token(
         str(workspace["id"]),
         token=args.token,
@@ -104,10 +105,12 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
     if not isinstance(switched_token, str) or not switched_token.strip():
         raise _workspace_switch_unknown("the platform response omitted the token")
     switched_scopes = switched_record.get("scopes")
+    switched_scope_items = cast("list[Any]", cast("Any", switched_scopes))
     if not isinstance(switched_scopes, list) or not all(
-        isinstance(scope, str) for scope in switched_scopes
+        isinstance(scope, str) for scope in switched_scope_items
     ):
         raise _workspace_switch_unknown("the platform response contained invalid scopes")
+    validated_scopes = cast("list[str]", switched_scope_items)
 
     record.update(
         {
@@ -117,7 +120,7 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
                 "organization_name", workspace.get("name", "")
             ),
             "expires_at": switched_record.get("expires_at"),
-            "scopes": switched_scopes,
+            "scopes": validated_scopes,
             "requested_scopes": (
                 list(args.scopes)
                 if args.scopes
@@ -127,7 +130,7 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
                         stored_record.get("scopes", []),
                     )
                     if not external_token
-                    else switched_scopes
+                    else validated_scopes
                 )
             ),
             "app_url": http.app_url(),
@@ -161,7 +164,8 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
     console.print(f"[green]✓ Switched to workspace [bold]{workspace_name}[/].[/]")
     scopes = record.get("scopes")
     if isinstance(scopes, list) and scopes:
-        scope_names = [scope for scope in scopes if isinstance(scope, str)]
+        scope_items = cast("list[Any]", cast("Any", scopes))
+        scope_names = [scope for scope in scope_items if isinstance(scope, str)]
         if scope_names:
             rendered_scopes = escape(sanitize_terminal_text(" ".join(scope_names)))
             console.print(f"  Scopes: [dim]{rendered_scopes}[/]")
@@ -211,7 +215,9 @@ def _workspace_switch_unknown(detail: str) -> http.CloudError:
 
 def _emit_cloud_error(console: Console, error: http.CloudError, *, as_json: bool) -> None:
     if as_json:
-        payload = dict(error.payload) if isinstance(error.payload, dict) else {}
+        raw_payload: Any = error.payload
+        error_payload = cast("dict[str, Any]", raw_payload)
+        payload = dict(error_payload) if isinstance(raw_payload, dict) else {}
         payload["error"] = str(error)
         emit(console, payload, as_json=True)
         return
@@ -222,7 +228,10 @@ def _find_workspace(selector: str, *, token: str | None) -> dict[str, Any]:
     listed = http.check(http.request("GET", "/workspaces", token=token))
     listed_record = cast("dict[str, Any]", listed) if isinstance(listed, dict) else {}
     items = listed_record.get("workspaces")
-    workspaces = [cast("dict[str, Any]", item) for item in (items or []) if isinstance(item, dict)]
+    item_values = cast("list[Any]", cast("Any", items)) if isinstance(items, list) else []
+    workspaces = [
+        cast("dict[str, Any]", cast("Any", item)) for item in item_values if isinstance(item, dict)
+    ]
     if not workspaces:
         raise http.CloudError("no workspaces found for this account.")
     wanted = selector.strip()

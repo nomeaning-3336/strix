@@ -809,8 +809,10 @@ def _ambiguous_scan_launch_error(
     exit_code = http.EXIT_ERROR
     if isinstance(error, http.CloudError):
         exit_code = error.exit_code
-        if isinstance(error.payload, dict):
-            payload.update(cast("dict[str, Any]", error.payload))
+        raw_payload: Any = error.payload
+        error_payload = cast("dict[str, Any]", raw_payload)
+        if isinstance(raw_payload, dict):
+            payload.update(error_payload)
             payload["error"] = message
     _attach_idempotency_recovery(payload, idempotency_key)
     return http.CloudError(message, exit_code=exit_code, payload=payload)
@@ -1011,8 +1013,9 @@ def _emit_error(
     console: Console, exc: http.CloudError, *, as_json: bool, to_stderr: bool = False
 ) -> None:
     if as_json:
-        if isinstance(exc.payload, dict):
-            error_payload = cast("dict[str, Any]", exc.payload)
+        raw_payload: Any = exc.payload
+        error_payload = cast("dict[str, Any]", raw_payload)
+        if isinstance(raw_payload, dict):
             payload = dict(error_payload)
             payload.setdefault("error", str(exc))
             if payload.get("detail") == payload.get("error"):

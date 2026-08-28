@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _dedupe_extra_args(dedupe: DedupeSettings) -> dict[str, str]:
+def dedupe_extra_args(dedupe: DedupeSettings) -> dict[str, str]:
     """Per-call credential + endpoint for the dedupe model.
 
     Provider env vars and the global base URL are process-wide, so a
@@ -64,7 +64,7 @@ def _dedupe_model_settings(
         extra_headers=dedupe.extra_headers if dedupe.model else llm.extra_headers,
         has_tools=False,
     )
-    extra = _dedupe_extra_args(dedupe)
+    extra = dedupe_extra_args(dedupe)
     if extra:
         settings = settings.resolve(ModelSettings(extra_args=extra))
     return settings

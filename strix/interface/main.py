@@ -217,12 +217,12 @@ async def warm_up_llm(show_model_warning: bool = True) -> None:
         logger.info("LLM warm-up succeeded for model %s", (llm.model or "").strip())
 
         if settings.dedupe.model:
-            from strix.report.dedupe import _dedupe_extra_args
+            from strix.report.dedupe import dedupe_extra_args
 
             dedupe_model = settings.dedupe.model.strip()
             raw_model = dedupe_model
             deduper = StrixProvider().get_model(dedupe_model)
-            deduper_extra = _dedupe_extra_args(settings.dedupe)
+            deduper_extra = dedupe_extra_args(settings.dedupe)
             # A dedicated dedupe model may route to another provider, which must
             # never receive the main endpoint's headers; it has its own
             # DEDUPE_LLM_EXTRA_HEADERS.

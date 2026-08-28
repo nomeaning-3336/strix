@@ -71,7 +71,7 @@ def app_url() -> str:
     viewer = load_settings().viewer
     configured = viewer.app_url.rstrip("/")
     explicitly_configured = bool(os.environ.get("STRIX_APP_URL")) or "app_url" in getattr(
-        viewer, "model_fields_set", set()
+        viewer, "model_fields_set", set[str]()
     )
     if explicitly_configured or _token_override_active or os.environ.get("STRIX_API_TOKEN"):
         return configured

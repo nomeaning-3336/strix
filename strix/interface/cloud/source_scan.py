@@ -349,11 +349,12 @@ def _retained_source_upload_error(
     exit_code = http.EXIT_ERROR
     if isinstance(error, http.CloudError):
         exit_code = error.exit_code
-        if isinstance(error.payload, dict):
-            error_payload = cast("dict[str, Any]", error.payload)
+        raw_payload: Any = error.payload
+        error_payload = cast("dict[str, Any]", raw_payload)
+        if isinstance(raw_payload, dict):
             payload.update(error_payload)
-        elif error.payload is not None:
-            payload["detail"] = error.payload
+        elif raw_payload is not None:
+            payload["detail"] = raw_payload
     payload.update(
         {
             "error": message,

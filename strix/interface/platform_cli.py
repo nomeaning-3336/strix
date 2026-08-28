@@ -333,8 +333,9 @@ def _bind_login_record(
         (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", "")
     )
     preference: Any = requested_scopes if requested_scopes is not None else record.get("scopes")
-    if isinstance(preference, list) and all(isinstance(scope, str) for scope in preference):
-        bound["requested_scopes"] = list(dict.fromkeys(cast("list[str]", preference)))
+    preference_items = cast("list[Any]", preference)
+    if isinstance(preference, list) and all(isinstance(scope, str) for scope in preference_items):
+        bound["requested_scopes"] = list(dict.fromkeys(cast("list[str]", preference_items)))
     return bound
 
 
@@ -385,7 +386,8 @@ def _complete_selection(
 def _dict_items(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    return [item for item in value if isinstance(item, dict)]
+    items = cast("list[Any]", cast("Any", value))
+    return [cast("dict[str, Any]", cast("Any", item)) for item in items if isinstance(item, dict)]
 
 
 def _choose_workspace(
@@ -543,7 +545,8 @@ def _print_success(console: Console, record: dict[str, Any]) -> None:
         console.print(f"  Workspace: [bold]{_terminal_markup(organization)}[/]")
     scopes = record.get("scopes")
     if isinstance(scopes, list) and scopes:
-        rendered_scopes = _terminal_markup(" ".join(str(s) for s in scopes))
+        scope_items = cast("list[Any]", cast("Any", scopes))
+        rendered_scopes = _terminal_markup(" ".join(str(scope) for scope in scope_items))
         console.print(f"  Scopes:    [dim]{rendered_scopes}[/]")
     console.print(f"  Token:     stored in [dim]{_terminal_markup(AUTH_PATH)}[/]")
     console.print()
@@ -603,7 +606,10 @@ def _status(console: Console, argv: list[str]) -> int:
         console.print(f"  Platform: {_terminal_markup(record['app_url'])}")
     scopes = record.get("scopes")
     if isinstance(scopes, list) and scopes:
-        console.print(f"  Scopes: {_terminal_markup(' '.join(str(scope) for scope in scopes))}")
+        scope_items = cast("list[Any]", cast("Any", scopes))
+        console.print(
+            f"  Scopes: {_terminal_markup(' '.join(str(scope) for scope in scope_items))}"
+        )
     return 0
 
 
