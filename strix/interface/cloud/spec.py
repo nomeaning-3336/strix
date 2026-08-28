@@ -110,9 +110,10 @@ _TEST_USER_BODY = (
 )
 
 _GIT_TOKEN_BODY = (
-    P("token", required=True, help="Provider access token.", flag="provider-token"),
-    P("instance_url", help="Base URL for a self-hosted instance."),
-    P("workspace", help="Bitbucket workspace name."),
+    P("access_token", required=True, help="Provider access token.", flag="provider-token"),
+    P("instance_url", help="GitLab base URL, for example https://gitlab.com."),
+    P("account_email", help="Bitbucket account email address."),
+    P("installation_id", "int", help="Existing installation ID to update."),
 )
 
 

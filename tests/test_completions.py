@@ -81,6 +81,16 @@ def test_exact_verbs_that_are_also_prefixes_keep_their_subverbs() -> None:
 
 
 def test_contract_fix_flags_are_completed() -> None:
+    integration_connect = completion_candidates(
+        ["cloud", "integrations", "connect", "gitlab", "--"]
+    )
+    assert {
+        "--provider-token",
+        "--instance-url",
+        "--account-email",
+        "--installation-id",
+    } <= set(integration_connect)
+
     disconnect = completion_candidates(["cloud", "integrations", "disconnect", "--"])
     assert "--installation-id" in disconnect
 

@@ -296,10 +296,45 @@ def test_required_secret_body_field_can_come_from_stdin(
         return FakeResponse(payload={"ok": True})
 
     monkeypatch.setattr(http, "request", fake_request)
-    monkeypatch.setattr("sys.stdin", io.StringIO('{"token":"provider-secret"}'))
+    monkeypatch.setattr("sys.stdin", io.StringIO('{"access_token":"provider-secret"}'))
 
     assert cloud.run_cloud(["integrations", "connect", "gitlab", "--data", "-", "--json"]) == 0
-    assert seen["body"] == {"token": "provider-secret"}
+    assert seen["body"] == {"access_token": "provider-secret"}
+
+
+def test_provider_token_does_not_override_strix_api_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: dict[str, Any] = {}
+
+    def fake_request(_method: str, _path: str, **kwargs: Any) -> FakeResponse:
+        seen.update(token=kwargs.get("token"), body=kwargs.get("body"))
+        return FakeResponse(payload={"ok": True})
+
+    monkeypatch.setattr(http, "request", fake_request)
+
+    assert (
+        cloud.run_cloud(
+            [
+                "integrations",
+                "connect",
+                "gitlab",
+                "--provider-token",
+                "provider-secret",
+                "--instance-url",
+                "https://gitlab.com",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    assert seen == {
+        "token": None,
+        "body": {
+            "access_token": "provider-secret",
+            "instance_url": "https://gitlab.com",
+        },
+    }
 
 
 def test_required_body_field_is_validated_after_data_merge(capsys: Any) -> None:
