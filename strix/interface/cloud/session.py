@@ -147,7 +147,13 @@ def _string_list(value: Any) -> list[str]:
 
 def _error(console: Console, error: http.CloudError, *, as_json: bool) -> int:
     if as_json:
-        emit(console, {"error": str(error)}, as_json=True)
+        raw_payload: Any = error.payload
+        error_payload = cast("dict[str, Any]", raw_payload)
+        payload = dict(error_payload) if isinstance(raw_payload, dict) else {}
+        payload["error"] = str(error)
+        if payload.get("detail") == payload.get("error"):
+            payload.pop("detail", None)
+        emit(console, payload, as_json=True)
     else:
         console.print(f"[red]Error:[/] {escape(sanitize_terminal_text(error))}")
     return error.exit_code

@@ -6,9 +6,11 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from rich.console import Console
 
 from strix.interface import cloud, platform_cli, platform_identity
 from strix.interface.cloud import http
+from strix.interface.cloud import session as cloud_session
 
 
 if TYPE_CHECKING:
@@ -157,6 +159,25 @@ def test_local_only_logout_is_explicit_and_recoverable(auth_path: Path, capsys: 
     assert payload["local_only"] is True
     assert payload["remotely_revoked"] is False
     assert not auth_path.exists()
+
+
+def test_session_json_errors_preserve_machine_readable_server_details(capsys: Any) -> None:
+    error = http.CloudError(
+        "workspace changed",
+        payload={
+            "detail": "workspace changed",
+            "code": "workspace_session_changed",
+            "current_organization_id": "org_current",
+        },
+    )
+
+    assert cloud_session._error(Console(), error, as_json=True) == http.EXIT_ERROR
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {
+        "code": "workspace_session_changed",
+        "current_organization_id": "org_current",
+        "error": "workspace changed",
+    }
 
 
 def test_cli_device_identity_is_stable_and_privacy_safe(

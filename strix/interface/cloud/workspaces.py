@@ -169,6 +169,14 @@ def _use(  # noqa: PLR0912, PLR0915
         "workspace_id": record["organization_id"],
         "workspace_name": record["organization_name"],
         "scopes": record["scopes"],
+        "requested_scopes": record.get("requested_scopes", record["scopes"]),
+        "scope_ceiling": record.get("scope_ceiling", []),
+        "scope_profile": record.get("scope_profile", "custom"),
+        "expires_at": record.get("expires_at"),
+        "token_id": record.get("token_id"),
+        "credential_source": record.get("credential_source", "api"),
+        "device_name": record.get("device_name"),
+        "stored": not external_token,
     }
     if as_json:
         emit(console, result, as_json=True)

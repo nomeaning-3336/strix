@@ -1685,11 +1685,14 @@ def test_workspaces_use_switches_stored_token(
     assert record["api_token"] == "old"
     assert record["organization_name"] == "Team One"
     assert record["email"] == "a@b.test"
-    assert "org_1" in capsys.readouterr().out
+    output = json.loads(capsys.readouterr().out)
+    assert output["workspace_id"] == "org_1"
+    assert output["scope_profile"] == "custom"
+    assert output["stored"] is True
 
 
 def test_workspace_use_explicit_token_starts_with_fresh_account_state(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: Any
 ) -> None:
     auth_path = tmp_path / "platform-auth.json"
     monkeypatch.setattr(platform_cli, "AUTH_PATH", auth_path)
@@ -1733,6 +1736,9 @@ def test_workspace_use_explicit_token_starts_with_fresh_account_state(
     assert record["api_token"] == "account-a-token"
     assert record["organization_id"] == "org_a"
     assert record["email"] == "account-a@example.test"
+    output = json.loads(capsys.readouterr().out)
+    assert output["workspace_id"] == "org_b"
+    assert output["stored"] is False
 
 
 def test_workspace_use_environment_token_starts_with_fresh_account_state(
