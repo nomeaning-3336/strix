@@ -143,7 +143,8 @@ def test_max_reasoning_effort_sent_as_raw_body_field() -> None:
         "max", model_name="deepseek/deepseek-v4-flash", request_timeout=30
     )
     assert settings.reasoning is None
-    assert settings.extra_args == {"timeout": 30, "extra_body": {"reasoning_effort": "max"}}
+    assert settings.extra_args == {"timeout": 30}
+    assert settings.extra_body == {"reasoning_effort": "max"}
 
 
 def test_conversation_tail_breakpoint_moves_with_appended_transcript() -> None:
