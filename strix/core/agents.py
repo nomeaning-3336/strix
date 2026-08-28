@@ -39,7 +39,6 @@ class AgentRuntime:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     mailbox: list[dict[str, Any]] = field(default_factory=list)
     user_wake_required: bool = False
-    provider_outage: bool = False
 
 
 class AgentCoordinator:
@@ -54,6 +53,7 @@ class AgentCoordinator:
         self.errors: dict[str, str] = {}
         self.recovery_counts: dict[str, int] = {}
         self.idle_resume_counts: dict[str, int] = {}
+        self.revival_counts: dict[str, int] = {}
         self.wait_kinds: dict[str, WaitKind] = {}
         self.runtimes: dict[str, AgentRuntime] = {}
         self._parent_notified: set[str] = set()
@@ -121,49 +121,54 @@ class AgentCoordinator:
                     },
                 )
 
-    async def mark_provider_outage(self, agent_id: str) -> None:
-        """Record that the provider, not the agent, is what stopped ``agent_id``."""
-        async with self._lock:
-            self.runtimes.setdefault(agent_id, AgentRuntime()).provider_outage = True
+    async def revive_failed_agents(self, reason: str, *, limit: int) -> list[str]:
+        """Give agents that died a bounded second chance while the scan is healthy.
 
-    async def revive_after_provider_outage(self, reason: str) -> list[str]:
-        """Wake every agent a provider outage killed, once a call succeeds again.
-
-        An outage on the provider side - no credits, a hard quota - fails every
-        in-flight agent within seconds, and a failed agent is gated behind a user
-        message. The user can only realistically message the root, so without this
-        the rest of the fleet stays dead for the life of the scan even though
-        nothing is wrong with it. The first call that gets through proves the
-        outage is over, so lift the gate and tell each agent why it lost time.
+        A failed agent is gated behind a user message, and the user can only
+        realistically reach the root, so a child that dies stays dead for the rest
+        of the scan - however it died, and however brief the cause was. A turn that
+        lands anywhere is the scan's own evidence that whatever broke may be over,
+        which is worth another attempt. ``limit`` is what separates that from a
+        livelock: an agent that is genuinely broken drains its budget and stays
+        down. The self-recovery layers - retries, compaction, tool nudges - have all
+        already run by the time an agent reaches this state, so a revival is a last
+        chance rather than a first one.
         """
+        revived: list[str] = []
         async with self._lock:
-            revived = [
-                agent_id
-                for agent_id, runtime in self.runtimes.items()
-                if runtime.provider_outage and self.statuses.get(agent_id) in {"failed", "crashed"}
-            ]
-            for runtime in self.runtimes.values():
-                runtime.provider_outage = False
-            for agent_id in revived:
+            for agent_id, status in self.statuses.items():
+                if status not in {"failed", "crashed"}:
+                    continue
+                if self.revival_counts.get(agent_id, 0) >= limit:
+                    continue
+                self.revival_counts[agent_id] = self.revival_counts.get(agent_id, 0) + 1
                 # ``set_status`` only retires an error on the way to "running", and
-                # these go to "waiting" first; the outage they name is over.
+                # these go to "waiting" first.
                 self.errors.pop(agent_id, None)
+                revived.append(agent_id)
         for agent_id in revived:
-            # "waiting" clears the human-wake gate; the message then wakes the
-            # loop that is parked in ``wait_for_message``.
+            # "waiting" clears the human-wake gate; the message then wakes the loop
+            # parked in ``wait_for_message``.
             await self.set_status(agent_id, "waiting")
             await self.send(
                 agent_id,
-                {"from": "system", "type": "provider_recovered", "content": reason},
+                {"from": "system", "type": "revived", "content": reason},
                 interrupt=False,
             )
         if revived:
-            logger.info("provider outage cleared; revived %d agent(s)", len(revived))
+            logger.info("scan recovered; revived %d failed agent(s)", len(revived))
         return revived
 
+    async def reset_revivals(self, agent_id: str) -> None:
+        """Retire an agent's revival budget once it completes a turn of its own."""
+        async with self._lock:
+            if self.revival_counts.pop(agent_id, None) is None:
+                return
+        await self._maybe_snapshot()
+
     @property
-    def provider_outage_active(self) -> bool:
-        return any(runtime.provider_outage for runtime in self.runtimes.values())
+    def has_failed_agents(self) -> bool:
+        return any(status in {"failed", "crashed"} for status in self.statuses.values())
 
     async def reset_budget_stops(
         self,
@@ -518,6 +523,7 @@ class AgentCoordinator:
                 "pending_counts": dict(self.pending_counts),
                 "recovery_counts": dict(self.recovery_counts),
                 "idle_resume_counts": dict(self.idle_resume_counts),
+                "revival_counts": dict(self.revival_counts),
                 "wait_kinds": dict(self.wait_kinds),
                 "mailboxes": {
                     aid: [dict(m) for m in runtime.mailbox]
@@ -540,6 +546,7 @@ class AgentCoordinator:
             self.errors = dict(snap.get("errors", {}))
             self.recovery_counts = dict(snap.get("recovery_counts", {}))
             self.idle_resume_counts = dict(snap.get("idle_resume_counts", {}))
+            self.revival_counts = dict(snap.get("revival_counts", {}))
             self.wait_kinds = dict(snap.get("wait_kinds", {}))
             mailboxes = snap.get("mailboxes", {})
             if isinstance(mailboxes, dict):
