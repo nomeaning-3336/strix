@@ -22,15 +22,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_REVIVED_NOTICE = {
-    "from": "system",
-    "type": "revived",
-    "content": (
-        "[Recovery] Your last turn failed and the user has since sent a message. "
-        "Pick your current task back up from where it stopped."
-    ),
-}
-
 Status = Literal["running", "waiting", "completed", "stopped", "crashed", "failed", "budget_paused"]
 
 # Why an agent parked. The user can message any agent, so this - not the agent's
@@ -128,36 +119,6 @@ class AgentCoordinator:
                         ),
                     },
                 )
-
-    async def revive_failed_agents(self, *, exclude: str | None = None) -> list[str]:
-        """Lift the human-wake gate on every agent that died, on the user's word.
-
-        A failed agent parks until a human tells it to go again. The user can only
-        realistically reach the root, so that word never arrives for anything below
-        it and a child that dies stays dead for the rest of the scan - however it
-        died. A message from the user is that word for all of them: it says a person
-        is present and has changed something. Nothing else revives an agent, so
-        there is no runaway here to bound - the person deciding whether to try again
-        is the limit.
-        """
-        revived: list[str] = []
-        async with self._lock:
-            for agent_id, status in self.statuses.items():
-                if agent_id == exclude or status not in {"failed", "crashed"}:
-                    continue
-                self.statuses[agent_id] = "waiting"
-                self.errors.pop(agent_id, None)
-                runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
-                runtime.user_wake_required = False
-                # An empty mailbox parks the agent straight back where it was, so the
-                # note is what actually resumes it as well as what explains the gap.
-                runtime.mailbox.append(dict(_REVIVED_NOTICE))
-                self.pending_counts[agent_id] = self.pending_counts.get(agent_id, 0) + 1
-                runtime.wake.set()
-                revived.append(agent_id)
-        if revived:
-            logger.info("user message revived %d failed agent(s)", len(revived))
-        return revived
 
     async def reset_budget_stops(
         self,
@@ -321,10 +282,6 @@ class AgentCoordinator:
         from_user = message.get("from") == "user"
         if from_user and self._budget_paused:
             await self.resume_from_budget_pause(exclude=target_agent_id)
-        if from_user:
-            # The gate below only unsticks the agent addressed. Everything else that
-            # died is waiting on the same human, who has just spoken.
-            await self.revive_failed_agents(exclude=target_agent_id)
         async with self._lock:
             if target_agent_id not in self.statuses:
                 logger.debug("agent.send dropped unknown target=%s", target_agent_id)
