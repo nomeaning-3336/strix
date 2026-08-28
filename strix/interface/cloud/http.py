@@ -24,6 +24,7 @@ _SUPABASE_STORAGE_HOST = re.compile(r"^[a-z0-9-]+\.supabase\.co$")
 _STORAGE_PATH_PREFIX = "/storage/v1/"
 _app_url_override: str | None = None
 _token_override_active = False
+_workspace_id_override: str | None = None
 _timeout_s: float = _DEFAULT_TIMEOUT_S
 
 EXIT_OK = 0
@@ -51,11 +52,26 @@ def configure(
     base_url: str | None = None,
     timeout: float | None = None,
     token_override: bool = False,
+    workspace_id: str | None = None,
 ) -> None:
     """Set the platform URL and the request timeout for this process."""
     global _app_url_override, _timeout_s, _token_override_active  # noqa: PLW0603
+    global _workspace_id_override  # noqa: PLW0603
     _app_url_override = base_url.rstrip("/") if base_url else None
     _token_override_active = token_override
+    explicit_workspace = workspace_id or os.environ.get("STRIX_WORKSPACE_ID")
+    if explicit_workspace:
+        _workspace_id_override = explicit_workspace.strip()
+    elif not token_override and not os.environ.get("STRIX_API_TOKEN"):
+        record = read_record()
+        stored_workspace = record.get("organization_id") if record is not None else None
+        _workspace_id_override = (
+            stored_workspace.strip()
+            if isinstance(stored_workspace, str) and stored_workspace.strip()
+            else None
+        )
+    else:
+        _workspace_id_override = None
     if timeout is not None:
         if not math.isfinite(timeout) or timeout <= 0:
             raise CloudError(
@@ -140,7 +156,15 @@ def request(
     idempotency_key: str | None = None,
 ) -> requests.Response:
     url = f"{app_url()}/api/v1{path}"
-    headers = {"Authorization": f"Bearer {api_token(token)}"}
+    headers = {
+        "Authorization": f"Bearer {api_token(token)}",
+    }
+    bypass = os.environ.get("STRIX_VERCEL_PROTECTION_BYPASS", "").strip()
+    if bypass:
+        headers["x-vercel-protection-bypass"] = bypass
+    workspace_id = _expected_workspace_id(token_override=token is not None)
+    if workspace_id:
+        headers["X-Strix-Workspace"] = workspace_id
     if idempotency_key is not None:
         headers["Idempotency-Key"] = idempotency_key
     try:
@@ -162,6 +186,15 @@ def request(
     except requests.RequestException as exc:
         raise CloudTransportError(f"could not reach {app_url()}: {exc}") from exc
     return response
+
+
+def _expected_workspace_id(*, token_override: bool) -> str | None:
+    """Pin every request in this process to the workspace selected at startup."""
+    if _workspace_id_override:
+        return _workspace_id_override
+    if token_override or _token_override_active or os.environ.get("STRIX_API_TOKEN"):
+        return None
+    return None
 
 
 def upload_file(signed_url: str, upload_token: str, path: Path) -> None:

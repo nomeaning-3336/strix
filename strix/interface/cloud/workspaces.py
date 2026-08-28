@@ -18,6 +18,7 @@ import strix.interface.cloud.http as http  # noqa: PLR0402
 from strix.interface.cloud.arguments import CloudArgumentParser
 from strix.interface.cloud.render import emit, json_mode
 from strix.interface.platform_cli import AUTH_PATH, read_record, save_record
+from strix.interface.platform_identity import read_or_create_identity
 from strix.interface.terminal_text import sanitize_terminal_text
 
 
@@ -37,17 +38,32 @@ def run_workspace_use(argv: list[str]) -> int:
         metavar="WORKSPACE",
         help="Workspace number from `workspaces list`, ID, or exact name.",
     )
-    parser.add_argument(
+    scope_mode = parser.add_mutually_exclusive_group()
+    scope_mode.add_argument(
         "--scopes",
         nargs="+",
         metavar="SCOPE",
         default=None,
         help=(
-            "API scopes after switching. Without this option, preserve the stored request scopes."
+            "Use a custom scope set within the login-approved ceiling. "
+            "Without this option, preserve the server-side scope preference."
         ),
     )
+    scope_mode.add_argument(
+        "--scope-profile",
+        choices=("minimal", "recommended", "full"),
+        default=None,
+        help="Change to a profile within the authority approved at login.",
+    )
+    parser.add_argument("--show-scopes", action="store_true", help="Print every granted scope.")
     parser.add_argument("--json", action="store_true", help="Print the raw JSON response.")
     parser.add_argument("--token", default=None, help="API token override.")
+    parser.add_argument(
+        "--workspace-id",
+        default=None,
+        metavar="ORG_ID",
+        help="Expected workspace for an override CLI token.",
+    )
     parser.add_argument("--app-url", default=None, metavar="URL", help="Platform URL override.")
     parser.add_argument(
         "--timeout", default=None, type=float, metavar="SECONDS", help="Request timeout in seconds."
@@ -67,6 +83,7 @@ def run_workspace_use(argv: list[str]) -> int:
             base_url=args.app_url,
             timeout=args.timeout,
             token_override=bool(args.token),
+            workspace_id=args.workspace_id,
         )
         return _use(console, args, as_json=as_json)
     except http.CloudError as exc:
@@ -74,7 +91,9 @@ def run_workspace_use(argv: list[str]) -> int:
         return exc.exit_code
 
 
-def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
+def _use(  # noqa: PLR0912, PLR0915
+    console: Console, args: argparse.Namespace, *, as_json: bool
+) -> int:
     workspace = _find_workspace(args.workspace, token=args.token)
     stored_record: dict[str, Any] = read_record() or {}
     # An override token may belong to a different account. Never mix its new
@@ -84,15 +103,14 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
     body: dict[str, Any] = {}
     if args.scopes:
         body["scopes"] = args.scopes
-    elif not external_token:
-        stored_scopes = stored_record.get("requested_scopes", stored_record.get("scopes"))
-        stored_scope_items = cast("list[Any]", cast("Any", stored_scopes))
-        if (
-            isinstance(stored_scopes, list)
-            and stored_scope_items
-            and all(isinstance(scope, str) for scope in stored_scope_items)
-        ):
-            body["scopes"] = [scope for scope in stored_scope_items if isinstance(scope, str)]
+        body["scope_profile"] = "custom"
+    elif args.scope_profile:
+        body["scope_profile"] = args.scope_profile
+    if not external_token:
+        try:
+            body.update(read_or_create_identity())
+        except (OSError, ValueError) as exc:
+            raise http.CloudError(f"could not load the CLI device identity: {exc}") from exc
     switched = _switch_workspace_token(
         str(workspace["id"]),
         token=args.token,
@@ -119,38 +137,33 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
             "organization_name": switched_record.get(
                 "organization_name", workspace.get("name", "")
             ),
-            "expires_at": switched_record.get("expires_at"),
+            "expires_at": switched_record.get("expires_at") or stored_record.get("expires_at"),
             "scopes": validated_scopes,
-            "requested_scopes": (
-                list(args.scopes)
-                if args.scopes
-                else (
-                    stored_record.get(
-                        "requested_scopes",
-                        stored_record.get("scopes", []),
-                    )
-                    if not external_token
-                    else validated_scopes
-                )
-            ),
+            "requested_scopes": switched_record.get("requested_scopes", validated_scopes),
+            "scope_ceiling": switched_record.get("scope_ceiling", []),
+            "scope_profile": switched_record.get("scope_profile", "custom"),
+            "token_id": switched_record.get("token_id"),
+            "credential_source": switched_record.get("credential_source", "api"),
+            "device_name": switched_record.get("device_name"),
             "app_url": http.app_url(),
         }
     )
     if switched_record.get("email"):
         record["email"] = switched_record["email"]
-    try:
-        save_record(record)
-    except OSError as exc:
-        raise http.CloudError(
-            "the platform switched the token, but the local workspace metadata could not be "
-            f"stored in {AUTH_PATH}: {exc}. The bearer is still valid; fix the file and safely "
-            "rerun the same workspace use command.",
-            payload={
-                "workspace_switched": True,
-                "local_record_updated": False,
-                "retry_safe": True,
-            },
-        ) from exc
+    if not external_token:
+        try:
+            save_record(record)
+        except OSError as exc:
+            raise http.CloudError(
+                "the platform switched the token, but the local workspace metadata could not be "
+                f"stored in {AUTH_PATH}: {exc}. The bearer is still valid; fix the file and safely "
+                "rerun the same workspace use command.",
+                payload={
+                    "workspace_switched": True,
+                    "local_record_updated": False,
+                    "retry_safe": True,
+                },
+            ) from exc
 
     result = {
         "workspace_id": record["organization_id"],
@@ -166,10 +179,16 @@ def _use(console: Console, args: argparse.Namespace, *, as_json: bool) -> int:
     if isinstance(scopes, list) and scopes:
         scope_items = cast("list[Any]", cast("Any", scopes))
         scope_names = [scope for scope in scope_items if isinstance(scope, str)]
-        if scope_names:
+        if scope_names and args.show_scopes:
             rendered_scopes = escape(sanitize_terminal_text(" ".join(scope_names)))
             console.print(f"  Scopes: [dim]{rendered_scopes}[/]")
-    console.print(f"  Token:  stored in [dim]{escape(sanitize_terminal_text(AUTH_PATH))}[/]")
+        elif scope_names:
+            profile = str(record.get("scope_profile") or "custom").title()
+            console.print(f"  Access: [dim]{profile} · {len(scope_names)} scopes granted[/]")
+    if external_token:
+        console.print("  Token:  [dim]override used for this command only; not stored[/]")
+    else:
+        console.print(f"  Token:  stored in [dim]{escape(sanitize_terminal_text(AUTH_PATH))}[/]")
     return http.EXIT_OK
 
 

@@ -11,10 +11,18 @@ from strix.interface.terminal_text import has_terminal_control, sanitize_termina
 
 
 _ROOT_COMMANDS = ("cloud", "auth", "view", "completions", "completion")
-_SESSION_COMMANDS = ("login", "logout", "whoami", "credits")
-_COMMON_FLAGS = ("--json", "--token", "--app-url", "--timeout", "-h", "--help")
-_COMMON_VALUE_FLAGS = frozenset({"--token", "--app-url", "--timeout"})
-_WORKSPACE_USE_FLAGS = (*_COMMON_FLAGS, "--scopes")
+_SESSION_COMMANDS = ("login", "logout", "whoami", "session", "credits")
+_COMMON_FLAGS = (
+    "--json",
+    "--token",
+    "--workspace-id",
+    "--app-url",
+    "--timeout",
+    "-h",
+    "--help",
+)
+_COMMON_VALUE_FLAGS = frozenset({"--token", "--workspace-id", "--app-url", "--timeout"})
+_WORKSPACE_USE_FLAGS = (*_COMMON_FLAGS, "--scopes", "--scope-profile", "--show-scopes")
 
 
 def run_completions(argv: list[str]) -> int:
@@ -115,10 +123,26 @@ def _cloud_candidates(prior: list[str], current: str) -> list[str]:  # noqa: PLR
 
 
 def _session_candidates(group: str, prior: list[str], current: str) -> list[str]:
+    if group == "session":
+        if not prior:
+            return _matching(("show", "scopes", "help", *_COMMON_FLAGS, "--show-scopes"), current)
+        if prior[:1] == ["scopes"] and len(prior) == 1:
+            return _matching(("set", *_COMMON_FLAGS, "--show-scopes"), current)
+        if prior[:2] == ["scopes", "set"]:
+            return _matching(
+                ("minimal", "recommended", "full", "--scopes", *_COMMON_FLAGS, "--show-scopes"),
+                current,
+            )
+        return _flag_candidates(
+            (*_COMMON_FLAGS, "--show-scopes"),
+            prior,
+            current,
+            value_flags=_COMMON_VALUE_FLAGS | {"--scopes"},
+        )
     flags = _session_flags(group)
     value_flags: frozenset[str] = frozenset()
     if group == "login":
-        value_flags = frozenset({"--scopes", "--workspace"})
+        value_flags = frozenset({"--scopes", "--scope-profile", "--workspace", "--device-name"})
     elif group == "credits":
         value_flags = _COMMON_VALUE_FLAGS
     return _flag_candidates(flags, prior, current, value_flags=value_flags)
@@ -126,11 +150,19 @@ def _session_candidates(group: str, prior: list[str], current: str) -> list[str]
 
 def _session_flags(group: str) -> tuple[str, ...]:
     if group == "login":
-        return ("--no-browser", "--scopes", "--workspace", "-h", "--help")
+        return (
+            "--no-browser",
+            "--scopes",
+            "--scope-profile",
+            "--workspace",
+            "--device-name",
+            "-h",
+            "--help",
+        )
     if group == "whoami":
-        return ("--json", "-h", "--help")
+        return ("--json", "--show-scopes", "-h", "--help")
     if group == "logout":
-        return ("--json", "-h", "--help")
+        return ("--json", "--local-only", "-h", "--help")
     if group == "credits":
         return _COMMON_FLAGS
     return ("-h", "--help")

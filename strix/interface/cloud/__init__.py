@@ -17,6 +17,7 @@ from rich.markup import escape
 import strix.interface.cloud.http as http  # noqa: PLR0402
 from strix.interface.cloud.render import json_mode
 from strix.interface.cloud.runner import resolve, run
+from strix.interface.cloud.session import run_session
 from strix.interface.cloud.spec import DEFAULT_VERBS, GROUP_HELP, SPEC
 from strix.interface.cloud.workspaces import run_workspace_use
 from strix.interface.platform_cli import run_login
@@ -29,6 +30,7 @@ _USAGE_HEADER = """[bold]Usage:[/] strix cloud <command> [arguments]
   login       Sign in to the managed platform and store an API token
   logout      Remove the stored API token
   whoami      Show the stored account, workspace, and token state
+  session     Inspect or narrow the remote CLI session
   credits     Show the credit balance of the workspace
 
 [bold]Resource commands:[/]"""
@@ -83,6 +85,8 @@ def _run_cloud(argv: list[str]) -> int:  # noqa: PLR0911, PLR0912
         group = "workspaces"
     if group in ("login", "logout", "whoami"):
         return _run_session(console, group, rest)
+    if group == "session":
+        return run_session(rest)
     if group == "credits":
         group, rest = "billing", ["credits", *rest]
     if group == "workspaces" and rest and rest[0] == "use":
@@ -159,7 +163,7 @@ def _print_verbs(
 def _print_usage_json() -> None:
     payload = {
         "command": "strix cloud",
-        "session_commands": ["login", "logout", "whoami", "credits"],
+        "session_commands": ["login", "logout", "whoami", "session", "credits"],
         "resource_commands": [{"name": group, "help": GROUP_HELP.get(group, "")} for group in SPEC],
     }
     sys.stdout.write(json.dumps(payload, indent=2) + "\n")

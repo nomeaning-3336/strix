@@ -1671,12 +1671,15 @@ def test_workspaces_use_switches_stored_token(
         )
 
     monkeypatch.setattr(http, "request", fake_request)
+    monkeypatch.setattr(
+        workspaces,
+        "read_or_create_identity",
+        lambda: {"client_instance_id": "client-test", "device_name": "Test CLI"},
+    )
     code = cloud.run_cloud(["workspaces", "use", "team one", "--json"])
     assert code == 0
     assert calls == [("GET", "/workspaces"), ("POST", "/workspaces/org_1/token")]
-    assert token_body == {
-        "scopes": ["scans:read", "scans:write", "organizations:read", "tokens:write"]
-    }
+    assert token_body == {"client_instance_id": "client-test", "device_name": "Test CLI"}
     record = platform_cli.read_record()
     assert record is not None
     assert record["api_token"] == "old"
@@ -1727,11 +1730,9 @@ def test_workspace_use_explicit_token_starts_with_fresh_account_state(
     assert switch_body is None
     record = platform_cli.read_record()
     assert record is not None
-    assert record["api_token"] == "account-b-token"
-    assert record["organization_id"] == "org_b"
-    assert record["requested_scopes"] == ["scans:read", "organizations:read"]
-    assert "email" not in record
-    assert "account-a@example.test" not in auth_path.read_text(encoding="utf-8")
+    assert record["api_token"] == "account-a-token"
+    assert record["organization_id"] == "org_a"
+    assert record["email"] == "account-a@example.test"
 
 
 def test_workspace_use_environment_token_starts_with_fresh_account_state(
@@ -1775,11 +1776,9 @@ def test_workspace_use_environment_token_starts_with_fresh_account_state(
     assert switch_body is None
     record = platform_cli.read_record()
     assert record is not None
-    assert record["api_token"] == "account-b-token"
-    assert record["organization_id"] == "org_b"
-    assert record["email"] == "account-b@example.test"
-    assert record["requested_scopes"] == ["scans:read", "organizations:read"]
-    assert "account-a@example.test" not in auth_path.read_text(encoding="utf-8")
+    assert record["api_token"] == "account-a-token"
+    assert record["organization_id"] == "org_a"
+    assert record["email"] == "account-a@example.test"
 
 
 def test_workspaces_use_reports_unknown_workspace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1796,6 +1795,8 @@ def test_workspaces_use_reports_unknown_workspace(monkeypatch: pytest.MonkeyPatc
 def test_workspaces_use_reports_auth_storage_failure(
     monkeypatch: pytest.MonkeyPatch, capsys: Any
 ) -> None:
+    monkeypatch.delenv("STRIX_API_TOKEN", raising=False)
+
     def fake_request(method: str, path: str, **_kwargs: Any) -> FakeResponse:
         if method == "GET":
             return FakeResponse(payload={"workspaces": [{"id": "org_1", "name": "Team One"}]})

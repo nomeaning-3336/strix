@@ -325,15 +325,18 @@ strix auth logout             # forget the sign-in
 The `strix cloud` commands drive the managed platform ([app.strix.ai](https://app.strix.ai)) from the terminal. Sign in once with the device flow. The sign-in creates your account and workspace on first use and stores a personal API token in `~/.strix/platform-auth.json`:
 
 ```bash
-strix cloud login                         # browser approval, then workspace + scope picker
+strix cloud login                         # browser approval, then workspace + scope profile
 strix cloud login --workspace "My Team"   # select a workspace by name or ID
-strix cloud whoami                        # show the active sign-in and scopes
-strix cloud logout                        # forget the sign-in
+strix cloud whoami                        # fast local account/workspace status
+strix cloud session                       # verify remote session + consent ceiling
+strix cloud logout                        # revoke remotely, then remove locally
 ```
 
 The default **Recommended** scope preset supports normal scan work, local source uploads,
-and workspace switching. For strict least privilege, pass an explicit list such as
-`--scopes scans:read scans:write uploads:write billing:read`.
+workspace switching, and user-approved credit top-ups. It excludes credential creation;
+request `tokens:write` explicitly (or choose Full) when needed. For strict least privilege, pass an explicit list such as
+`--scopes scans:read scans:write uploads:write billing:read`. Named automation
+profiles are also available with `--scope-profile minimal|recommended|full`.
 
 Every operation of the [REST API](https://docs.app.strix.ai) has a matching command in the form `strix cloud <resource> <verb>`:
 
@@ -357,6 +360,8 @@ Workspaces and account setup also work from the terminal:
 strix cloud workspaces list                   # numbered list; `workspace` is also accepted
 strix cloud workspaces create --name "My Team" # admin + organizations:write
 strix cloud workspaces use 2                  # switch by list number, exact name, or ID
+strix cloud session scopes                    # granted scopes + login ceiling
+strix cloud session scopes set minimal        # narrow without another browser sign-in
 strix cloud billing subscribe --plan strix_cloud # opens the hosted checkout page
 strix cloud billing portal                    # opens the billing portal
 strix cloud integrations install github       # opens the app installation page
@@ -365,7 +370,15 @@ strix cloud domains verify <domain-id>        # prints the DNS record to add
 
 The last four commands end at a person. Strix creates the link, opens the browser for an interactive terminal, and always prints the URL. The user enters the card, approves the installation, or adds the DNS record. Pass `--no-browser` to print the URL only.
 
-The commands work for humans and agents: terminal output favors names, branches, lifecycle states, and numbered selectors, while redirected output (or `--json`) preserves complete machine-readable records and IDs. Human lists retain the selectors needed by follow-up commands but omit internal organization/user IDs; a selector too long for the compact table is repeated losslessly in a copyable block. Paginated lists print the next `--page` or `--offset`, and detail views preserve useful prose within a safe terminal bound; use `--json` for the complete record. Token lists label credentials as active, expired, or revoked. Binary downloads are the exception: intentionally redirect their raw bytes, or use `--output FILE --json` to write the file and receive structured download metadata. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication or plan limit, `5` payment required. Set the token with `--token` or `STRIX_API_TOKEN` to skip the stored sign-in.
+The commands work for humans and agents: terminal output favors names, branches, lifecycle states, and numbered selectors, while redirected output (or `--json`) preserves complete machine-readable records and IDs. Human lists retain the selectors needed by follow-up commands but omit internal organization/user IDs; a selector too long for the compact table is repeated losslessly in a copyable block. Paginated lists print the next `--page` or `--offset`, and detail views preserve useful prose within a safe terminal bound; use `--json` for the complete record. Token lists distinguish API keys from named CLI device sessions. Binary downloads are the exception: intentionally redirect their raw bytes, or use `--output FILE --json` to write the file and receive structured download metadata. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication or plan limit, `5` payment required. `--token` and `STRIX_API_TOKEN` are stateless per-command overrides and never replace the stored sign-in; pair a CLI-session override with `--workspace-id` or `STRIX_WORKSPACE_ID`.
+
+A browser sign-in creates one reusable credential per CLI installation. Logging in again on the
+same installation replaces its secret instead of accumulating keys. Workspace switches keep that
+credential and expiry, preserve the server-side scope preference, cap access by the target role,
+and can never exceed the login consent ceiling. Each process pins its starting workspace, so a
+concurrent switch fails safely instead of sending a stale command to another organization.
+`strix cloud logout` revokes the server session before deleting the local token; use
+`--local-only` only when you deliberately cannot reach the server.
 
 Write commands take request fields as flags, and every write command also accepts one JSON object with `--data`:
 

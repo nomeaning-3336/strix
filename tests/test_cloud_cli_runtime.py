@@ -387,7 +387,7 @@ def test_session_human_output_neutralizes_server_control_sequences() -> None:
     rendered = output.getvalue()
     assert "\x1b" not in rendered
     assert "\x07" not in rendered
-    assert rendered.count("\\x1b]52;c;copied\\x07\\x1b[2J") == 3
+    assert rendered.count("\\x1b]52;c;copied\\x07\\x1b[2J") == 2
 
 
 def test_device_login_rejects_non_http_verification_url(
@@ -775,7 +775,7 @@ def test_session_help_is_specific_and_human_whoami_shows_scopes(
     who_help = capsys.readouterr().out
     assert "strix cloud whoami" in who_help
     assert "--no-browser" not in who_help
-    assert cloud.run_cloud(["whoami"]) == 0
+    assert cloud.run_cloud(["whoami", "--show-scopes"]) == 0
     assert "scans:read organizations:read" in capsys.readouterr().out
 
 
@@ -791,14 +791,25 @@ def test_non_tty_whoami_and_logout_emit_json(
             "email": "agent@example.test",
             "organization_name": "Demo",
             "scopes": ["scans:read"],
+            "app_url": "https://app.example.test",
         }
     )
 
     assert cloud.run_cloud(["whoami"]) == 0
     assert json.loads(capsys.readouterr().out)["email"] == "agent@example.test"
 
+    monkeypatch.setattr(
+        platform_cli.requests,
+        "delete",
+        lambda *_args, **_kwargs: type("Response", (), {"status_code": 200})(),
+    )
     assert cloud.run_cloud(["logout"]) == 0
-    assert json.loads(capsys.readouterr().out) == {"signed_in": False, "removed": True}
+    assert json.loads(capsys.readouterr().out) == {
+        "signed_in": False,
+        "removed": True,
+        "remotely_revoked": True,
+        "local_only": False,
+    }
     assert not platform_cli.AUTH_PATH.exists()
 
 
@@ -806,14 +817,11 @@ def test_scope_picker_labels_match_the_server_presets() -> None:
     output = io.StringIO()
     console = Console(file=output, width=120)
     console.input = lambda *_args, **_kwargs: "1"  # type: ignore[method-assign]
-    assert (
-        platform_cli._choose_scopes(
-            console,
-            [{"scope": "scans:read", "min_role": "viewer", "minimum": True}],
-            "admin",
-        )
-        is None
-    )
+    assert platform_cli._choose_scopes(
+        console,
+        [{"scope": "scans:read", "min_role": "viewer", "minimum": True}],
+        "admin",
+    ) == ("recommended", None)
     rendered = output.getvalue()
     assert "uploads" in rendered
     assert "workspace switching" in rendered

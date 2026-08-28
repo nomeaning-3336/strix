@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import os
 import sys
 import time
 import webbrowser
@@ -25,6 +26,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from strix.config import load_settings
+from strix.interface.platform_identity import read_or_create_identity
 from strix.interface.terminal_text import sanitize_terminal_text
 from strix.interface.url_safety import is_safe_web_url
 from strix.utils.secret_files import write_secret_text
@@ -107,7 +109,8 @@ def _login(console: Console, argv: list[str]) -> int:
         action="store_true",
         help="Do not open the browser. Print the verification URL instead.",
     )
-    parser.add_argument(
+    scope_mode = parser.add_mutually_exclusive_group()
+    scope_mode.add_argument(
         "--scopes",
         nargs="+",
         metavar="SCOPE",
@@ -117,6 +120,18 @@ def _login(console: Console, argv: list[str]) -> int:
             "The server always includes a minimum scope set. "
             "Without this option, an interactive picker opens after the browser step."
         ),
+    )
+    scope_mode.add_argument(
+        "--scope-profile",
+        choices=("minimal", "recommended", "full"),
+        default=None,
+        help="Scope profile to approve. Defaults to an interactive choice in a TTY.",
+    )
+    parser.add_argument(
+        "--device-name",
+        default=None,
+        metavar="NAME",
+        help="Privacy-safe label shown for this CLI session in the dashboard.",
     )
     parser.add_argument(
         "--workspace",
@@ -128,6 +143,7 @@ def _login(console: Console, argv: list[str]) -> int:
             "more than one workspace."
         ),
     )
+    previous_record = read_record()
     try:
         args = parser.parse_args(argv)
     except SystemExit as exc:  # argparse already printed the message
@@ -146,7 +162,9 @@ def _login(console: Console, argv: list[str]) -> int:
             console,
             open_browser=not args.no_browser,
             scopes=args.scopes,
+            scope_profile=args.scope_profile,
             workspace=args.workspace,
+            device_name=args.device_name,
         )
     except PlatformAuthError as exc:
         console.print(f"[red]Sign-in failed:[/] {_terminal_markup(exc)}")
@@ -166,23 +184,33 @@ def _login(console: Console, argv: list[str]) -> int:
             "then run `strix cloud login` again.[/]"
         )
         return 1
+    _revoke_replaced_legacy_session(previous_record, record)
     _print_success(console, record)
     return 0
 
 
-def _run_device_flow(
+def _run_device_flow(  # noqa: PLR0912, PLR0915
     console: Console,
     *,
     open_browser: bool,
     scopes: list[str] | None = None,
+    scope_profile: str | None = None,
     workspace: str | None = None,
+    device_name: str | None = None,
 ) -> dict[str, Any]:
     app_url = _app_url()
-    interactive = workspace is not None or (sys.stdin.isatty() and scopes is None)
+    interactive = workspace is not None or (
+        sys.stdin.isatty() and scopes is None and scope_profile is None
+    )
+    try:
+        identity = read_or_create_identity(device_name=device_name)
+    except (OSError, ValueError) as exc:
+        raise PlatformAuthError(f"could not prepare the CLI device identity: {exc}") from exc
 
     try:
         response = requests.post(
             f"{app_url}/api/v1/cli/login",
+            headers=_preview_headers(),
             timeout=_HTTP_TIMEOUT_S,
             allow_redirects=False,
         )
@@ -230,11 +258,13 @@ def _run_device_flow(
 
     console.print("[dim]Waiting for browser confirmation…[/]")
 
-    poll_body: dict[str, Any] = {"device_code": device_code}
+    poll_body: dict[str, Any] = {"device_code": device_code, **identity}
     if interactive:
         poll_body["interactive"] = True
     elif scopes:
         poll_body["scopes"] = scopes
+    elif scope_profile:
+        poll_body["scope_profile"] = scope_profile
 
     deadline = time.monotonic() + expires_in
     while time.monotonic() < deadline:
@@ -245,6 +275,7 @@ def _run_device_flow(
         try:
             poll = requests.post(
                 f"{app_url}/api/v1/cli/login/poll",
+                headers=_preview_headers(),
                 json=poll_body,
                 timeout=_HTTP_TIMEOUT_S,
                 allow_redirects=False,
@@ -252,7 +283,14 @@ def _run_device_flow(
         except requests.RequestException:
             continue
         if 200 <= poll.status_code < 300:
-            return _finish_login(console, app_url, poll, scopes=scopes, workspace=workspace)
+            return _finish_login(
+                console,
+                app_url,
+                poll,
+                scopes=scopes,
+                scope_profile=scope_profile,
+                workspace=workspace,
+            )
         delta = _handle_poll_error(poll)
         if delta is None:
             break
@@ -283,24 +321,30 @@ def _finish_login(
     poll: requests.Response,
     *,
     scopes: list[str] | None,
+    scope_profile: str | None,
     workspace: str | None,
 ) -> dict[str, Any]:
     result = _json_object(poll)
     if result.get("selection_required"):
-        return _complete_selection(console, app_url, result, scopes=scopes, workspace=workspace)
-    return _bind_login_record(_require_api_token(result), app_url, scopes)
+        return _complete_selection(
+            console,
+            app_url,
+            result,
+            scopes=scopes,
+            scope_profile=scope_profile,
+            workspace=workspace,
+        )
+    return _bind_login_record(_require_api_token(result), app_url)
 
 
 def _signed_in_record(
     response: requests.Response,
     *,
     app_url: str,
-    requested_scopes: list[str] | None,
 ) -> dict[str, Any]:
     return _bind_login_record(
         _require_api_token(_json_object(response)),
         app_url,
-        requested_scopes,
     )
 
 
@@ -311,9 +355,7 @@ def _require_api_token(record: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
-def _bind_login_record(
-    record: dict[str, Any], app_url: str, requested_scopes: list[str] | None
-) -> dict[str, Any]:
+def _bind_login_record(record: dict[str, Any], app_url: str) -> dict[str, Any]:
     """Bind a stored credential to its issuer and preserve its scope preference."""
     parsed = urlsplit(app_url)
     if (
@@ -332,7 +374,7 @@ def _bind_login_record(
     bound["app_url"] = urlunsplit(
         (parsed.scheme.lower(), parsed.netloc.lower(), parsed.path.rstrip("/"), "", "")
     )
-    preference: Any = requested_scopes if requested_scopes is not None else record.get("scopes")
+    preference: Any = record.get("requested_scopes", record.get("scopes"))
     preference_items = cast("list[Any]", preference)
     if isinstance(preference, list) and all(isinstance(scope, str) for scope in preference_items):
         bound["requested_scopes"] = list(dict.fromkeys(cast("list[str]", preference_items)))
@@ -345,6 +387,7 @@ def _complete_selection(
     selection: dict[str, Any],
     *,
     scopes: list[str] | None,
+    scope_profile: str | None,
     workspace: str | None,
 ) -> dict[str, Any]:
     organizations = _dict_items(selection.get("organizations"))
@@ -356,8 +399,9 @@ def _complete_selection(
     chosen_org = _choose_workspace(console, organizations, workspace)
     role = str(chosen_org.get("role") or "admin")
     chosen_scopes = scopes
-    if chosen_scopes is None and sys.stdin.isatty():
-        chosen_scopes = _choose_scopes(console, catalog, role)
+    chosen_profile = scope_profile
+    if chosen_scopes is None and chosen_profile is None and sys.stdin.isatty():
+        chosen_profile, chosen_scopes = _choose_scopes(console, catalog, role)
 
     body: dict[str, Any] = {
         "selection_token": selection_token,
@@ -365,9 +409,13 @@ def _complete_selection(
     }
     if chosen_scopes is not None:
         body["scopes"] = chosen_scopes
+        body["scope_profile"] = "custom"
+    elif chosen_profile is not None:
+        body["scope_profile"] = chosen_profile
     try:
         response = requests.post(
             f"{app_url}/api/v1/cli/login/complete",
+            headers=_preview_headers(),
             json=body,
             timeout=_HTTP_TIMEOUT_S,
             allow_redirects=False,
@@ -379,7 +427,6 @@ def _complete_selection(
     return _signed_in_record(
         response,
         app_url=app_url,
-        requested_scopes=chosen_scopes,
     )
 
 
@@ -433,20 +480,22 @@ def _choose_workspace(
         console.print("[yellow]Enter a number from the list.[/]")
 
 
-def _choose_scopes(console: Console, catalog: list[dict[str, Any]], role: str) -> list[str] | None:
-    """Prompt for token scopes. Returns None to accept the server defaults."""
+def _choose_scopes(
+    console: Console, catalog: list[dict[str, Any]], role: str
+) -> tuple[str, list[str] | None]:
+    """Prompt for a named scope profile or a custom scope list."""
     rank = _ROLE_RANK.get(role, 2)
     allowed = [
         item for item in catalog if _ROLE_RANK.get(str(item.get("min_role", "viewer")), 0) <= rank
     ]
     if not allowed:
-        return None
+        return "recommended", None
 
     console.print()
     console.print("[bold]Select token scopes:[/]")
     console.print(
         "  [cyan]1[/]. Recommended [dim](scans, findings, schedules, assets, uploads, "
-        "workspace switching, billing)[/]"
+        "workspace switching, billing/top-ups; no token creation)[/]"
     )
     console.print("  [cyan]2[/]. Full access [dim](every scope your role allows)[/]")
     console.print("  [cyan]3[/]. Minimal [dim](scan read/write and billing read)[/]")
@@ -454,15 +503,13 @@ def _choose_scopes(console: Console, catalog: list[dict[str, Any]], role: str) -
     while True:
         answer = console.input("Scopes [1-4] (1): ").strip() or "1"
         if answer == "1":
-            return None
+            return "recommended", None
         if answer == "2":
-            return [str(item["scope"]) for item in allowed if item.get("scope")]
+            return "full", None
         if answer == "3":
-            return [
-                str(item["scope"]) for item in allowed if item.get("scope") and item.get("minimum")
-            ]
+            return "minimal", None
         if answer == "4":
-            return _choose_custom_scopes(console, allowed)
+            return "custom", _choose_custom_scopes(console, allowed)
         console.print("[yellow]Enter a number from 1 to 4.[/]")
 
 
@@ -534,6 +581,67 @@ def _error_detail(response: requests.Response) -> str:
     return f"HTTP {response.status_code}"
 
 
+def _preview_headers() -> dict[str, str]:
+    bypass = os.environ.get("STRIX_VERCEL_PROTECTION_BYPASS", "").strip()
+    return {"x-vercel-protection-bypass": bypass} if bypass else {}
+
+
+def _session_headers(record: dict[str, Any]) -> dict[str, str]:
+    headers = {"Authorization": f"Bearer {record['api_token']}"}
+    workspace_id = record.get("organization_id")
+    if isinstance(workspace_id, str) and workspace_id:
+        headers["X-Strix-Workspace"] = workspace_id
+    headers.update(_preview_headers())
+    return headers
+
+
+def _revoke_stored_session(record: dict[str, Any]) -> tuple[bool, str | None]:
+    """Revoke one server session; return (definitively_inactive, error)."""
+    app_url = record.get("app_url")
+    if not isinstance(app_url, str) or not app_url:
+        return False, (
+            "the stored sign-in has no trusted platform URL; use --local-only to remove it"
+        )
+    try:
+        response = requests.delete(
+            f"{app_url.rstrip('/')}/api/v1/cli/session",
+            headers=_session_headers(record),
+            timeout=_HTTP_TIMEOUT_S,
+            allow_redirects=False,
+        )
+    except requests.RequestException as exc:
+        return False, f"could not revoke the remote CLI session: {exc}"
+    if response.status_code in {200, 204, 401}:
+        return True, None
+    return False, f"could not revoke the remote CLI session: {_error_detail(response)}"
+
+
+def _print_logout_failure(console: Console, message: str, *, as_json: bool) -> int:
+    if as_json:
+        sys.stdout.write(json.dumps({"error": message, "removed": False}) + "\n")
+    else:
+        console.print(f"[red]Sign-out failed:[/] {_terminal_markup(message)}")
+        console.print("[dim]The local token was kept so you can safely retry.[/]")
+    return 1
+
+
+def _revoke_replaced_legacy_session(
+    previous: dict[str, Any] | None, current: dict[str, Any]
+) -> None:
+    """Best-effort cleanup when the first device-aware login replaces a legacy token."""
+    if not previous or previous.get("api_token") == current.get("api_token"):
+        return
+    if previous.get("app_url") != current.get("app_url"):
+        return
+    with contextlib.suppress(KeyError, requests.RequestException):
+        requests.delete(
+            f"{previous['app_url']}/api/v1/cli/session",
+            headers=_session_headers(previous),
+            timeout=_HTTP_TIMEOUT_S,
+            allow_redirects=False,
+        )
+
+
 def _print_success(console: Console, record: dict[str, Any]) -> None:
     email = record.get("email", "")
     organization = record.get("organization_name") or record.get("organization_id", "")
@@ -545,9 +653,7 @@ def _print_success(console: Console, record: dict[str, Any]) -> None:
         console.print(f"  Workspace: [bold]{_terminal_markup(organization)}[/]")
     scopes = record.get("scopes")
     if isinstance(scopes, list) and scopes:
-        scope_items = cast("list[Any]", cast("Any", scopes))
-        rendered_scopes = _terminal_markup(" ".join(str(scope) for scope in scope_items))
-        console.print(f"  Scopes:    [dim]{rendered_scopes}[/]")
+        console.print(f"  Access:    [dim]{_terminal_markup(_scope_summary(record))}[/]")
     console.print(f"  Token:     stored in [dim]{_terminal_markup(AUTH_PATH)}[/]")
     console.print()
     console.print(
@@ -556,12 +662,13 @@ def _print_success(console: Console, record: dict[str, Any]) -> None:
     )
 
 
-def _status(console: Console, argv: list[str]) -> int:
+def _status(console: Console, argv: list[str]) -> int:  # noqa: PLR0912
     parser = _SessionArgumentParser(
         prog="strix cloud whoami",
         description="Show the stored managed-platform account, workspace, scopes, and expiry.",
     )
     parser.add_argument("--json", action="store_true", help="Print the session as JSON.")
+    parser.add_argument("--show-scopes", action="store_true", help="Print every granted scope.")
     as_json = "--json" in argv or not sys.stdout.isatty()
     try:
         args = parser.parse_args(argv)
@@ -607,18 +714,34 @@ def _status(console: Console, argv: list[str]) -> int:
     scopes = record.get("scopes")
     if isinstance(scopes, list) and scopes:
         scope_items = cast("list[Any]", cast("Any", scopes))
-        console.print(
-            f"  Scopes: {_terminal_markup(' '.join(str(scope) for scope in scope_items))}"
-        )
+        if args.show_scopes:
+            console.print(
+                f"  Scopes: {_terminal_markup(' '.join(str(scope) for scope in scope_items))}"
+            )
+        else:
+            console.print(f"  Access: {_terminal_markup(_scope_summary(record))}")
     return 0
 
 
-def _logout(console: Console, argv: list[str]) -> int:  # noqa: PLR0911
+def _scope_summary(record: dict[str, Any]) -> str:
+    scopes = record.get("scopes")
+    scope_items = cast("list[Any]", cast("Any", scopes)) if isinstance(scopes, list) else []
+    count = len(scope_items)
+    profile = str(record.get("scope_profile") or "custom").replace("_", " ").title()
+    return f"{profile} · {count} scope{'s' if count != 1 else ''} granted"
+
+
+def _logout(console: Console, argv: list[str]) -> int:  # noqa: PLR0911, PLR0912
     parser = _SessionArgumentParser(
         prog="strix cloud logout",
-        description="Remove the managed-platform API token stored on this machine.",
+        description="Revoke this CLI session and remove its token from this machine.",
     )
     parser.add_argument("--json", action="store_true", help="Print the result as JSON.")
+    parser.add_argument(
+        "--local-only",
+        action="store_true",
+        help="Remove only the local token, leaving the remote session active.",
+    )
     as_json = "--json" in argv or not sys.stdout.isatty()
     try:
         args = parser.parse_args(argv)
@@ -637,6 +760,13 @@ def _logout(console: Console, argv: list[str]) -> int:  # noqa: PLR0911
             return 0
         console.print("[yellow]Not signed in.[/]")
         return 0
+    record = read_record()
+    remotely_revoked = False
+    if record is not None and not args.local_only:
+        remotely_revoked, revoke_error = _revoke_stored_session(record)
+        if revoke_error:
+            return _print_logout_failure(console, revoke_error, as_json=as_json)
+
     if not logout():
         if as_json:
             sys.stdout.write(
@@ -656,7 +786,23 @@ def _logout(console: Console, argv: list[str]) -> int:  # noqa: PLR0911
         )
         return 1
     if as_json:
-        sys.stdout.write(json.dumps({"signed_in": False, "removed": True}) + "\n")
+        sys.stdout.write(
+            json.dumps(
+                {
+                    "signed_in": False,
+                    "removed": True,
+                    "remotely_revoked": remotely_revoked,
+                    "local_only": bool(args.local_only),
+                }
+            )
+            + "\n"
+        )
         return 0
-    console.print("[green]Signed out.[/] The stored API token was removed from this machine.")
+    if args.local_only:
+        console.print(
+            "[yellow]Local sign-out only.[/] The remote CLI session is still active; "
+            "revoke it from API Access if needed."
+        )
+    else:
+        console.print("[green]Signed out.[/] The CLI session was revoked and removed locally.")
     return 0

@@ -198,6 +198,7 @@ def run(group: str, verb_label: str, cmd: Cmd, argv: list[str]) -> int:
             base_url=getattr(args, "app_url", None),
             timeout=getattr(args, "timeout", None),
             token_override=bool(token),
+            workspace_id=getattr(args, "workspace_id", None),
         )
         query = _collect(args, cmd.query)
         body = _collect(args, cmd.body)
@@ -597,6 +598,12 @@ def _build_parser(group: str, verb_label: str, cmd: Cmd) -> argparse.ArgumentPar
         json_help = "Print JSON results, or download metadata when exporting with --output."
     parser.add_argument("--json", action="store_true", help=json_help)
     parser.add_argument("--token", default=None, help="API token override.")
+    parser.add_argument(
+        "--workspace-id",
+        default=None,
+        metavar="ORG_ID",
+        help="Expected workspace for an override CLI token (or STRIX_WORKSPACE_ID).",
+    )
     parser.add_argument("--app-url", default=None, metavar="URL", help="Platform URL override.")
     parser.add_argument(
         "--timeout",
