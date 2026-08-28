@@ -90,6 +90,16 @@ def test_make_model_settings_enables_prompt_cache_for_non_bedrock_claude(model_n
     ]
 
 
+@pytest.mark.parametrize(
+    "model_name",
+    ["claude-sonnet-4-5", "openai/claude-sonnet-4-5", "any-llm/anthropic/claude-sonnet-4-5"],
+)
+def test_no_prompt_cache_for_claude_off_the_litellm_route(model_name: str) -> None:
+    # These names are served by SDK clients that raise TypeError on LiteLLM-only
+    # request kwargs — e.g. a gateway in front of Claude reached with a bare name.
+    assert _cache_points(model_name) is None
+
+
 def test_tool_config_point_not_leaked_to_non_bedrock_claude() -> None:
     # LiteLLM only consumes tool_config on Bedrock; elsewhere it leaks onto the
     # wire and native Anthropic 400s.

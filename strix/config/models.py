@@ -864,6 +864,22 @@ def is_claude_model(model_name: str) -> bool:
     return "claude" in (model_name or "").strip().lower()
 
 
+def routes_through_litellm(model_name: str | None) -> bool:
+    """Whether :class:`StrixProvider` sends this model through LiteLLM.
+
+    Bare names and the ``openai/``/``any-llm/`` prefixes are served by the SDK's
+    own clients, which raise ``TypeError`` on request fields they do not know,
+    so LiteLLM-only fields must not be attached there. A bare ``claude-...``
+    name is exactly that case: an ``LLM_API_BASE`` pointing at an
+    OpenAI-compatible gateway in front of Claude.
+    """
+    name = (model_name or "").strip()
+    if not name or codex.subscription_model(name):
+        return False
+    prefix, _, rest = name.partition("/")
+    return bool(rest) and prefix.lower() not in {"openai", "any-llm"}
+
+
 def is_bedrock_route(model_name: str) -> bool:
     name = (model_name or "").strip().lower()
     return name.startswith("bedrock/") or "anthropic." in name
