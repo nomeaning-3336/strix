@@ -39,6 +39,7 @@ class AgentRuntime:
     wake: asyncio.Event = field(default_factory=asyncio.Event)
     mailbox: list[dict[str, Any]] = field(default_factory=list)
     user_wake_required: bool = False
+    provider_outage: bool = False
 
 
 class AgentCoordinator:
@@ -119,6 +120,50 @@ class AgentCoordinator:
                         ),
                     },
                 )
+
+    async def mark_provider_outage(self, agent_id: str) -> None:
+        """Record that the provider, not the agent, is what stopped ``agent_id``."""
+        async with self._lock:
+            self.runtimes.setdefault(agent_id, AgentRuntime()).provider_outage = True
+
+    async def revive_after_provider_outage(self, reason: str) -> list[str]:
+        """Wake every agent a provider outage killed, once a call succeeds again.
+
+        An outage on the provider side - no credits, a hard quota - fails every
+        in-flight agent within seconds, and a failed agent is gated behind a user
+        message. The user can only realistically message the root, so without this
+        the rest of the fleet stays dead for the life of the scan even though
+        nothing is wrong with it. The first call that gets through proves the
+        outage is over, so lift the gate and tell each agent why it lost time.
+        """
+        async with self._lock:
+            revived = [
+                agent_id
+                for agent_id, runtime in self.runtimes.items()
+                if runtime.provider_outage and self.statuses.get(agent_id) in {"failed", "crashed"}
+            ]
+            for runtime in self.runtimes.values():
+                runtime.provider_outage = False
+            for agent_id in revived:
+                # ``set_status`` only retires an error on the way to "running", and
+                # these go to "waiting" first; the outage they name is over.
+                self.errors.pop(agent_id, None)
+        for agent_id in revived:
+            # "waiting" clears the human-wake gate; the message then wakes the
+            # loop that is parked in ``wait_for_message``.
+            await self.set_status(agent_id, "waiting")
+            await self.send(
+                agent_id,
+                {"from": "system", "type": "provider_recovered", "content": reason},
+                interrupt=False,
+            )
+        if revived:
+            logger.info("provider outage cleared; revived %d agent(s)", len(revived))
+        return revived
+
+    @property
+    def provider_outage_active(self) -> bool:
+        return any(runtime.provider_outage for runtime in self.runtimes.values())
 
     async def reset_budget_stops(
         self,

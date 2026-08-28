@@ -62,7 +62,10 @@ class GoTuiRuntime:
         self.scan_task: asyncio.Task[None] | None = None
         self.scan_error: BaseException | None = None
         self._last_sync_fingerprint = ""
-        self._error_noted_agents: set[str] = set()
+        # agent id -> the error already announced for it, so a failure that keeps
+        # recurring while the user retries is reported once rather than per revive.
+        self._error_noted_agents: dict[str, str] = {}
+        self._root_failure_latched = False
         self.controller = TuiController(
             args,
             live_view=self.live_view,
@@ -236,12 +239,16 @@ class GoTuiRuntime:
                 or changed
             )
             if status in {"failed", "crashed"} and error:
-                if agent_id not in self._error_noted_agents:
-                    self._error_noted_agents.add(agent_id)
+                if self._error_noted_agents.get(agent_id) != error:
+                    self._error_noted_agents[agent_id] = error
                     self.live_view.record_agent_error(agent_id, error)
                     changed = True
-            else:
-                self._error_noted_agents.discard(agent_id)
+            elif status in {"waiting", "completed"}:
+                # Only a turn that actually landed retires the note. A revived agent
+                # reads as "running" the instant it is woken and again the instant it
+                # dies, so clearing on "running" re-announces an unchanged error once
+                # per retry - the loop a user sees while waiting out a provider outage.
+                self._error_noted_agents.pop(agent_id, None)
 
         # The user's opening message waits for the root agent to exist, which is
         # the first thing this sync learns about.
@@ -250,26 +257,45 @@ class GoTuiRuntime:
         roots = [agent_id for agent_id, parent_id in parent_of.items() if parent_id is None]
         root_id = roots[0] if roots else None
         root_status = statuses.get(root_id) if root_id is not None else None
-        report_status = (
-            self.report_state.run_record.get("status") if self.report_state is not None else None
+        scan_state = self._resolve_scan_state(
+            root_status, errors.get(root_id) if root_id is not None else None
         )
-        scan_state = self.controller.scan_state
-        if root_status in {"failed", "crashed"}:
-            scan_state = "failed"
-            if root_id is not None and errors.get(root_id):
-                self.controller.error = errors[root_id]
-        elif scan_state != "failed":
-            if report_status == "completed":
-                scan_state = "completed"
-            elif root_status == "stopped":
-                scan_state = "stopped"
-            elif root_status == "completed":
-                scan_state = "failed"
-                self.controller.error = "Scan ended without a completed report"
         if scan_state != self.controller.scan_state:
             self.controller.scan_state = scan_state
             changed = True
         return changed
+
+    def _resolve_scan_state(self, root_status: str | None, root_error: str | None) -> str:
+        """Fold the root agent's status into the banner the scan header shows."""
+        report_status = (
+            self.report_state.run_record.get("status") if self.report_state is not None else None
+        )
+        if root_status in {"failed", "crashed"}:
+            self._root_failure_latched = True
+            if root_error:
+                self.controller.error = root_error
+            return "failed"
+
+        scan_state = self.controller.scan_state
+        if self._root_failure_latched:
+            # The root only runs again because something revived it, so the banner
+            # its last failure left behind is stale. Nothing else ever lowers
+            # "failed", which otherwise pins a resolved error - an exhausted API
+            # balance the user has since topped up, say - on the screen for the rest
+            # of a scan that is working fine.
+            self._root_failure_latched = False
+            self.controller.error = None
+            scan_state = "running"
+        if scan_state == "failed":
+            return scan_state
+        if report_status == "completed":
+            return "completed"
+        if root_status == "stopped":
+            return "stopped"
+        if root_status == "completed":
+            self.controller.error = "Scan ended without a completed report"
+            return "failed"
+        return scan_state
 
     def _runtime_sync_fingerprint(self) -> str:
         usage: dict[str, Any] = {}

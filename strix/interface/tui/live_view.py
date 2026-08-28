@@ -17,6 +17,10 @@ from strix.interface.tui.history import load_session_history
 from strix.tools.mcp import resolve_mcp_call
 
 
+# The only statuses an error message can legitimately be attached to.
+ERROR_BEARING_STATUSES = frozenset({"failed", "crashed"})
+
+
 class TuiLiveView:
     def __init__(self) -> None:
         self.agents: dict[str, dict[str, Any]] = {}
@@ -181,6 +185,10 @@ class TuiLiveView:
             current["status"] = status
         if error_message is not None:
             current["error_message"] = error_message
+        elif status is not None and status not in ERROR_BEARING_STATUSES:
+            # An error belongs to the failure that produced it. Leaving it attached
+            # once the agent runs again pins a resolved error to a healthy agent.
+            current.pop("error_message", None)
         current["updated_at"] = now
 
     def record_agent_error(self, agent_id: str, error: str) -> None:

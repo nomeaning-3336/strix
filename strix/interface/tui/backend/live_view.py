@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
+from strix.interface.tui.live_view import ERROR_BEARING_STATUSES
 from strix.interface.tui.live_view import TuiLiveView as BaseLiveView
 
 
@@ -60,6 +61,11 @@ class TuiLiveView(BaseLiveView):
         if error_message and current.get("error_message") != error_message:
             current["error_message"] = error_message
             changed = True
+        elif not error_message and status is not None and status not in ERROR_BEARING_STATUSES:
+            # An error belongs to the failure that produced it. Leaving it attached
+            # once the agent runs again pins a resolved error to a healthy agent.
+            if current.pop("error_message", None) is not None:
+                changed = True
         if changed:
             current["updated_at"] = now
         return changed

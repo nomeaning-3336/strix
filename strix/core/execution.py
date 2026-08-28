@@ -129,8 +129,52 @@ def _model_error_status_code(exc: BaseException) -> int | None:
     return code if isinstance(code, int) else None
 
 
+# Providers report an empty account under whatever status code the failing layer
+# happens to use - Anthropic returns a 400 pre-stream and LiteLLM re-wraps the
+# same body as a 500 mid-stream - so the body text is the only stable signal.
+_PROVIDER_CREDIT_MARKERS = (
+    "credit balance is too low",
+    "insufficient credits",
+    "insufficient_quota",
+    "exceeded your current quota",
+    "requires more credits",
+    "billing_hard_limit_reached",
+)
+
+PROVIDER_CREDIT_MESSAGE = (
+    "The model provider rejected the request: the account is out of credits. "
+    "Add credits, then send any message to resume - the whole agent fleet picks "
+    "up where it left off."
+)
+
+PROVIDER_RECOVERED_MESSAGE = (
+    "[Provider] Calls were failing because the account was out of credits. "
+    "Credits are available again - continue your current task from where it stopped."
+)
+
+
+def _is_provider_credit_error(exc: BaseException) -> bool:
+    """True when the whole exception chain points at an empty provider account.
+
+    Billing rejections are permanent until a human pays, so they must never be
+    retried like a blip; but they are also not the agent's fault, so they must
+    not read as a crash either.
+    """
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        text = str(current).lower()
+        if any(marker in text for marker in _PROVIDER_CREDIT_MARKERS):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _is_transient_model_error(exc: BaseException) -> bool:
     if codex.is_content_guardrail_error(exc):
+        return False
+    if _is_provider_credit_error(exc):
         return False
     if isinstance(
         exc, APITimeoutError | APIConnectionError | TimeoutError | ConnectionError | OSError
@@ -789,6 +833,17 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 continue
             if session is not None:
                 await _salvage_stream_to_session(session, pre_run_items, stream, agent_id)
+            if _is_provider_credit_error(exc):
+                # Every agent in flight hits this within seconds of each other, so
+                # log one line rather than a traceback per agent, and tag the runtime
+                # so the first call that succeeds again can revive the whole fleet.
+                logger.warning("agent %s stopped: provider account is out of credits", agent_id)
+                await coordinator.mark_provider_outage(agent_id)
+                await coordinator.set_status(agent_id, "failed", error=PROVIDER_CREDIT_MESSAGE)
+                await notify_parent_on_terminal(coordinator, agent_id, "failed")
+                if not interactive:
+                    raise
+                return None
             if isinstance(exc, ProviderRefusalError):
                 logger.warning("agent %s refused by the model provider: %s", agent_id, exc)
                 await coordinator.set_status(agent_id, "failed", error=str(exc))
@@ -811,6 +866,8 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 raise
             return None
         else:
+            if coordinator.provider_outage_active:
+                await coordinator.revive_after_provider_outage(PROVIDER_RECOVERED_MESSAGE)
             return cast("RunResultBase | None", stream)
 
 

@@ -857,6 +857,99 @@ async def test_agent_state_sync_does_not_mask_root_failure_with_completed_report
     assert runtime.controller.error == "finalization failed"
 
 
+@pytest.mark.asyncio
+async def test_root_recovery_clears_the_failure_banner() -> None:
+    """A resolved failure must not stay on screen for the rest of the scan."""
+    runtime = GoTuiRuntime(args())
+    await runtime.coordinator.register("root", "Strix", parent_id=None)
+    await runtime.coordinator.set_status("root", "failed", error="out of credits")
+    await runtime._sync_agent_state()
+    assert runtime.controller.scan_state == "failed"
+
+    # The user tops up their balance and messages the root, which runs again.
+    await runtime.coordinator.mark_running("root")
+    await runtime._sync_agent_state()
+
+    assert runtime.controller.scan_state == "running"
+    assert runtime.controller.error is None
+    assert "error_message" not in runtime.live_view.agents["root"]
+
+
+@pytest.mark.asyncio
+async def test_recovered_scan_can_still_reach_a_terminal_state() -> None:
+    runtime = GoTuiRuntime(args())
+    runtime.report_state = cast("Any", SimpleNamespace(run_record={"status": "running"}))
+    await runtime.coordinator.register("root", "Strix", parent_id=None)
+    await runtime.coordinator.set_status("root", "failed", error="out of credits")
+    await runtime._sync_agent_state()
+
+    await runtime.coordinator.mark_running("root")
+    await runtime._sync_agent_state()
+    assert runtime.controller.scan_state == "running"
+
+    runtime.report_state = cast("Any", SimpleNamespace(run_record={"status": "completed"}))
+    await runtime.coordinator.set_status("root", "completed")
+    await runtime._sync_agent_state()
+
+    assert runtime.controller.scan_state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_a_terminal_scan_failure_survives_a_later_sync() -> None:
+    """Un-latching must only undo a root failure, never a scan-level one."""
+    runtime = GoTuiRuntime(args())
+    await runtime.coordinator.register("root", "Strix", parent_id=None)
+    runtime.controller.scan_state = "failed"
+    runtime.controller.error = "sandbox teardown exploded"
+
+    await runtime._sync_agent_state()
+
+    assert runtime.controller.scan_state == "failed"
+    assert runtime.controller.error == "sandbox teardown exploded"
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_error_is_announced_once_across_retries() -> None:
+    """Reviving into the same failure must not repost the same message each time."""
+    runtime = GoTuiRuntime(args())
+    await runtime.coordinator.register("root", "Strix", parent_id=None)
+
+    for _ in range(3):
+        await runtime.coordinator.set_status("root", "failed", error="out of credits")
+        await runtime._sync_agent_state()
+        # The user messages the root; it starts, then dies on the same error.
+        await runtime.coordinator.mark_running("root")
+        await runtime._sync_agent_state()
+
+    announced = [
+        event
+        for event in runtime.live_view.events
+        if event.get("data", {}).get("metadata", {}).get("source") == "agent_error"
+    ]
+    assert len(announced) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_new_error_after_a_landed_turn_is_announced() -> None:
+    runtime = GoTuiRuntime(args())
+    await runtime.coordinator.register("root", "Strix", parent_id=None)
+
+    await runtime.coordinator.set_status("root", "failed", error="out of credits")
+    await runtime._sync_agent_state()
+    # A turn that actually lands settles the agent into "waiting".
+    await runtime.coordinator.set_status("root", "waiting")
+    await runtime._sync_agent_state()
+    await runtime.coordinator.set_status("root", "failed", error="out of credits")
+    await runtime._sync_agent_state()
+
+    announced = [
+        event
+        for event in runtime.live_view.events
+        if event.get("data", {}).get("metadata", {}).get("source") == "agent_error"
+    ]
+    assert len(announced) == 2
+
+
 def _direct_launch_args() -> argparse.Namespace:
     launch_args = args()
     launch_args.needs_setup = False
