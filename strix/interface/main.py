@@ -62,6 +62,14 @@ import logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
+_ROOT_SUBCOMMAND_HELP = """
+Additional commands:
+  strix cloud ...          Use the managed Strix platform
+  strix auth ...           Manage model-subscription sign-in
+  strix view [RUN]         View a completed or running scan
+  strix completions SHELL  Generate zsh, bash, or fish tab completion
+"""
+
 
 def _exception_messages(exc: BaseException) -> tuple[str, ...]:
     messages: list[str] = []
@@ -415,6 +423,13 @@ def main() -> None:
 
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+    if len(sys.argv) == 2 and sys.argv[1] in ("-h", "--help"):
+        try:
+            parse_arguments()
+        except SystemExit as exc:
+            Console().print(_ROOT_SUBCOMMAND_HELP.strip(), markup=False)
+            raise SystemExit(exc.code) from None
 
     # `strix view [<run>]` is a viewer-only subcommand, dispatched before the
     # scan argument parser (which requires a target) and before any scan setup.

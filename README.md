@@ -325,12 +325,15 @@ strix auth logout             # forget the sign-in
 The `strix cloud` commands drive the managed platform ([app.strix.ai](https://app.strix.ai)) from the terminal. Sign in once with the device flow. The sign-in creates your account and workspace on first use and stores a personal API token in `~/.strix/platform-auth.json`:
 
 ```bash
-strix cloud login                   # opens the browser, then pick a workspace and scopes
-strix cloud login --scopes scans:read scans:write   # request specific token scopes
-strix cloud login --workspace "My Team"             # select a workspace by name or ID
-strix cloud whoami                  # show the active sign-in
-strix cloud logout                  # forget the sign-in
+strix cloud login                         # browser approval, then workspace + scope picker
+strix cloud login --workspace "My Team"   # select a workspace by name or ID
+strix cloud whoami                        # show the active sign-in and scopes
+strix cloud logout                        # forget the sign-in
 ```
+
+The default **Recommended** scope preset supports normal scan work, local source uploads,
+and workspace switching. For strict least privilege, pass an explicit list such as
+`--scopes scans:read scans:write uploads:write billing:read`.
 
 Every operation of the [REST API](https://docs.app.strix.ai) has a matching command in the form `strix cloud <resource> <verb>`:
 
@@ -339,17 +342,20 @@ strix cloud                                   # list all resources
 strix cloud scans                             # list the verbs of a resource
 strix cloud domains add --domain example.com --asset-type web_app
 strix cloud scans start --engagement-type live_test --domain-ids <uuid> --wait
+strix cloud scans start --source . --dry-run --show-files --json  # review + capture source.archive_sha256
+SOURCE_SHA256="<reviewed source.archive_sha256>"
+strix cloud scans start --source . --approve-sha256 "$SOURCE_SHA256" --wait
 strix cloud vulns list --severity critical
 strix cloud credits                           # credit balance
-strix cloud billing topup --credits 20        # buy credits (agent payment, HTTP 402)
+strix cloud billing topup --credits 20 --yes  # explicitly approve agent payment after HTTP 402
 ```
 
 Workspaces and account setup also work from the terminal:
 
 ```bash
-strix cloud workspaces list                   # your workspaces
+strix cloud workspaces list                   # numbered list; `workspace` is also accepted
 strix cloud workspaces create --name "My Team"
-strix cloud workspaces use "My Team"          # store a token for another workspace
+strix cloud workspaces use 2                  # switch by list number, exact name, or ID
 strix cloud billing subscribe --plan strix_cloud # opens the hosted checkout page
 strix cloud billing portal                    # opens the billing portal
 strix cloud integrations install github       # opens the app installation page
@@ -358,7 +364,7 @@ strix cloud domains verify <domain-id>        # prints the DNS record to add
 
 The last four commands end at a person. Strix creates the link, opens the browser for an interactive terminal, and always prints the URL. The user enters the card, approves the installation, or adds the DNS record. Pass `--no-browser` to print the URL only.
 
-The commands are agent friendly. Output is JSON when stdout is not a terminal or when you pass `--json`. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication required, `5` payment required. Set the token with `--token` or `STRIX_API_TOKEN` to skip the stored sign-in.
+The commands work for humans and agents: terminal output favors names, branches, states, and numbered selectors, while redirected output (or `--json`) preserves complete machine-readable records and IDs. Binary downloads are the exception: intentionally redirect their raw bytes, or use `--output FILE --json` to write the file and receive structured download metadata. There are no prompts when stdin is not a terminal. Exit codes: `0` success, `1` error, `2` invalid usage, `4` authentication or plan limit, `5` payment required. Set the token with `--token` or `STRIX_API_TOKEN` to skip the stored sign-in.
 
 Write commands take request fields as flags, and every write command also accepts one JSON object with `--data`:
 
@@ -368,7 +374,39 @@ strix cloud scans start --data @request.json                         # read a fi
 cat request.json | strix cloud scans start --data -                  # read standard input
 ```
 
-The platform enforces plan and role limits. Report downloads need the Enterprise plan, schedules need the Pro plan, and billing writes need an admin token. Those commands return the platform message and exit code `4`.
+For an agent or CI local-source scan, run `--dry-run --show-files --json`, review the manifest,
+and capture `source.archive_sha256`. Rerun with the same `--source`, every `--exclude`, and any
+`--include-*` selection flags, replacing `--dry-run` with `--approve-sha256 HASH`; Strix
+rebuilds the archive and refuses to upload it if the digest changed. `--yes` instead approves
+only the snapshot built in that one invocation. It is suitable for a deliberate human or
+one-shot approval, not as a digest-bound two-step agent/CI handoff.
+
+The safe default honors `.gitignore` and `.strixignore` and excludes hidden paths, secret-like
+files, VCS metadata, dependencies/build output, symlinks, and nested archives. Opt in
+separately with `--include-hidden`, `--include-sensitive`, or `--include-archives`. The client
+caps a bundle at 20,000 files, 25 MiB per file, 250 MiB expanded, and 50 MiB compressed, and
+the service independently validates the archive. Source alone infers a code review; adding a
+domain infers a live test. You can always pass `--engagement-type` explicitly.
+
+Strix removes the temporary local archive after every invocation. It deletes a staged remote
+upload after a definitive scan rejection. If a network error, `5xx` response, or interruption
+makes the launch outcome ambiguous, it retains the upload and reports its `upload_id` with
+`launch_outcome_unknown: true`; if automatic deletion cannot be confirmed, it reports the ID
+with `cleanup_unknown: true`. Check `strix cloud scans list` before retrying. If no scan is
+linked to the retained upload, delete it with `strix cloud uploads delete UPLOAD_ID`.
+
+Non-Enterprise scans consume the deterministic estimate shown for their scope (a source-only
+code review at the default `ultra` tier currently starts at 60 credits). Enterprise scans are
+plan-included and do not consume the credit wallet. Report downloads need Enterprise,
+schedules need Pro, and billing writes need an admin token. Plan blocks exit `4`; an
+insufficient credit wallet exits `5` without creating or charging a scan.
+
+Enable native tab completion once per shell session:
+
+```bash
+source <(strix completions zsh)       # use bash instead of zsh when appropriate
+strix completions fish | source
+```
 
 #### Connect your own MCP servers
 

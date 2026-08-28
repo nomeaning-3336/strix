@@ -8,12 +8,19 @@ required.
 
 from __future__ import annotations
 
-from rich.console import Console
+import json
+import sys
 
+from rich.console import Console
+from rich.markup import escape
+
+import strix.interface.cloud.http as http  # noqa: PLR0402
+from strix.interface.cloud.render import json_mode
 from strix.interface.cloud.runner import resolve, run
 from strix.interface.cloud.spec import DEFAULT_VERBS, GROUP_HELP, SPEC
 from strix.interface.cloud.workspaces import run_workspace_use
 from strix.interface.platform_cli import run_login
+from strix.interface.terminal_text import sanitize_terminal_text
 
 
 _USAGE_HEADER = """[bold]Usage:[/] strix cloud <command> [arguments]
@@ -29,16 +36,46 @@ _USAGE_HEADER = """[bold]Usage:[/] strix cloud <command> [arguments]
 _USAGE_FOOTER = """
 Run [bold]strix cloud <command> help[/] to list its verbs. Common read-only
 commands may also run their default verb when no verb is given.
-Every command accepts [bold]--json[/] and [bold]--token[/]. Write commands
-accept [bold]--data[/] with a JSON object of extra request fields.
+Every REST resource command accepts [bold]--json[/] and [bold]--token[/]. Write
+commands accept [bold]--data[/] with a JSON object of extra request fields.
+Login is an interactive device flow; [bold]whoami[/] and [bold]logout[/] also
+produce JSON automatically when output is redirected.
 API reference: https://docs.app.strix.ai"""
+
+_HELP_TOKENS = frozenset({"-h", "--help", "help"})
+
+
+def _is_help_request(argv: list[str]) -> bool:
+    """Recognize a help token with an optional JSON-output flag in either order."""
+    return sum(argument in _HELP_TOKENS for argument in argv) == 1 and all(
+        argument in _HELP_TOKENS or argument == "--json" for argument in argv
+    )
 
 
 def run_cloud(argv: list[str]) -> int:
+    """Run a managed-cloud command without ever leaking a Ctrl-C traceback."""
+    try:
+        return _run_cloud(argv)
+    except KeyboardInterrupt:
+        if json_mode(flag="--json" in argv):
+            sys.stdout.write(json.dumps({"error": "Interrupted.", "interrupted": True}) + "\n")
+        else:
+            Console(stderr=True).print("[yellow]Interrupted.[/]")
+        return 130
+
+
+def _run_cloud(argv: list[str]) -> int:  # noqa: PLR0911, PLR0912
     """Entry point for ``strix cloud …``. Returns a process exit code."""
     console = Console()
-    if not argv or argv[0] in ("-h", "--help", "help"):
-        _print_usage(console)
+    as_json = json_mode(flag="--json" in argv)
+    if not argv or _is_help_request(argv):
+        if as_json:
+            _print_usage_json()
+        else:
+            _print_usage(console)
+        return 0
+    if argv == ["--json"]:
+        _print_usage_json()
         return 0
 
     group, rest = argv[0], argv[1:]
@@ -49,31 +86,40 @@ def run_cloud(argv: list[str]) -> int:
     if group == "credits":
         group, rest = "billing", ["credits", *rest]
     if group == "workspaces" and rest and rest[0] == "use":
-        return run_workspace_use(rest[1:])
+        try:
+            return run_workspace_use(rest[1:])
+        except http.CloudError as exc:
+            if "--json" in rest:
+                sys.stdout.write(json.dumps({"error": str(exc)}) + "\n")
+            else:
+                console.print(f"[red]Error:[/] {escape(sanitize_terminal_text(exc))}")
+            return exc.exit_code
 
     if group not in SPEC:
-        console.print(f"[red]Unknown command:[/] {group}")
+        if as_json:
+            sys.stdout.write(json.dumps({"error": f"unknown command: {group}"}) + "\n")
+            return 2
+        console.print(f"[red]Unknown command:[/] {escape(sanitize_terminal_text(group))}")
         _print_usage(console)
         return 2
-    group_help = bool(rest and rest[0] in ("-h", "--help", "help"))
+    group_help = _is_help_request(rest)
     resolved = None if group_help else resolve(group, rest)
     if resolved is None:
-        _print_verbs(console, group)
-        return 0 if not rest or rest[0] in ("-h", "--help", "help") else 2
+        help_tokens: set[str] = set(_HELP_TOKENS) if group_help else set()
+        invalid = [arg for arg in rest if arg != "--json" and arg not in help_tokens]
+        _print_verbs(console, group, as_json=as_json, error="unknown verb" if invalid else None)
+        return 2 if invalid else 0
     cmd, remaining = resolved
     verb_label = " ".join(rest[: len(rest) - len(remaining)]) or DEFAULT_VERBS.get(group, "")
     return run(group, verb_label, cmd, remaining)
 
 
-def _run_session(console: Console, group: str, rest: list[str]) -> int:
-    if rest and rest[0] in ("-h", "--help", "help"):
-        return run_login(["--help"])
-    if group == "logout" and rest:
-        console.print("[red]Unknown argument for logout:[/] " + " ".join(rest))
-        return 2
+def _run_session(_console: Console, group: str, rest: list[str]) -> int:
+    if rest and rest[0] == "help":
+        rest = ["--help", *rest[1:]]
     session_argv = {
         "login": rest,
-        "logout": ["logout"],
+        "logout": ["logout", *rest],
         "whoami": ["status", *rest],
     }
     return run_login(session_argv[group])
@@ -86,9 +132,34 @@ def _print_usage(console: Console) -> None:
     console.print(_USAGE_FOOTER)
 
 
-def _print_verbs(console: Console, group: str) -> None:
+def _print_verbs(
+    console: Console, group: str, *, as_json: bool = False, error: str | None = None
+) -> None:
+    if as_json:
+        verbs: list[dict[str, str]] = [
+            {"name": verb, "help": command.help} for verb, command in SPEC[group].items()
+        ]
+        if group == "workspaces":
+            verbs.append({"name": "use", "help": "Switch the stored token to another workspace."})
+        payload: dict[str, object] = {
+            "command": f"strix cloud {group}",
+            "verbs": verbs,
+        }
+        if error:
+            payload["error"] = error
+        sys.stdout.write(json.dumps(payload, indent=2) + "\n")
+        return
     console.print(f"[bold]strix cloud {group}[/] verbs:")
     for verb, cmd in SPEC[group].items():
         console.print(f"  {verb:<28}{cmd.help}")
     if group == "workspaces":
         console.print(f"  {'use':<28}Switch the stored token to another workspace.")
+
+
+def _print_usage_json() -> None:
+    payload = {
+        "command": "strix cloud",
+        "session_commands": ["login", "logout", "whoami", "credits"],
+        "resource_commands": [{"name": group, "help": GROUP_HELP.get(group, "")} for group in SPEC],
+    }
+    sys.stdout.write(json.dumps(payload, indent=2) + "\n")

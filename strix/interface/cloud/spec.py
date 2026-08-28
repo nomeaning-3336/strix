@@ -14,7 +14,8 @@ from dataclasses import dataclass
 class P:
     """One command parameter.
 
-    ``kind`` is one of ``str``, ``int``, ``float``, ``bool``, ``list``, or ``json``.
+    ``kind`` is one of ``str``, ``int``, ``float``, ``bool``, ``list``, ``json``,
+    or ``json-list``.
     """
 
     name: str
@@ -40,6 +41,9 @@ class Cmd:
     # checkout page. The runner opens the browser for an interactive terminal
     # and always prints the URL.
     link: str | None = None
+    # Caller retries for this mutation must carry one stable opaque key. The
+    # platform binds it to the authenticated actor and exact request body.
+    idempotent: bool = False
 
 
 def _q(*names: str) -> tuple[P, ...]:
@@ -47,14 +51,21 @@ def _q(*names: str) -> tuple[P, ...]:
 
 
 _SCAN_START_BODY = (
-    P("engagement_type", help="Test category, for example live_test or code_review."),
+    P(
+        "engagement_type",
+        help=("Test category: code_review, live_test, internal_infra, or compliance_pentest."),
+    ),
     P("domain_ids", "list", help="Domain asset IDs to test."),
     P("domain_paths", "json", help="JSON map of domain ID to start paths."),
     P("repository_ids", "list", help="Repository asset IDs to test."),
     P("repository_branches", "json", help="JSON map of repository ID to branch."),
     P("credentials", "json", help="JSON list of credential objects."),
-    P("headers", "json", help="JSON map of extra HTTP headers for the target."),
-    P("concerns", "list", help="Vulnerability classes to focus on."),
+    P(
+        "headers",
+        "json",
+        help='JSON array of target header objects: [{"name":"...","value":"...","notes":"..."}].',
+    ),
+    P("concerns", help="Free-form security concerns to investigate."),
     P("focus", help="Free-form focus instructions for the agents."),
     P("context", help="Extra context about the target."),
     P("upload_ids", "list", help="Upload IDs to attach to the scan."),
@@ -63,9 +74,15 @@ _SCAN_START_BODY = (
     P("org_knowledge_enabled", "bool", help="Use the organization knowledge base."),
     P("notify_on_completion", "bool", help="Send an email when the scan completes."),
     P("notification_emails", "list", help="Extra notification email addresses."),
-    P("scan_tier", help="Scan tier, for example lite, pro, or max."),
-    P("model_config_id", help="Model configuration ID to run with."),
-    P("max_budget_usd", "float", help="Budget limit for the scan in USD."),
+    P(
+        "scan_tier",
+        help=(
+            "Scan tier: lite, standard, or ultra (default). "
+            "Not used for Enterprise or self-hosted scans."
+        ),
+    ),
+    P("model_config_id", help="Self-hosted only: model configuration ID to run with."),
+    P("max_budget_usd", "float", help="Self-hosted only: budget limit for the scan in USD."),
 )
 
 _TEST_USER_ADD_BODY = (
@@ -105,15 +122,21 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/scans",
             "List scans.",
-            query=_q(
-                "status",
-                "scan_type",
-                "date_from",
-                "date_to",
-                "domain_id",
-                "repository_id",
-                "search",
-                "include_retests",
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-100)."),
+                *_q(
+                    "status",
+                    "scan_type",
+                    "date_from",
+                    "date_to",
+                    "domain_id",
+                    "repository_id",
+                    "search",
+                ),
+                P("include_retests", "bool", help="Include per-finding retest scans."),
+                P("sort_by", help="Sort key; currently created_at."),
+                P("sort_order", help="Sort order: asc or desc."),
             ),
         ),
         "start": Cmd(
@@ -122,6 +145,7 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "Start a scan.",
             body=_SCAN_START_BODY,
             wait_path="/scans/{id}",
+            idempotent=True,
         ),
         "get": Cmd("GET", "/scans/{scanId}", "Get one scan."),
         "delete": Cmd("DELETE", "/scans/{scanId}", "Delete a scan."),
@@ -132,8 +156,11 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "/scans/{scanId}/message",
             "Send a message to the scan agents.",
             body=(
-                P("message", required=True, help="Message text for the agents."),
-                P("cancel_current", "bool", help="Stop the current task first."),
+                P(
+                    "message",
+                    help="Message text for the agents. Required unless --cancel-current is used.",
+                ),
+                P("cancel_current", "bool", help="Cancel the current task before delivery."),
                 P("agent_id", help="Target one agent instead of the root agent."),
             ),
         ),
@@ -141,10 +168,53 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/scans/{scanId}/report",
             "Download the scan report.",
-            query=_q("format", "type"),
+            query=(
+                P(
+                    "format",
+                    help=(
+                        "Report content: technical (default), retest, attestation, or "
+                        "executive_summary. Advanced formats require Enterprise."
+                    ),
+                ),
+                P(
+                    "type",
+                    help="Rendered file type: pdf (default) or docx. DOCX requires Enterprise.",
+                ),
+                P(
+                    "providerName",
+                    flag="provider-name",
+                    help="Enterprise report-cover provider name (up to 80 characters).",
+                ),
+                P(
+                    "memberName0",
+                    flag="member-name-0",
+                    help="First Enterprise report preparer's name (up to 120 characters).",
+                ),
+                P(
+                    "memberEmail0",
+                    flag="member-email-0",
+                    help="First Enterprise report preparer's email address.",
+                ),
+                P(
+                    "memberName1",
+                    flag="member-name-1",
+                    help="Second Enterprise report preparer's name (up to 120 characters).",
+                ),
+                P(
+                    "memberEmail1",
+                    flag="member-email-1",
+                    help="Second Enterprise report preparer's email address.",
+                ),
+            ),
             binary=True,
         ),
-        "rerun": Cmd("POST", "/scans/{scanId}/rerun", "Run the scan again.", wait_path=None),
+        "rerun": Cmd(
+            "POST",
+            "/scans/{scanId}/rerun",
+            "Run the scan again.",
+            wait_path="/scans/{id}",
+            idempotent=True,
+        ),
         "retest-all": Cmd(
             "POST",
             "/scans/{scanId}/retest-all",
@@ -195,19 +265,24 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/vulnerabilities",
             "List vulnerabilities.",
-            query=_q(
-                "scan_id",
-                "severity",
-                "status",
-                "search",
-                "from",
-                "to",
-                "domain_id",
-                "repository_id",
-                "finding_type",
-                "dependency_relation",
-                "reachability",
-                "sort_by",
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-100)."),
+                *_q(
+                    "scan_id",
+                    "severity",
+                    "status",
+                    "search",
+                    "from",
+                    "to",
+                    "domain_id",
+                    "repository_id",
+                    "finding_type",
+                    "dependency_relation",
+                    "reachability",
+                    "sort_by",
+                ),
+                P("sort_order", help="Sort order: asc or desc."),
             ),
         ),
         "get": Cmd("GET", "/vulnerabilities/{vulnerabilityId}", "Get one vulnerability."),
@@ -232,6 +307,7 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "/vulnerabilities/{vulnerabilityId}/retest",
             "Retest one vulnerability.",
             body=(P("upload_ids", "list", help="Upload IDs with updated code."),),
+            wait_path="/scans/{id}",
         ),
         "fix-pr": Cmd(
             "POST",
@@ -263,7 +339,12 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/domains",
             "List domain assets.",
-            query=_q("limit", "search", "verified", "business_unit", "tags", "sort_by"),
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-100)."),
+                *_q("search", "verified", "business_unit", "tags", "sort_by"),
+                P("sort_order", help="Sort order: asc or desc."),
+            ),
         ),
         "add": Cmd(
             "POST",
@@ -316,8 +397,11 @@ SPEC: dict[str, dict[str, Cmd]] = {
         "test-users provision-inbox": Cmd(
             "POST",
             "/domains/{domainId}/test-users/provision-inbox",
-            "Create a test user with a managed email inbox.",
-            body=(P("label", help="Display label for the test user."),),
+            (
+                "Provision a Strix-managed inbox for email OTP or magic-link MFA. "
+                "Returns an address; it does not create a test user."
+            ),
+            body=(P("label", help="Optional display label for the managed inbox."),),
         ),
         "test-users inbox": Cmd(
             "GET",
@@ -348,7 +432,12 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/repositories",
             "List repository assets.",
-            query=_q("limit", "search", "business_unit", "tags", "sort_by"),
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-100)."),
+                *_q("search", "business_unit", "tags", "sort_by"),
+                P("sort_order", help="Sort order: asc or desc."),
+            ),
         ),
         "add": Cmd("POST", "/repositories", "Add a repository asset. Use --data for the fields."),
         "update": Cmd(
@@ -386,18 +475,20 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/repositories/{repositoryId}/supply-chain/components",
             "List the dependency components of a repository.",
-            query=_q(
-                "job_id",
-                "snapshot_id",
-                "component_id",
-                "ecosystem",
-                "status",
-                "relationship",
-                "source_file",
-                "q",
-                "changed",
-                "limit",
-                "offset",
+            query=(
+                *_q(
+                    "job_id",
+                    "snapshot_id",
+                    "component_id",
+                    "ecosystem",
+                    "status",
+                    "relationship",
+                    "source_file",
+                    "q",
+                    "changed",
+                ),
+                P("limit", "int", help="Maximum components to return."),
+                P("offset", "int", help="Number of components to skip."),
             ),
         ),
         "supply-chain sbom": Cmd(
@@ -425,7 +516,12 @@ SPEC: dict[str, dict[str, Cmd]] = {
     },
     "schedules": {
         "list": Cmd("GET", "/schedules", "List scan schedules."),
-        "create": Cmd("POST", "/schedules", "Create a scan schedule. Use --data for the fields."),
+        "create": Cmd(
+            "POST",
+            "/schedules",
+            "Create a scan schedule. Use --data for the fields.",
+            idempotent=True,
+        ),
         "get": Cmd("GET", "/schedules/{scheduleId}", "Get one schedule."),
         "update": Cmd(
             "PATCH",
@@ -436,32 +532,48 @@ SPEC: dict[str, dict[str, Cmd]] = {
                 P("cron_expression", help="Cron expression for the schedule."),
                 P("timezone", help="Time zone for the cron expression."),
                 P("name", help="Display name of the schedule."),
-                P("max_budget_usd", "int", help="Budget limit per run in USD."),
-                P("scan_tier", help="Scan tier for scheduled runs."),
+                P(
+                    "max_budget_usd",
+                    "float",
+                    help=(
+                        "Self-hosted only: budget limit per run in USD. "
+                        "Use --data to set null and clear it."
+                    ),
+                ),
+                P("scan_tier", help="Scan tier: lite, standard, or ultra."),
             ),
         ),
         "delete": Cmd("DELETE", "/schedules/{scheduleId}", "Delete a schedule."),
         "template": Cmd(
             "GET", "/schedules/{scheduleId}/template", "Get the schedule configuration template."
         ),
-        "trigger": Cmd("POST", "/schedules/{scheduleId}/trigger", "Run a schedule now."),
+        "trigger": Cmd(
+            "POST",
+            "/schedules/{scheduleId}/trigger",
+            "Run a schedule now.",
+            idempotent=True,
+        ),
     },
     "pr-reviews": {
         "list": Cmd(
             "GET",
             "/pr-reviews",
             "List PR reviews.",
-            query=_q(
-                "search",
-                "status",
-                "group",
-                "pr_state",
-                "repository_full_name",
-                "date_from",
-                "date_to",
-                "sort_by",
-                "sort_order",
-                "include_counts",
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-100)."),
+                *_q(
+                    "search",
+                    "status",
+                    "group",
+                    "pr_state",
+                    "repository_full_name",
+                    "date_from",
+                    "date_to",
+                    "sort_by",
+                    "sort_order",
+                ),
+                P("include_counts", "bool", help="Include exact disposition counts."),
             ),
         ),
         "get": Cmd("GET", "/pr-reviews/{prReviewId}", "Get one PR review."),
@@ -469,7 +581,12 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/pr-reviews/findings",
             "List PR review findings.",
-            query=_q("severity", "pr_state", "search", "repository_full_name", "include_stats"),
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-100)."),
+                *_q("severity", "pr_state", "search", "repository_full_name"),
+                P("include_stats", "bool", help="Include all-time impact statistics."),
+            ),
         ),
         "start": Cmd(
             "POST",
@@ -545,7 +662,11 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "Start a chat session.",
             body=(
                 P("message", required=True, help="First message of the session."),
-                P("repos", "list", help="Repository full names for context."),
+                P(
+                    "repos",
+                    "json",
+                    help='JSON array of repository refs: [{"repoId":"...","branch":"main"}].',
+                ),
                 P("domain_ids", "list", help="Domain asset IDs for context."),
             ),
         ),
@@ -555,11 +676,18 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "/chat/{chatId}/message",
             "Send a message in a chat session.",
             body=(
-                P("message", required=True, help="Message text."),
-                P("cancel_current", "bool", help="Stop the current task first."),
-                P("stop_agent", "bool", help="Stop the agent."),
-                P("repos", "list", help="Repository full names for context."),
-                P("agent_id", help="Target one agent."),
+                P(
+                    "message",
+                    help="Message text. Required unless --cancel-current or --stop-agent is used.",
+                ),
+                P("cancel_current", "bool", help="Cancel the in-flight agent turn first."),
+                P("stop_agent", "bool", help="Park the target agent and its descendants."),
+                P(
+                    "repos",
+                    "json",
+                    help='JSON array of repository refs: [{"repoId":"...","branch":"main"}].',
+                ),
+                P("agent_id", help="Target one subagent instead of the root agent."),
             ),
         ),
         "findings": Cmd("GET", "/chat/{chatId}/findings", "List the findings of a chat session."),
@@ -626,7 +754,10 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/knowledge",
             "List knowledge documents.",
-            query=_q("source_type", "search", "limit"),
+            query=(
+                *_q("source_type", "search"),
+                P("limit", "int", help="Maximum documents to return."),
+            ),
         ),
         "add": Cmd(
             "POST",
@@ -731,7 +862,21 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "Create an installation link. The provider is github or slack. A person approves it.",
             link="url",
         ),
-        "disconnect": Cmd("DELETE", "/integrations/{provider}", "Disconnect an integration."),
+        "disconnect": Cmd(
+            "DELETE",
+            "/integrations/{provider}",
+            "Disconnect an integration.",
+            query=(
+                P(
+                    "installation_id",
+                    "int",
+                    help=(
+                        "Installation ID. Required for github, gitlab, and bitbucket; "
+                        "unsupported for other providers."
+                    ),
+                ),
+            ),
+        ),
     },
     "connectors": {
         "list": Cmd("GET", "/connectors", "List network connectors."),
@@ -745,7 +890,16 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/connectors/{connectorId}",
             "Get one network connector.",
-            query=_q("include_command"),
+            query=(
+                P(
+                    "include_command",
+                    "bool",
+                    help=(
+                        "Include the one-time Docker enrollment command. "
+                        "The command contains sensitive connector credentials."
+                    ),
+                ),
+            ),
         ),
         "status": Cmd(
             "GET", "/connectors/{connectorId}/status", "Get the status of a network connector."
@@ -780,7 +934,13 @@ SPEC: dict[str, dict[str, Cmd]] = {
         ),
         "delete": Cmd("DELETE", "/webhooks/{webhookId}", "Delete a webhook."),
         "deliveries": Cmd(
-            "GET", "/webhooks/{webhookId}/deliveries", "List the deliveries of a webhook."
+            "GET",
+            "/webhooks/{webhookId}/deliveries",
+            "List the deliveries of a webhook.",
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-100)."),
+            ),
         ),
     },
     "analytics": {
@@ -800,23 +960,37 @@ SPEC: dict[str, dict[str, Cmd]] = {
             "GET",
             "/audit",
             "List audit log entries.",
-            query=_q(
-                "action", "resource_type", "actor_id", "date_from", "date_to", "format", "all"
+            query=(
+                P("page", "int", help="Results page (starts at 1)."),
+                P("limit", "int", help="Results per page (1-1000)."),
+                *_q("action", "resource_type", "actor_id", "date_from", "date_to"),
+                P(
+                    "format",
+                    help="Output format: json, csv, ndjson, jsonl, snowflake, or splunk.",
+                ),
+                P("all", "bool", help="Stream all matches when exporting instead of one page."),
             ),
         ),
     },
     "costs": {
         "overview": Cmd(
-            "GET", "/llm-costs", "Show the LLM cost overview.", query=_q("range", "from", "to")
+            "GET",
+            "/llm-costs",
+            "Self-hosted only: show the LLM cost overview.",
+            query=_q("range", "from", "to"),
         ),
-        "run": Cmd("GET", "/llm-costs/runs/{runType}/{runId}", "Get the LLM costs of one run."),
+        "run": Cmd(
+            "GET",
+            "/llm-costs/runs/{runType}/{runId}",
+            "Self-hosted only: get the LLM costs of one run.",
+        ),
     },
     "llm-settings": {
-        "get": Cmd("GET", "/llm-settings", "Get the LLM settings."),
+        "get": Cmd("GET", "/llm-settings", "Self-hosted only: get the LLM settings."),
         "update": Cmd(
             "PUT",
             "/llm-settings",
-            "Update the LLM settings.",
+            "Self-hosted only: update the LLM settings.",
             body=(
                 P(
                     "modelConfigs",
@@ -856,6 +1030,21 @@ SPEC: dict[str, dict[str, Cmd]] = {
                 P("type", required=True, help="Token type, personal or service."),
                 P("name", required=True, help="Token name."),
                 P("scopes", "list", help="API scopes for the token."),
+                P(
+                    "rbac_scopes",
+                    "json-list",
+                    help=(
+                        "JSON array of resource restrictions; each item has type "
+                        "target, tag, or business_unit and a value."
+                    ),
+                ),
+                P(
+                    "expires_at",
+                    help=(
+                        "Absolute expiration date/time (ISO 8601; mutually exclusive "
+                        "with --expires-in-days)."
+                    ),
+                ),
                 P("expires_in_days", "int", help="Days until the token expires."),
             ),
         ),
@@ -920,8 +1109,8 @@ GROUP_HELP: dict[str, str] = {
     "webhooks": "Manage webhooks",
     "analytics": "Read analytics data",
     "audit": "Read the audit log",
-    "costs": "Read LLM cost data",
-    "llm-settings": "Manage LLM model settings",
+    "costs": "Self-hosted only: read LLM cost data",
+    "llm-settings": "Self-hosted only: manage LLM model settings",
     "settings": "Manage notification settings",
     "license": "Read license information",
     "tokens": "Manage API tokens",
