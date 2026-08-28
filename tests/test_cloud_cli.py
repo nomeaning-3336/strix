@@ -1258,6 +1258,12 @@ def test_corrected_help_distinguishes_inboxes_reports_and_self_hosted_commands()
     inbox = SPEC["domains"]["test-users provision-inbox"]
     assert "does not create a test user" in inbox.help
 
+    for command_name in ("test-users add", "test-users update"):
+        parameters = {param.name: param.help for param in SPEC["domains"][command_name].body}
+        assert "email_otp" in parameters["mfa_method"]
+        assert "magic_link" in parameters["mfa_method"]
+        assert " or email." not in parameters["mfa_method"]
+
     report = {param.name: param.help for param in SPEC["scans"]["report"].query}
     assert "Report content" in report["format"]
     assert "file type" in report["type"]
