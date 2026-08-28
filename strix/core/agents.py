@@ -22,6 +22,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_REVIVED_NOTICE = {
+    "from": "system",
+    "type": "revived",
+    "content": (
+        "[Recovery] Your last turn failed and the user has since sent a message. "
+        "Pick your current task back up from where it stopped."
+    ),
+}
+
 Status = Literal["running", "waiting", "completed", "stopped", "crashed", "failed", "budget_paused"]
 
 # Why an agent parked. The user can message any agent, so this - not the agent's
@@ -53,7 +62,6 @@ class AgentCoordinator:
         self.errors: dict[str, str] = {}
         self.recovery_counts: dict[str, int] = {}
         self.idle_resume_counts: dict[str, int] = {}
-        self.revival_counts: dict[str, int] = {}
         self.wait_kinds: dict[str, WaitKind] = {}
         self.runtimes: dict[str, AgentRuntime] = {}
         self._parent_notified: set[str] = set()
@@ -121,54 +129,35 @@ class AgentCoordinator:
                     },
                 )
 
-    async def revive_failed_agents(self, reason: str, *, limit: int) -> list[str]:
-        """Give agents that died a bounded second chance while the scan is healthy.
+    async def revive_failed_agents(self, *, exclude: str | None = None) -> list[str]:
+        """Lift the human-wake gate on every agent that died, on the user's word.
 
-        A failed agent is gated behind a user message, and the user can only
-        realistically reach the root, so a child that dies stays dead for the rest
-        of the scan - however it died, and however brief the cause was. A turn that
-        lands anywhere is the scan's own evidence that whatever broke may be over,
-        which is worth another attempt. ``limit`` is what separates that from a
-        livelock: an agent that is genuinely broken drains its budget and stays
-        down. The self-recovery layers - retries, compaction, tool nudges - have all
-        already run by the time an agent reaches this state, so a revival is a last
-        chance rather than a first one.
+        A failed agent parks until a human tells it to go again. The user can only
+        realistically reach the root, so that word never arrives for anything below
+        it and a child that dies stays dead for the rest of the scan - however it
+        died. A message from the user is that word for all of them: it says a person
+        is present and has changed something. Nothing else revives an agent, so
+        there is no runaway here to bound - the person deciding whether to try again
+        is the limit.
         """
         revived: list[str] = []
         async with self._lock:
             for agent_id, status in self.statuses.items():
-                if status not in {"failed", "crashed"}:
+                if agent_id == exclude or status not in {"failed", "crashed"}:
                     continue
-                if self.revival_counts.get(agent_id, 0) >= limit:
-                    continue
-                self.revival_counts[agent_id] = self.revival_counts.get(agent_id, 0) + 1
-                # ``set_status`` only retires an error on the way to "running", and
-                # these go to "waiting" first.
+                self.statuses[agent_id] = "waiting"
                 self.errors.pop(agent_id, None)
+                runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
+                runtime.user_wake_required = False
+                # An empty mailbox parks the agent straight back where it was, so the
+                # note is what actually resumes it as well as what explains the gap.
+                runtime.mailbox.append(dict(_REVIVED_NOTICE))
+                self.pending_counts[agent_id] = self.pending_counts.get(agent_id, 0) + 1
+                runtime.wake.set()
                 revived.append(agent_id)
-        for agent_id in revived:
-            # "waiting" clears the human-wake gate; the message then wakes the loop
-            # parked in ``wait_for_message``.
-            await self.set_status(agent_id, "waiting")
-            await self.send(
-                agent_id,
-                {"from": "system", "type": "revived", "content": reason},
-                interrupt=False,
-            )
         if revived:
-            logger.info("scan recovered; revived %d failed agent(s)", len(revived))
+            logger.info("user message revived %d failed agent(s)", len(revived))
         return revived
-
-    async def reset_revivals(self, agent_id: str) -> None:
-        """Retire an agent's revival budget once it completes a turn of its own."""
-        async with self._lock:
-            if self.revival_counts.pop(agent_id, None) is None:
-                return
-        await self._maybe_snapshot()
-
-    @property
-    def has_failed_agents(self) -> bool:
-        return any(status in {"failed", "crashed"} for status in self.statuses.values())
 
     async def reset_budget_stops(
         self,
@@ -332,6 +321,10 @@ class AgentCoordinator:
         from_user = message.get("from") == "user"
         if from_user and self._budget_paused:
             await self.resume_from_budget_pause(exclude=target_agent_id)
+        if from_user:
+            # The gate below only unsticks the agent addressed. Everything else that
+            # died is waiting on the same human, who has just spoken.
+            await self.revive_failed_agents(exclude=target_agent_id)
         async with self._lock:
             if target_agent_id not in self.statuses:
                 logger.debug("agent.send dropped unknown target=%s", target_agent_id)
@@ -523,7 +516,6 @@ class AgentCoordinator:
                 "pending_counts": dict(self.pending_counts),
                 "recovery_counts": dict(self.recovery_counts),
                 "idle_resume_counts": dict(self.idle_resume_counts),
-                "revival_counts": dict(self.revival_counts),
                 "wait_kinds": dict(self.wait_kinds),
                 "mailboxes": {
                     aid: [dict(m) for m in runtime.mailbox]
@@ -546,7 +538,6 @@ class AgentCoordinator:
             self.errors = dict(snap.get("errors", {}))
             self.recovery_counts = dict(snap.get("recovery_counts", {}))
             self.idle_resume_counts = dict(snap.get("idle_resume_counts", {}))
-            self.revival_counts = dict(snap.get("revival_counts", {}))
             self.wait_kinds = dict(snap.get("wait_kinds", {}))
             mailboxes = snap.get("mailboxes", {})
             if isinstance(mailboxes, dict):

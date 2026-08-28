@@ -1,64 +1,15 @@
-"""Bounded revival of agents that died, driven by the scan recovering around them.
+"""A user's message revives every agent that died, not just the one addressed.
 
-A failed agent is gated behind a user message and the user can only realistically
-reach the root, so without this a child that dies stays dead for the rest of the
-scan. Drawn from a run where a provider outage failed eighteen agents in thirteen
-seconds and only the root ever came back.
+A failed agent parks until a human tells it to go again, and the user can only
+realistically reach the root. Drawn from a run where a provider outage failed
+eighteen agents in thirteen seconds and only the root ever came back.
 """
 
 from __future__ import annotations
 
-from typing import Any, cast
-
-import httpx
 import pytest
-from agents import RunConfig, Runner
-from agents.exceptions import AgentsException
-from openai import APIError, BadRequestError
 
-from strix.core import execution
 from strix.core.agents import AgentCoordinator
-
-
-def _request() -> httpx.Request:
-    return httpx.Request("POST", "https://api.anthropic.com/v1/messages")
-
-
-class _FakeStream:
-    def __init__(self, exc: BaseException | None = None) -> None:
-        self._exc = exc
-        self._events: list[Any] = []
-        self.run_loop_exception: BaseException | None = None
-
-    async def stream_events(self) -> Any:
-        if self._exc is not None:
-            raise self._exc
-        for event in self._events:
-            yield event
-
-
-async def _run_cycle(
-    monkeypatch: pytest.MonkeyPatch,
-    coordinator: AgentCoordinator,
-    agent_id: str,
-    stream: _FakeStream,
-) -> Any:
-    monkeypatch.setattr(execution, "_TRANSIENT_MODEL_RETRY_BASE_DELAY_S", 0.0)
-    monkeypatch.setattr(execution, "_TRANSIENT_MODEL_RETRY_MAX_DELAY_S", 0.0)
-    monkeypatch.setattr(Runner, "run_streamed", lambda *_a, **_k: stream)
-    return await execution._run_cycle(
-        object(),
-        coordinator,
-        agent_id,
-        input_data="task",
-        run_config=cast("RunConfig", object()),
-        context={},
-        max_turns=5,
-        session=None,
-        interactive=True,
-        event_sink=None,
-        hooks=None,
-    )
 
 
 async def _fleet(children: int = 3) -> AgentCoordinator:
@@ -69,21 +20,19 @@ async def _fleet(children: int = 3) -> AgentCoordinator:
     return coordinator
 
 
+def _user_message(text: str = "credits are back, keep going") -> dict[str, str]:
+    return {"from": "user", "content": text, "type": "instruction"}
+
+
 @pytest.mark.asyncio
-async def test_a_landed_turn_revives_the_agents_that_died(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The reported scenario: the whole fleet is down and only the root is reachable."""
+async def test_a_user_message_revives_the_whole_fleet() -> None:
+    """The reported scenario: everything is down and only the root is reachable."""
     coordinator = await _fleet()
     for agent_id in ("root", "child0", "child1", "child2"):
-        await _run_cycle(
-            monkeypatch, coordinator, agent_id, _FakeStream(exc=AgentsException("provider said no"))
-        )
-    # Every one of them is gated behind a user message it will never get.
-    assert all(coordinator.runtimes[f"child{index}"].user_wake_required for index in range(3))
+        await coordinator.set_status(agent_id, "failed", error="provider said no")
+    assert all(coordinator.runtimes[f"child{i}"].user_wake_required for i in range(3))
 
-    # Whatever broke is fixed and the user messages the root, all they can reach.
-    await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
+    await coordinator.send("root", _user_message())
 
     for index in range(3):
         child = f"child{index}"
@@ -91,116 +40,91 @@ async def test_a_landed_turn_revives_the_agents_that_died(
         assert coordinator.runtimes[child].user_wake_required is False
         assert coordinator.pending_counts[child] == 1
         assert child not in coordinator.errors
-        assert coordinator.runtimes[child].mailbox[0]["content"] == execution.AGENT_REVIVED_MESSAGE
-
-
-@pytest.mark.parametrize(
-    "exc",
-    [
-        AgentsException("sdk gave up"),
-        APIError("provider rejected the request", _request(), body=None),
-        BadRequestError("bad", response=httpx.Response(400, request=_request()), body=None),
-        RuntimeError("something nobody anticipated"),
-    ],
-    ids=["agents", "api", "bad-request", "unknown"],
-)
-@pytest.mark.asyncio
-async def test_revival_does_not_care_how_the_agent_died(
-    monkeypatch: pytest.MonkeyPatch, exc: BaseException
-) -> None:
-    """Cause of death is never inspected - only whether the scan works now."""
-    coordinator = await _fleet(children=1)
-    await _run_cycle(monkeypatch, coordinator, "child0", _FakeStream(exc=exc))
-    assert coordinator.statuses["child0"] in {"failed", "crashed"}
-
-    await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
-
-    assert coordinator.statuses["child0"] == "waiting"
+    # The addressed agent is woken by the user's own message, not a notice.
+    assert coordinator.runtimes["root"].user_wake_required is False
+    assert coordinator.runtimes["root"].mailbox == [_user_message()]
 
 
 @pytest.mark.asyncio
-async def test_an_agent_that_keeps_dying_drains_its_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A broken agent must not fail and revive forever."""
+async def test_the_revived_agent_wakes_on_the_notice() -> None:
+    """An empty mailbox parks the agent straight back where it was."""
+    coordinator = await _fleet(children=1)
+    await coordinator.set_status("child0", "failed", error="down")
+
+    await coordinator.send("root", _user_message())
+
+    assert await coordinator.wait_for_message("child0", timeout=0.1) is True
+    count, _items = await coordinator.consume_pending("child0")
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_revival_is_not_rationed() -> None:
+    """A human deciding to try again is the only limit there needs to be."""
     coordinator = await _fleet(children=1)
 
-    for attempt in range(execution._MAX_AGENT_REVIVALS):
+    for attempt in range(6):
         await coordinator.set_status("child0", "failed", error="down again")
-        await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
-        assert coordinator.statuses["child0"] == "waiting", f"revival {attempt} was refused"
-
-    await coordinator.set_status("child0", "failed", error="down again")
-    await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
-
-    assert coordinator.statuses["child0"] == "failed"
-    assert coordinator.revival_counts["child0"] == execution._MAX_AGENT_REVIVALS
+        await coordinator.send("root", _user_message())
+        assert coordinator.statuses["child0"] == "waiting", f"attempt {attempt} was refused"
 
 
+@pytest.mark.parametrize("status", ["failed", "crashed"])
 @pytest.mark.asyncio
-async def test_a_turn_of_its_own_refunds_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_revival_does_not_care_how_the_agent_died(status: str) -> None:
     coordinator = await _fleet(children=1)
-    await coordinator.set_status("child0", "failed", error="down")
-    await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
-    assert coordinator.revival_counts["child0"] == 1
+    await coordinator.set_status("child0", status, error="whatever it was")
 
-    # The revived agent picks its task back up and completes a turn.
-    await _run_cycle(monkeypatch, coordinator, "child0", _FakeStream())
-
-    assert "child0" not in coordinator.revival_counts
-
-
-@pytest.mark.asyncio
-async def test_an_agent_that_dies_after_the_recovery_is_still_revived(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Ordering must not strand anyone: revival is driven by live status, not a flag.
-
-    A marker set at failure time can be cleared by a recovery that raced ahead of
-    the agent recording its own status, leaving it permanently unrevivable.
-    """
-    coordinator = await _fleet(children=1)
-
-    # A turn lands while nothing is down at all.
-    await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
-    # Only afterwards does the child die.
-    await _run_cycle(monkeypatch, coordinator, "child0", _FakeStream(exc=AgentsException("late")))
-    await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
+    await coordinator.send("root", _user_message())
 
     assert coordinator.statuses["child0"] == "waiting"
 
 
+@pytest.mark.parametrize("status", ["running", "waiting", "completed", "stopped", "budget_paused"])
 @pytest.mark.asyncio
-async def test_healthy_agents_are_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
-    coordinator = await _fleet(children=2)
-    await coordinator.set_status("child0", "waiting")
-    await coordinator.set_status("child1", "completed")
+async def test_agents_that_did_not_die_are_left_alone(status: str) -> None:
+    """A deliberate stop - budget, user request - is not a failure to recover from."""
+    coordinator = await _fleet(children=1)
+    await coordinator.set_status("child0", status)
 
-    await _run_cycle(monkeypatch, coordinator, "root", _FakeStream())
+    await coordinator.send("root", _user_message())
 
-    assert coordinator.statuses["child0"] == "waiting"
-    assert coordinator.statuses["child1"] == "completed"
+    assert coordinator.statuses["child0"] == status
     assert coordinator.pending_counts["child0"] == 0
-    assert coordinator.revival_counts == {}
+    assert coordinator.runtimes["child0"].mailbox == []
 
 
 @pytest.mark.asyncio
-async def test_revival_is_a_no_op_with_nothing_down() -> None:
-    coordinator = await _fleet(children=1)
+async def test_messaging_a_child_revives_its_failed_siblings() -> None:
+    """A person is present either way; which agent they addressed is incidental."""
+    coordinator = await _fleet(children=2)
+    await coordinator.set_status("child0", "failed", error="down")
+    await coordinator.set_status("child1", "failed", error="down")
 
-    assert coordinator.has_failed_agents is False
-    assert await coordinator.revive_failed_agents("recovered", limit=3) == []
+    await coordinator.send("child0", _user_message("look at this instead"))
+
+    assert coordinator.statuses["child1"] == "waiting"
+    assert coordinator.runtimes["child0"].user_wake_required is False
 
 
 @pytest.mark.asyncio
-async def test_the_budget_survives_a_resume() -> None:
-    """A snapshot that drops the budget hands a broken agent unlimited revivals."""
+async def test_an_agent_message_revives_nobody() -> None:
+    """Only a human clears the gate; agents talking among themselves must not."""
+    coordinator = await _fleet(children=2)
+    await coordinator.set_status("child1", "failed", error="down")
+
+    await coordinator.send("child0", {"from": "root", "content": "status?"})
+
+    assert coordinator.statuses["child1"] == "failed"
+    assert coordinator.runtimes["child1"].user_wake_required is True
+
+
+@pytest.mark.asyncio
+async def test_a_message_to_an_unknown_agent_still_revives_the_fleet() -> None:
+    """The user spoke; a stale target id should not swallow that."""
     coordinator = await _fleet(children=1)
     await coordinator.set_status("child0", "failed", error="down")
-    await coordinator.revive_failed_agents("recovered", limit=3)
-    snapshot = await coordinator.snapshot()
 
-    restored = AgentCoordinator()
-    await restored.restore(snapshot)
+    assert await coordinator.send("gone", _user_message()) is False
 
-    assert restored.revival_counts["child0"] == 1
+    assert coordinator.statuses["child0"] == "waiting"

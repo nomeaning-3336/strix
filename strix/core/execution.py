@@ -119,15 +119,6 @@ async def _compact_session(
     )
 
 
-# Revivals granted to an agent that died, spent whenever the scan proves healthy
-# again and refunded once the agent lands a turn of its own.
-_MAX_AGENT_REVIVALS = 3
-
-AGENT_REVIVED_MESSAGE = (
-    "[Recovery] Your last turn failed and the scan has since recovered. Continue "
-    "your current task from where it stopped."
-)
-
 _MAX_TRANSIENT_MODEL_RETRIES = 5
 _TRANSIENT_MODEL_RETRY_BASE_DELAY_S = 2.0
 _TRANSIENT_MODEL_RETRY_MAX_DELAY_S = 90.0
@@ -820,13 +811,6 @@ async def _run_cycle(  # noqa: PLR0912, PLR0915
                 raise
             return None
         else:
-            # A turn that lands proves the scan is working, which retires this
-            # agent's own revival budget and buys one for anything still down.
-            await coordinator.reset_revivals(agent_id)
-            if coordinator.has_failed_agents:
-                await coordinator.revive_failed_agents(
-                    AGENT_REVIVED_MESSAGE, limit=_MAX_AGENT_REVIVALS
-                )
             return cast("RunResultBase | None", stream)
 
 
