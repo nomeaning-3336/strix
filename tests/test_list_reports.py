@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import TYPE_CHECKING
 
 import pytest
@@ -39,6 +40,21 @@ def test_add_vulnerability_report_strips_control_chars_from_title(
     )
     report = next(r for r in report_state.vulnerability_reports if r["id"] == report_id)
     assert report["title"] == "XSS in search form"
+
+
+def test_hydrate_from_run_dir_strips_control_chars_from_title(
+    report_state: ReportState,
+) -> None:
+    # A run started before titles were normalized can hold control characters on
+    # disk, and resume re-exports those titles to the CSV, the SARIF and the TUI.
+    (report_state.get_run_dir() / "vulnerabilities.json").write_text(
+        json.dumps([{"id": "vuln-0001", "title": "XSS in\r\n search\tform", "severity": "medium"}]),
+        encoding="utf-8",
+    )
+
+    report_state.hydrate_from_run_dir()
+
+    assert report_state.vulnerability_reports[0]["title"] == "XSS in search form"
 
 
 def _seed(state: ReportState) -> None:

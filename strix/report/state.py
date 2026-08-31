@@ -236,6 +236,9 @@ class ReportState:
                 )
             self.vulnerability_reports = [r for r in data if isinstance(r, dict)]
             for r in self.vulnerability_reports:
+                title = r.get("title")
+                if isinstance(title, str):
+                    r["title"] = _clean_title(title)
                 rid = r.get("id")
                 if isinstance(rid, str):
                     self._saved_vuln_ids.add(rid)
