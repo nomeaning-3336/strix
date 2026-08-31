@@ -80,52 +80,67 @@ async def _login_as_guest(
     raise RuntimeError(f"loginAsGuest failed after {attempts} attempts: {last_err}")
 
 
+async def _find_sandbox_project(client: Client) -> str | None:
+    """Look for a project a create that timed out client-side may have left behind."""
+    with contextlib.suppress(Exception):
+        projects = [item for item in await client.project.list() if item.name == "sandbox"]
+        if projects:
+            return str(max(projects, key=lambda item: item.id).id)
+    return None
+
+
 async def _setup_project(host_url: str, access_token: str) -> None:
-    """Connect with a longer deadline and select the sandbox project."""
+    """Select the sandbox project, retrying the whole connect/create/select sequence.
+
+    Each attempt gets a fresh client with a deadline well past the SDK default:
+    these mutations are slow on a cold Caido, while the long-lived client the
+    scan uses keeps the short default so a traffic poll cannot stall on it.
+    Until a project is selected Caido answers every proxied request with a 500,
+    so giving up here costs the whole run, not just the traffic capture.
+    """
     from caido_sdk_client import Client, TokenAuthOptions
     from caido_sdk_client.types import CreateProjectOptions
 
-    client = Client(
-        host_url,
-        auth=TokenAuthOptions(token=access_token),
-        timeout_ms=_PROJECT_SETUP_TIMEOUT_MS,
-    )
-    try:
-        await client.connect()
-        project = None
-        last_exc: Exception | None = None
-        for i in range(1, _PROJECT_SETUP_ATTEMPTS + 1):
-            try:
-                if project is None:
-                    project = await client.project.create(
+    project_id: str | None = None
+    last_exc: Exception | None = None
+    for attempt in range(1, _PROJECT_SETUP_ATTEMPTS + 1):
+        client = Client(
+            host_url,
+            auth=TokenAuthOptions(token=access_token),
+            timeout_ms=_PROJECT_SETUP_TIMEOUT_MS,
+        )
+        try:
+            await client.connect()
+            if project_id is None:
+                try:
+                    created = await client.project.create(
                         CreateProjectOptions(name="sandbox", temporary=True),
                     )
-                await client.project.select(project.id)
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                if project is None:
-                    with contextlib.suppress(Exception):
-                        projects = await client.project.list()
-                        sandbox_projects = [item for item in projects if item.name == "sandbox"]
-                        if sandbox_projects:
-                            project = max(sandbox_projects, key=lambda item: item.id)
-                logger.warning(
-                    "Caido project setup attempt %d/%d failed: %s",
-                    i,
-                    _PROJECT_SETUP_ATTEMPTS,
-                    exc,
-                )
-                if i < _PROJECT_SETUP_ATTEMPTS:
-                    await asyncio.sleep(min(2.0 * i, 8.0))
-            else:
-                logger.info("Caido project selected: %s", project.id)
-                return
-        raise RuntimeError(
-            f"Caido project setup failed after {_PROJECT_SETUP_ATTEMPTS} attempts"
-        ) from last_exc
-    finally:
-        with contextlib.suppress(Exception):
-            await client.aclose()
+                except Exception:
+                    # A create that timed out client-side may still have landed.
+                    project_id = await _find_sandbox_project(client)
+                    raise
+                project_id = created.id
+            await client.project.select(project_id)
+        except Exception as exc:  # noqa: BLE001
+            last_exc = exc
+            logger.warning(
+                "Caido project setup attempt %d/%d failed: %s",
+                attempt,
+                _PROJECT_SETUP_ATTEMPTS,
+                exc,
+            )
+            if attempt < _PROJECT_SETUP_ATTEMPTS:
+                await asyncio.sleep(min(2.0 * attempt, 8.0))
+        else:
+            logger.info("Caido project selected: %s", project_id)
+            return
+        finally:
+            with contextlib.suppress(Exception):
+                await client.aclose()
+    raise RuntimeError(
+        f"Caido project setup failed after {_PROJECT_SETUP_ATTEMPTS} attempts"
+    ) from last_exc
 
 
 async def bootstrap_caido(
