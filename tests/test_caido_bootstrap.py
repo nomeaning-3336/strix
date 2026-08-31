@@ -11,11 +11,15 @@ import asyncio
 import sys
 import types
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from strix.runtime.caido_bootstrap import bootstrap_caido
+
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
 
 
 class _FakeExecResult:
@@ -129,33 +133,55 @@ def _setup_clients(
 
 
 async def _bootstrap_expecting(
-    monkeypatch: pytest.MonkeyPatch, error: BaseException
-) -> _FakeClient:
-    """Run a bootstrap whose ``connect()`` fails with ``error``."""
+    monkeypatch: pytest.MonkeyPatch, errors: Sequence[BaseException]
+) -> tuple[list[_FakeClient], list[float], BaseException]:
+    """Run a bootstrap whose scan-client connections fail."""
     setup_client = _FakeClient()
-    client = _FakeClient(error)
-    _install_sdk(monkeypatch, [setup_client, client])
+    scan_clients = [_FakeClient(error) for error in errors]
+    _install_sdk(monkeypatch, [setup_client, *scan_clients])
+    sleep_calls: list[float] = []
 
-    with pytest.raises(type(error)):
+    async def _sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("strix.runtime.caido_bootstrap.asyncio.sleep", _sleep)
+
+    with pytest.raises(BaseException) as exc_info:
         await bootstrap_caido(
             _FakeSession(),  # type: ignore[arg-type]
             host_url="http://host",
             container_url="http://container",
         )
     assert setup_client.closed
-    return client
+    return [setup_client, *scan_clients], sleep_calls, exc_info.value
 
 
 async def test_cancellation_during_connect_closes_the_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    client = await _bootstrap_expecting(monkeypatch, asyncio.CancelledError())
-    assert client.closed
+    clients, sleep_calls, error = await _bootstrap_expecting(
+        monkeypatch,
+        [asyncio.CancelledError()],
+    )
+    assert isinstance(error, asyncio.CancelledError)
+    assert len(clients) == 2
+    assert all(client.closed for client in clients)
+    assert sleep_calls == []
 
 
 async def test_failed_connect_closes_the_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    client = await _bootstrap_expecting(monkeypatch, RuntimeError("no listener"))
-    assert client.closed
+    errors = [
+        RuntimeError("first"),
+        RuntimeError("second"),
+        RuntimeError("last"),
+    ]
+    clients, sleep_calls, error = await _bootstrap_expecting(monkeypatch, errors)
+    assert isinstance(error, RuntimeError)
+    assert str(error) == "Caido client connect failed after 3 attempts"
+    assert error.__cause__ is errors[-1]
+    assert len(clients) == 4
+    assert all(client.closed for client in clients)
+    assert sleep_calls == [2.0, 4.0]
 
 
 async def test_select_retries_without_creating_another_project(

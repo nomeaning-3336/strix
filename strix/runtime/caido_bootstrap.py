@@ -28,7 +28,7 @@ _LOGIN_AS_GUEST_BODY = (
     '{"query":"mutation LoginAsGuest { loginAsGuest { token { accessToken } } }"}'
 )
 _PROJECT_SETUP_TIMEOUT_MS = 45_000
-_PROJECT_SETUP_ATTEMPTS = 3
+_BOOTSTRAP_ATTEMPTS = 3
 
 
 async def _login_as_guest(
@@ -103,7 +103,7 @@ async def _setup_project(host_url: str, access_token: str) -> None:
 
     project_id: str | None = None
     last_exc: Exception | None = None
-    for attempt in range(1, _PROJECT_SETUP_ATTEMPTS + 1):
+    for attempt in range(1, _BOOTSTRAP_ATTEMPTS + 1):
         client = Client(
             host_url,
             auth=TokenAuthOptions(token=access_token),
@@ -127,10 +127,10 @@ async def _setup_project(host_url: str, access_token: str) -> None:
             logger.warning(
                 "Caido project setup attempt %d/%d failed: %s",
                 attempt,
-                _PROJECT_SETUP_ATTEMPTS,
+                _BOOTSTRAP_ATTEMPTS,
                 exc,
             )
-            if attempt < _PROJECT_SETUP_ATTEMPTS:
+            if attempt < _BOOTSTRAP_ATTEMPTS:
                 await asyncio.sleep(min(2.0 * attempt, 8.0))
         else:
             logger.info("Caido project selected: %s", project_id)
@@ -139,7 +139,7 @@ async def _setup_project(host_url: str, access_token: str) -> None:
             with contextlib.suppress(Exception):
                 await client.aclose()
     raise RuntimeError(
-        f"Caido project setup failed after {_PROJECT_SETUP_ATTEMPTS} attempts"
+        f"Caido project setup failed after {_BOOTSTRAP_ATTEMPTS} attempts"
     ) from last_exc
 
 
@@ -161,16 +161,32 @@ async def bootstrap_caido(
 
     await _setup_project(host_url, access_token)
 
-    client = Client(host_url, auth=TokenAuthOptions(token=access_token))
-    try:
-        # connect() is inside the guard as well: a cancellation there (scan
-        # teardown while the bootstrap is still in flight) would otherwise
-        # leave the half-connected transport behind.
-        await client.connect()
-    except BaseException:
-        # The client never reaches the session bundle if connect or project
-        # setup fails, so close it here to avoid leaking the transport.
-        with contextlib.suppress(Exception):
-            await client.aclose()
-        raise
-    return client
+    last_exc: Exception | None = None
+    for attempt in range(1, _BOOTSTRAP_ATTEMPTS + 1):
+        client = Client(host_url, auth=TokenAuthOptions(token=access_token))
+        try:
+            # A cancellation while connecting can leave a half-connected
+            # transport behind, so close the client before propagating it.
+            await client.connect()
+        except Exception as exc:  # noqa: BLE001
+            with contextlib.suppress(Exception):
+                await client.aclose()
+            last_exc = exc
+            logger.warning(
+                "Caido client connect attempt %d/%d failed: %s",
+                attempt,
+                _BOOTSTRAP_ATTEMPTS,
+                exc,
+            )
+            if attempt < _BOOTSTRAP_ATTEMPTS:
+                await asyncio.sleep(min(2.0 * attempt, 8.0))
+        except BaseException:
+            # Teardown can cancel the bootstrap at any await; do not retry.
+            with contextlib.suppress(Exception):
+                await client.aclose()
+            raise
+        else:
+            return client
+    raise RuntimeError(
+        f"Caido client connect failed after {_BOOTSTRAP_ATTEMPTS} attempts"
+    ) from last_exc
