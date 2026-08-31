@@ -18,13 +18,15 @@ goes through LiteLLM instead of the clients built here.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import httpx
 import requests
-from openai import AsyncOpenAI
 
 from strix.config import codex
+
+
+if TYPE_CHECKING:
+    from openai import AsyncOpenAI
 
 
 PROVIDER = "opencode"
@@ -180,6 +182,9 @@ def validate_api_key(key: str) -> None:
 
 
 def build_openai_client(base_url: str) -> AsyncOpenAI:
+    import httpx
+    from openai import AsyncOpenAI
+
     return AsyncOpenAI(
         api_key=get_api_key(),
         base_url=base_url,
