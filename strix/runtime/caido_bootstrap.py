@@ -120,7 +120,6 @@ async def _setup_project(host_url: str, access_token: str) -> None:
             else:
                 logger.info("Caido project selected: %s", project.id)
                 return
-        assert last_exc is not None
         raise RuntimeError(
             f"Caido project setup failed after {_PROJECT_SETUP_ATTEMPTS} attempts"
         ) from last_exc
