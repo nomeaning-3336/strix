@@ -48,13 +48,29 @@ def test_hydrate_from_run_dir_strips_control_chars_from_title(
     # A run started before titles were normalized can hold control characters on
     # disk, and resume re-exports those titles to the CSV, the SARIF and the TUI.
     (report_state.get_run_dir() / "vulnerabilities.json").write_text(
-        json.dumps([{"id": "vuln-0001", "title": "XSS in\r\n search\tform", "severity": "medium"}]),
+        json.dumps(
+            [
+                {
+                    "id": "vuln-0001",
+                    "title": "XSS in\r\n search\tform",
+                    "severity": "medium",
+                    "timestamp": "2026-01-01 00:00:00 UTC",
+                }
+            ]
+        ),
         encoding="utf-8",
     )
 
+    md_path = report_state.get_run_dir() / "vulnerabilities" / "vuln-0001.md"
+    md_path.parent.mkdir(exist_ok=True)
+    md_path.write_text("# XSS in\r\n search\tform\n", encoding="utf-8")
+
     report_state.hydrate_from_run_dir()
+    report_state.save_run_data()
 
     assert report_state.vulnerability_reports[0]["title"] == "XSS in search form"
+    # The markdown on disk holds the raw heading, so resume must rewrite it.
+    assert md_path.read_text(encoding="utf-8").startswith("# XSS in search form\n")
 
 
 def _seed(state: ReportState) -> None:
