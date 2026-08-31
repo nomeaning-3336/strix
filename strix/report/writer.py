@@ -42,8 +42,10 @@ def csv_safe(value: object) -> str:
     scanned target, which is exactly the attacker-influenced input this guards
     against.
 
-    Prefixing with an apostrophe is the standard mitigation: spreadsheets treat
-    the rest of the cell as literal text and hide the apostrophe on display.
+    Prefixing with an apostrophe is the standard mitigation (OWASP): the rest of
+    the cell is kept as literal text instead of being evaluated. Excel shows the
+    apostrophe when it opens a ``.csv`` directly, which is cosmetic — the point is
+    that nothing runs.
     """
     text = str(value)
     if text.startswith(_CSV_FORMULA_PREFIXES):
@@ -197,11 +199,17 @@ def write_vulnerabilities(
 
 
 def atomic_write_text(path: Path, payload: str) -> None:
-    """Write *payload* to *path* via a sibling temp file and an atomic rename."""
+    """Write *payload* to *path* via a sibling temp file and an atomic rename.
+
+    ``newline=""`` disables newline translation so *payload* lands byte-for-byte:
+    the CSV index carries its own ``\\r\\n`` terminators, which text mode would turn
+    into ``\\r\\r\\n`` on Windows.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile(
         mode="w",
         encoding="utf-8",
+        newline="",
         dir=str(path.parent),
         prefix=f".{path.name}.",
         suffix=".tmp",

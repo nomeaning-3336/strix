@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 import pytest
 
 from strix.report.writer import (
+    atomic_write_text,
     read_run_record,
     render_vulnerability_md,
     write_executive_report,
@@ -208,6 +209,17 @@ def test_write_vulnerabilities_csv_leaves_benign_titles_unchanged(tmp_path: Path
         csv.DictReader((tmp_path / "vulnerabilities.csv").read_text(encoding="utf-8").splitlines()),
     )
     assert csv_rows[0]["title"] == "SQL Injection in /login"
+
+
+def test_atomic_write_text_keeps_payload_byte_for_byte(tmp_path: Path) -> None:
+    # The CSV index carries its own \r\n terminators, so newline translation would
+    # turn every row ending into \r\r\n on Windows.
+    payload = "a,b\r\nc,d\r\n"
+    path = tmp_path / "index.csv"
+
+    atomic_write_text(path, payload)
+
+    assert path.read_bytes() == payload.encode("utf-8")
 
 
 def test_write_vulnerabilities_skips_already_saved_ids(tmp_path: Path) -> None:

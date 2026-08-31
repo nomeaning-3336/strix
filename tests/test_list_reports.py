@@ -27,6 +27,20 @@ def report_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReportState
     return state
 
 
+def test_add_vulnerability_report_strips_control_chars_from_title(
+    report_state: ReportState,
+) -> None:
+    # A title quotes text from the scanned target, so it can carry newlines or
+    # tabs that break the markdown heading, the CSV cell and the TUI list.
+    report_id = report_state.add_vulnerability_report(
+        title="\tXSS in\r\n search\x00 form ",
+        severity="medium",
+        target="https://app.example.com",
+    )
+    report = next(r for r in report_state.vulnerability_reports if r["id"] == report_id)
+    assert report["title"] == "XSS in search form"
+
+
 def _seed(state: ReportState) -> None:
     state.add_vulnerability_report(
         title="Reflected XSS in search",
