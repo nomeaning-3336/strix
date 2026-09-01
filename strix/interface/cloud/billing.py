@@ -352,15 +352,21 @@ def _run_link_wallet_flow(
 ) -> subprocess.CompletedProcess[str]:
     """Create the spend request, wait for approval in the Link app, then pay."""
 
-    def run_step(arguments: list[str]) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(  # noqa: S603
-            [*npx_prefix, _LINK_CLI_PACKAGE, *arguments],
-            check=False,
-            capture_output=True,
-            text=True,
-            env=wallet_env,
-            cwd=wallet_root,
-        )
+    def run_step(arguments: list[str], progress_message: str) -> subprocess.CompletedProcess[str]:
+        def run() -> subprocess.CompletedProcess[str]:
+            return subprocess.run(  # noqa: S603
+                [*npx_prefix, _LINK_CLI_PACKAGE, *arguments],
+                check=False,
+                capture_output=True,
+                text=True,
+                env=wallet_env,
+                cwd=wallet_root,
+            )
+
+        if quiet:
+            return run()
+        with console.status(progress_message):
+            return run()
 
     created = run_step(
         [
@@ -375,7 +381,8 @@ def _run_link_wallet_flow(
             _payment_context(body),
             "--format",
             "json",
-        ]
+        ],
+        "Starting the Stripe Link wallet…",
     )
     spend_request = _pending_spend_request(created.stdout)
     if spend_request is None:
@@ -395,7 +402,8 @@ def _run_link_wallet_flow(
             str(_LINK_APPROVAL_MAX_ATTEMPTS),
             "--format",
             "jsonl",
-        ]
+        ],
+        "Waiting for the approval in the Link app…",
     )
     if _final_spend_request_status(polled.stdout) != "approved":
         return polled
@@ -413,7 +421,8 @@ def _run_link_wallet_flow(
             body_json,
             "--format",
             "json",
-        ]
+        ],
+        "Completing the payment…",
     )
 
 
@@ -489,8 +498,15 @@ def _npx_prefix(npx: str, wallet_root: Path) -> list[str]:
         "--ignore-scripts",
         f"--userconfig={wallet_root / 'user.npmrc'}",
         f"--globalconfig={wallet_root / 'global.npmrc'}",
-        f"--cache={wallet_root / 'npm-cache'}",
+        f"--cache={_wallet_npm_cache()}",
     ]
+
+
+def _wallet_npm_cache() -> Path:
+    """Keep one private npm cache so the pinned wallet client installs once."""
+    cache = Path.home() / ".strix" / "wallet-npm-cache"
+    cache.mkdir(mode=0o700, parents=True, exist_ok=True)
+    return cache
 
 
 def _payment_context(body: dict[str, Any]) -> str:
