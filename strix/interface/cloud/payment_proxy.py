@@ -2,8 +2,8 @@
 
 The ``mppx`` CLI accepts custom HTTP headers through ``-H`` only.  Passing a
 Strix API token that way exposes it to process-listing tools.  This module keeps
-the token in the Strix process and injects it while forwarding the wallet's two
-requests (challenge and paid retry) to the fixed billing endpoint.
+the token in the Strix process and injects it while forwarding the wallet's few
+requests (challenge probes and the paid retry) to the fixed billing endpoint.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 _DEFAULT_REQUEST_TIMEOUT_S = 120.0
 _MAX_REQUEST_BODY_BYTES = 64 * 1024
 _MAX_UPSTREAM_RESPONSE_BYTES = 1024 * 1024
-_MAX_WALLET_REQUESTS = 2
+_MAX_WALLET_REQUESTS = 3
 _HOP_BY_HOP_HEADERS = frozenset(
     {
         "connection",
@@ -54,7 +54,7 @@ class _BridgeState:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
     def claim_request(self) -> bool:
-        """Allow only the challenge request and its paid retry."""
+        """Allow only the challenge probes and the one paid retry."""
         with self.lock:
             if self.request_count >= _MAX_WALLET_REQUESTS:
                 return False

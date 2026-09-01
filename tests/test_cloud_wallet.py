@@ -61,6 +61,25 @@ def test_link_wallet_authenticated_handles_launch_failure(
     assert billing._link_wallet_authenticated("npx") is False
 
 
+def test_pending_spend_request_reads_the_created_record() -> None:
+    stdout = (
+        '[{"id": "lsrq_123", "status": "pending_approval", '
+        '"approval_url": "https://app.link.com/activity/approve/lsrq_123"}]'
+    )
+    assert billing._pending_spend_request(stdout) == (
+        "lsrq_123",
+        "https://app.link.com/activity/approve/lsrq_123",
+    )
+    assert billing._pending_spend_request('[{"id": "lsrq_1", "status": "approved"}]') is None
+    assert billing._pending_spend_request("not json") is None
+
+
+def test_final_spend_request_status_reads_the_last_poll_line() -> None:
+    stdout = '{"status": "pending_approval"}\n{"status": "approved"}\n'
+    assert billing._final_spend_request_status(stdout) == "approved"
+    assert billing._final_spend_request_status("") is None
+
+
 def test_prepare_link_wallet_skips_login_when_connected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(billing, "_link_wallet_authenticated", lambda _npx: True)
     assert billing._prepare_link_wallet(Console(), "npx", as_json=True) is None

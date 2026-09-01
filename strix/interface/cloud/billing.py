@@ -36,6 +36,10 @@ _MPPX_PACKAGE = "mppx@0.8.17"
 _LINK_CLI_PACKAGE = "@stripe/link-cli@0.13.1"
 _LINK_CLI_CLIENT_NAME = "Strix CLI"
 _LINK_LOGIN_TIMEOUT_S = 300
+# Poll every 2 seconds while the person approves the spend request in the Link
+# app. 150 attempts give the person 5 minutes.
+_LINK_APPROVAL_POLL_INTERVAL_S = 2
+_LINK_APPROVAL_MAX_ATTEMPTS = 150
 _NPM_REGISTRY = "https://registry.npmjs.org"
 _WALLET_ENV_NAMES = frozenset(
     {
@@ -157,6 +161,7 @@ def run_topup(  # noqa: PLR0911, PLR0912, PLR0915
             return http.EXIT_PAYMENT
     try:
         wallet_result = _run_wallet_client(
+            console,
             npx,
             args,
             body,
@@ -193,8 +198,7 @@ def run_topup(  # noqa: PLR0911, PLR0912, PLR0915
     result = wallet_result.process
     confirmed_receipt = _confirmed_topup_receipt(wallet_result.upstream_responses)
     if confirmed_receipt is not None:
-        if as_json:
-            emit(console, confirmed_receipt, as_json=True)
+        emit(console, confirmed_receipt, as_json=as_json)
         return http.EXIT_OK
 
     if not as_json:
@@ -270,6 +274,7 @@ def run_topup(  # noqa: PLR0911, PLR0912, PLR0915
 
 
 def _run_wallet_client(
+    console: Console,
     npx: str,
     args: argparse.Namespace,
     body: dict[str, Any],
@@ -300,21 +305,16 @@ def _run_wallet_client(
             response_observer=upstream_responses.append,
         ) as wallet_url:
             if use_link_wallet:
-                command = [
-                    *npx_prefix,
-                    _LINK_CLI_PACKAGE,
-                    "mpp",
-                    "pay",
+                process = _run_link_wallet_flow(
+                    console,
+                    npx_prefix,
                     wallet_url,
-                    "--method",
-                    "POST",
-                    "--data",
+                    body,
                     body_json,
-                    "--context",
-                    _payment_context(body),
-                    "--format",
-                    "json",
-                ]
+                    wallet_env,
+                    wallet_root,
+                    quiet=capture_output,
+                )
             else:
                 command = [
                     *npx_prefix,
@@ -326,15 +326,139 @@ def _run_wallet_client(
                 ]
                 if payment_method:
                     command += ["-M", f"paymentMethod={payment_method}"]
-            process = subprocess.run(  # noqa: S603
-                command,
-                check=False,
-                capture_output=capture_output,
-                text=True,
-                env=wallet_env,
-                cwd=wallet_root,
-            )
+                process = subprocess.run(  # noqa: S603
+                    command,
+                    check=False,
+                    capture_output=capture_output,
+                    text=True,
+                    env=wallet_env,
+                    cwd=wallet_root,
+                )
     return _WalletClientResult(process=process, upstream_responses=tuple(upstream_responses))
+
+
+def _run_link_wallet_flow(
+    console: Console,
+    npx_prefix: list[str],
+    wallet_url: str,
+    body: dict[str, Any],
+    body_json: str,
+    wallet_env: dict[str, str],
+    wallet_root: Path,
+    *,
+    quiet: bool,
+) -> subprocess.CompletedProcess[str]:
+    """Create the spend request, wait for approval in the Link app, then pay."""
+
+    def run_step(arguments: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(  # noqa: S603
+            [*npx_prefix, _LINK_CLI_PACKAGE, *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            env=wallet_env,
+            cwd=wallet_root,
+        )
+
+    created = run_step(
+        [
+            "mpp",
+            "pay",
+            wallet_url,
+            "--method",
+            "POST",
+            "--data",
+            body_json,
+            "--context",
+            _payment_context(body),
+            "--format",
+            "json",
+        ]
+    )
+    spend_request = _pending_spend_request(created.stdout)
+    if spend_request is None:
+        return created
+    request_id, approval_url = spend_request
+
+    if not quiet:
+        console.print(f"[yellow]Approve the payment in the Link app:[/] {approval_url}")
+    polled = run_step(
+        [
+            "spend-request",
+            "retrieve",
+            request_id,
+            "--interval",
+            str(_LINK_APPROVAL_POLL_INTERVAL_S),
+            "--max-attempts",
+            str(_LINK_APPROVAL_MAX_ATTEMPTS),
+            "--format",
+            "jsonl",
+        ]
+    )
+    if _final_spend_request_status(polled.stdout) != "approved":
+        return polled
+
+    return run_step(
+        [
+            "mpp",
+            "pay",
+            wallet_url,
+            "--spend-request-id",
+            request_id,
+            "--method",
+            "POST",
+            "--data",
+            body_json,
+            "--format",
+            "json",
+        ]
+    )
+
+
+def _spend_request_records(stdout: str) -> list[dict[str, Any]]:
+    """Parse spend-request records from JSON or JSON-lines wallet output."""
+    records: list[dict[str, Any]] = []
+    text = (stdout or "").strip()
+    if not text:
+        return records
+    candidates: list[Any] = []
+    try:
+        candidates.append(json.loads(text))
+    except ValueError:
+        for line in text.splitlines():
+            try:
+                candidates.append(json.loads(line))
+            except ValueError:
+                continue
+    for candidate in candidates:
+        items = candidate if isinstance(candidate, list) else [candidate]
+        records.extend(cast("dict[str, Any]", item) for item in items if isinstance(item, dict))
+    return records
+
+
+def _pending_spend_request(stdout: str) -> tuple[str, str] | None:
+    """Find a spend request that waits for approval in the Link app."""
+    for record in _spend_request_records(stdout):
+        request_id = record.get("id")
+        approval_url = record.get("approval_url")
+        if (
+            record.get("status") == "pending_approval"
+            and isinstance(request_id, str)
+            and request_id
+            and isinstance(approval_url, str)
+        ):
+            return request_id, approval_url
+    return None
+
+
+def _final_spend_request_status(stdout: str) -> str | None:
+    """Return the last reported status from the approval poll output."""
+    status: str | None = None
+    for record in _spend_request_records(stdout):
+        value = record.get("status")
+        if isinstance(value, str):
+            status = value
+    return status
 
 
 def _npx_prefix(npx: str, wallet_root: Path) -> list[str]:

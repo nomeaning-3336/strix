@@ -116,7 +116,7 @@ def test_bridge_forwards_only_the_approved_request_and_protected_headers(
         assert len(captured) == 1
 
 
-def test_bridge_allows_only_two_valid_wallet_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_bridge_limits_valid_wallet_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = 0
 
     def fake_request(*_args: Any, **_kwargs: Any) -> _StreamingResponse:
@@ -132,8 +132,9 @@ def test_bridge_allows_only_two_valid_wallet_attempts(monkeypatch: pytest.Monkey
     ) as wallet_url:
         assert _post(wallet_url, b"{}") == b"{}"
         assert _post(wallet_url, b"{}") == b"{}"
-        with pytest.raises(urllib.error.HTTPError) as third_request:
+        assert _post(wallet_url, b"{}") == b"{}"
+        with pytest.raises(urllib.error.HTTPError) as extra_request:
             _post(wallet_url, b"{}")
 
-    assert third_request.value.code == 429
-    assert calls == 2
+    assert extra_request.value.code == 429
+    assert calls == payment_proxy._MAX_WALLET_REQUESTS
