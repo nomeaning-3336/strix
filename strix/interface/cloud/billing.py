@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import webbrowser
 from contextlib import suppress
 from dataclasses import dataclass
@@ -86,6 +87,7 @@ _WALLET_ENV_NAMES = frozenset(
     }
 )
 _AUTHORIZATION_SECRET = re.compile(r"(?i)((?:bearer|payment)\s+)[^\s\"']+")
+_HTTPS_URL = re.compile(r"https://[^\s\"'<>]+")
 _LOOPBACK_NO_PROXY = ("127.0.0.1", "localhost", "::1")
 
 
@@ -637,26 +639,58 @@ def _prepare_link_wallet(console: Console, npx: str, *, as_json: bool) -> str | 
         "The user approves every payment in the Link app."
     )
     try:
-        _run_link_cli(
-            npx,
-            [
-                "auth",
-                "login",
-                "--client-name",
-                _LINK_CLI_CLIENT_NAME,
-                "--interval",
-                "3",
-                "--timeout",
-                str(_LINK_LOGIN_TIMEOUT_S),
-            ],
-            capture_output=False,
-            timeout=_LINK_LOGIN_TIMEOUT_S + 30,
-        )
+        _run_link_login(npx)
     except (OSError, subprocess.SubprocessError):
         return manual_setup
     if _link_wallet_authenticated(npx):
         return None
     return manual_setup
+
+
+def _run_link_login(npx: str) -> None:
+    """Start the Link sign-in, echo its output, and open the setup URL in a browser."""
+    arguments = [
+        "auth",
+        "login",
+        "--client-name",
+        _LINK_CLI_CLIENT_NAME,
+        "--interval",
+        "3",
+        "--timeout",
+        str(_LINK_LOGIN_TIMEOUT_S),
+    ]
+    with tempfile.TemporaryDirectory(prefix="strix-wallet-") as wallet_cwd:
+        wallet_root = Path(wallet_cwd)
+        (wallet_root / "user.npmrc").touch(mode=0o600)
+        (wallet_root / "global.npmrc").touch(mode=0o600)
+        with subprocess.Popen(  # noqa: S603
+            [*_npx_prefix(npx, wallet_root), _LINK_CLI_PACKAGE, *arguments],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=_wallet_environment(),
+            cwd=wallet_root,
+        ) as process:
+            watchdog = threading.Timer(_LINK_LOGIN_TIMEOUT_S + 30, process.kill)
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                opened = False
+                if process.stdout is None:
+                    process.wait()
+                    return
+                for line in process.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    if not opened:
+                        match = _HTTPS_URL.search(sanitize_terminal_text(line))
+                        if match:
+                            opened = True
+                            with suppress(Exception):
+                                webbrowser.open(match.group(0))
+                process.wait()
+            finally:
+                watchdog.cancel()
 
 
 def _wallet_environment() -> dict[str, str]:
