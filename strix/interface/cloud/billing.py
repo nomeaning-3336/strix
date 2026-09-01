@@ -201,15 +201,17 @@ def run_topup(  # noqa: PLR0911, PLR0912, PLR0915
         emit(console, confirmed_receipt, as_json=as_json)
         return http.EXIT_OK
 
+    stdout = str(getattr(result, "stdout", "") or "").strip()
+    stderr = str(getattr(result, "stderr", "") or "").strip()
     if not as_json:
         console.print(
             "[yellow]The wallet exited without a confirmed receipt. The payment outcome is "
             "unknown; run `strix cloud billing credits` before retrying.[/]"
         )
+        detail = _wallet_detail(stderr or stdout or "")
+        if detail:
+            console.print(f"[dim]Wallet output: {detail}[/]")
         return http.EXIT_PAYMENT
-
-    stdout = str(getattr(result, "stdout", "") or "").strip()
-    stderr = str(getattr(result, "stderr", "") or "").strip()
     if result.returncode == 0:
         try:
             receipt = json.loads(stdout)
@@ -415,22 +417,32 @@ def _run_link_wallet_flow(
     )
 
 
+def _embedded_json_documents(text: str) -> list[Any]:
+    """Extract JSON documents from wallet output that can contain other text."""
+    documents: list[Any] = []
+    decoder = json.JSONDecoder()
+    position = 0
+    while position < len(text):
+        start_candidates = [
+            index for index in (text.find("[", position), text.find("{", position)) if index != -1
+        ]
+        if not start_candidates:
+            break
+        start = min(start_candidates)
+        try:
+            document, end = decoder.raw_decode(text, start)
+        except ValueError:
+            position = start + 1
+            continue
+        documents.append(document)
+        position = end
+    return documents
+
+
 def _spend_request_records(stdout: str) -> list[dict[str, Any]]:
     """Parse spend-request records from JSON or JSON-lines wallet output."""
     records: list[dict[str, Any]] = []
-    text = (stdout or "").strip()
-    if not text:
-        return records
-    candidates: list[Any] = []
-    try:
-        candidates.append(json.loads(text))
-    except ValueError:
-        for line in text.splitlines():
-            try:
-                candidates.append(json.loads(line))
-            except ValueError:
-                continue
-    for candidate in candidates:
+    for candidate in _embedded_json_documents((stdout or "").strip()):
         items = candidate if isinstance(candidate, list) else [candidate]
         records.extend(cast("dict[str, Any]", item) for item in items if isinstance(item, dict))
     return records

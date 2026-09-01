@@ -74,6 +74,21 @@ def test_pending_spend_request_reads_the_created_record() -> None:
     assert billing._pending_spend_request("not json") is None
 
 
+def test_pending_spend_request_tolerates_banner_text_around_pretty_json() -> None:
+    stdout = (
+        "Update available for @stripe/link-cli: 0.13.1 -> 0.16.0\n"
+        "[\n  {\n"
+        '    "id": "lsrq_9",\n'
+        '    "status": "pending_approval",\n'
+        '    "approval_url": "https://app.link.com/activity/approve/lsrq_9"\n'
+        "  }\n]"
+    )
+    assert billing._pending_spend_request(stdout) == (
+        "lsrq_9",
+        "https://app.link.com/activity/approve/lsrq_9",
+    )
+
+
 def test_final_spend_request_status_reads_the_last_poll_line() -> None:
     stdout = '{"status": "pending_approval"}\n{"status": "approved"}\n'
     assert billing._final_spend_request_status(stdout) == "approved"
