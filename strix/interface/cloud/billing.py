@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import webbrowser
 from contextlib import suppress
 from dataclasses import dataclass
@@ -670,20 +671,26 @@ def _run_link_login(npx: str) -> None:
             env=_wallet_environment(),
             cwd=wallet_root,
         ) as process:
-            opened = False
-            if process.stdout is None:
-                process.wait(timeout=_LINK_LOGIN_TIMEOUT_S + 30)
-                return
-            for line in process.stdout:
-                sys.stdout.write(line)
-                sys.stdout.flush()
-                if not opened:
-                    match = _HTTPS_URL.search(sanitize_terminal_text(line))
-                    if match:
-                        opened = True
-                        with suppress(Exception):
-                            webbrowser.open(match.group(0))
-            process.wait(timeout=_LINK_LOGIN_TIMEOUT_S + 30)
+            watchdog = threading.Timer(_LINK_LOGIN_TIMEOUT_S + 30, process.kill)
+            watchdog.daemon = True
+            watchdog.start()
+            try:
+                opened = False
+                if process.stdout is None:
+                    process.wait()
+                    return
+                for line in process.stdout:
+                    sys.stdout.write(line)
+                    sys.stdout.flush()
+                    if not opened:
+                        match = _HTTPS_URL.search(sanitize_terminal_text(line))
+                        if match:
+                            opened = True
+                            with suppress(Exception):
+                                webbrowser.open(match.group(0))
+                process.wait()
+            finally:
+                watchdog.cancel()
 
 
 def _wallet_environment() -> dict[str, str]:
