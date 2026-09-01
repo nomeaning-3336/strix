@@ -678,8 +678,9 @@ def _build_parser(group: str, verb_label: str, cmd: Cmd) -> argparse.ArgumentPar
             default=None,
             metavar="PM_ID",
             help=(
-                "Stripe payment method for the card payment. "
-                "Defaults to MPPX_STRIPE_PAYMENT_METHOD."
+                "Pay with the mppx wallet client and this Stripe payment method "
+                "instead of the Stripe Link wallet. Defaults to "
+                "MPPX_STRIPE_PAYMENT_METHOD."
             ),
         )
     if cmd.path == "/scans" and cmd.method == "POST":
