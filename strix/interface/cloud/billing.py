@@ -444,7 +444,14 @@ def _spend_request_records(stdout: str) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for candidate in _embedded_json_documents((stdout or "").strip()):
         items = candidate if isinstance(candidate, list) else [candidate]
-        records.extend(cast("dict[str, Any]", item) for item in items if isinstance(item, dict))
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            record = cast("dict[str, Any]", item)
+            data = record.get("data")
+            if isinstance(data, dict):
+                record = cast("dict[str, Any]", data)
+            records.append(record)
     return records
 
 

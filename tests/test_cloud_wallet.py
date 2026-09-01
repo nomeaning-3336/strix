@@ -95,6 +95,15 @@ def test_final_spend_request_status_reads_the_last_poll_line() -> None:
     assert billing._final_spend_request_status("") is None
 
 
+def test_final_spend_request_status_unwraps_chunk_envelopes() -> None:
+    stdout = (
+        '{"type":"chunk","data":{"id":"lsrq_9","status":"pending_approval"}}\n'
+        '{"type":"chunk","data":{"id":"lsrq_9","status":"approved"}}\n'
+        '{"type":"done","ok":true,"meta":{"command":"spend-request retrieve"}}\n'
+    )
+    assert billing._final_spend_request_status(stdout) == "approved"
+
+
 def test_prepare_link_wallet_skips_login_when_connected(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(billing, "_link_wallet_authenticated", lambda _npx: True)
     assert billing._prepare_link_wallet(Console(), "npx", as_json=True) is None
