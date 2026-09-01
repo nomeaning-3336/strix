@@ -129,7 +129,12 @@ The same `strix` binary drives the managed platform. Every command starts with `
 ```bash
 # 1. Sign in (device flow — the user confirms a code in the browser; this also
 #    creates the account and workspace when needed)
-strix cloud login --scopes scans:read scans:write assets:read assets:write vulnerabilities:read
+strix cloud login
+
+# If you need specific scopes, request them with --scopes. Include the billing
+# scopes by default so you can check the balance and top up credits:
+#   strix cloud login --scopes scans:read scans:write assets:read assets:write \
+#     vulnerabilities:read billing:read billing:write
 
 # 2. Register and verify the target domain (verification prints a DNS record for the user)
 strix cloud domains add --domain staging.example.com --asset-type web_app
