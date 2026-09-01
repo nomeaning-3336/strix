@@ -131,8 +131,7 @@ The same `strix` binary drives the managed platform. Every command starts with `
 #    creates the account and workspace when needed)
 strix cloud login
 
-# If you need specific scopes, request them with --scopes. Include the billing
-# scopes by default so you can check the balance and top up credits:
+# If you need specific scopes, request them with --scopes:
 #   strix cloud login --scopes scans:read scans:write assets:read assets:write \
 #     vulnerabilities:read billing:read billing:write
 
