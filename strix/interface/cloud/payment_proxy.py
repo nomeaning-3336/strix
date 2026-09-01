@@ -8,7 +8,6 @@ requests (challenge and paid retry) to the fixed billing endpoint.
 
 from __future__ import annotations
 
-import os
 import secrets
 import threading
 from contextlib import contextmanager, suppress
@@ -164,9 +163,6 @@ def _make_handler(state: _BridgeState) -> type[BaseHTTPRequestHandler]:
 
             headers = _forward_request_headers(self)
             headers["X-Strix-Authorization"] = state.authorization
-            bypass = os.environ.get("STRIX_VERCEL_PROTECTION_BYPASS", "").strip()
-            if bypass:
-                headers["x-vercel-protection-bypass"] = bypass
             try:
                 response = requests.request(
                     "POST",
@@ -250,7 +246,7 @@ def wallet_payment_bridge(
     expected_body: bytes,
     timeout: float | None = None,
     response_observer: Callable[[WalletUpstreamResponse], None] | None = None,
-) -> Generator[str, None, None]:
+) -> Generator[str]:
     """Yield a one-run loopback URL that injects the Strix API token upstream.
 
     The random path prevents accidental cross-process requests and limits local

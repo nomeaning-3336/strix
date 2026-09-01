@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
-import os
 import sys
 import time
 import webbrowser
@@ -210,7 +209,6 @@ def _run_device_flow(  # noqa: PLR0912, PLR0915
     try:
         response = requests.post(
             f"{app_url}/api/v1/cli/login",
-            headers=_preview_headers(),
             timeout=_HTTP_TIMEOUT_S,
             allow_redirects=False,
         )
@@ -275,7 +273,6 @@ def _run_device_flow(  # noqa: PLR0912, PLR0915
         try:
             poll = requests.post(
                 f"{app_url}/api/v1/cli/login/poll",
-                headers=_preview_headers(),
                 json=poll_body,
                 timeout=_HTTP_TIMEOUT_S,
                 allow_redirects=False,
@@ -415,7 +412,6 @@ def _complete_selection(
     try:
         response = requests.post(
             f"{app_url}/api/v1/cli/login/complete",
-            headers=_preview_headers(),
             json=body,
             timeout=_HTTP_TIMEOUT_S,
             allow_redirects=False,
@@ -581,17 +577,11 @@ def _error_detail(response: requests.Response) -> str:
     return f"HTTP {response.status_code}"
 
 
-def _preview_headers() -> dict[str, str]:
-    bypass = os.environ.get("STRIX_VERCEL_PROTECTION_BYPASS", "").strip()
-    return {"x-vercel-protection-bypass": bypass} if bypass else {}
-
-
 def _session_headers(record: dict[str, Any]) -> dict[str, str]:
     headers = {"Authorization": f"Bearer {record['api_token']}"}
     workspace_id = record.get("organization_id")
     if isinstance(workspace_id, str) and workspace_id:
         headers["X-Strix-Workspace"] = workspace_id
-    headers.update(_preview_headers())
     return headers
 
 

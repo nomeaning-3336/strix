@@ -159,9 +159,6 @@ def request(
     headers = {
         "Authorization": f"Bearer {api_token(token)}",
     }
-    bypass = os.environ.get("STRIX_VERCEL_PROTECTION_BYPASS", "").strip()
-    if bypass:
-        headers["x-vercel-protection-bypass"] = bypass
     workspace_id = _expected_workspace_id(token_override=token is not None)
     if workspace_id:
         headers["X-Strix-Workspace"] = workspace_id

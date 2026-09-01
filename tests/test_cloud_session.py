@@ -35,7 +35,6 @@ def auth_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(platform_cli, "AUTH_PATH", path)
     monkeypatch.delenv("STRIX_API_TOKEN", raising=False)
     monkeypatch.delenv("STRIX_WORKSPACE_ID", raising=False)
-    monkeypatch.delenv("STRIX_VERCEL_PROTECTION_BYPASS", raising=False)
     return path
 
 
@@ -67,32 +66,6 @@ def test_http_workspace_pin_is_captured_once(
     )
     http.request("GET", "/scans")
     assert sent[0]["X-Strix-Workspace"] == "org_start"
-
-
-def test_preview_bypass_is_opt_in_and_shared_by_login_and_api_requests(
-    auth_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    assert auth_path.parent.exists()
-    platform_cli.save_record(
-        {
-            "api_token": "secret",
-            "organization_id": "org_1",
-            "app_url": "https://preview.example.test",
-        }
-    )
-    sent: list[dict[str, str]] = []
-    monkeypatch.setenv("STRIX_VERCEL_PROTECTION_BYPASS", "preview-secret")
-    monkeypatch.setattr(
-        http.requests,
-        "request",
-        lambda *_args, **kwargs: sent.append(dict(kwargs["headers"])) or Response({}),
-    )
-
-    http.configure()
-    http.request("GET", "/scans")
-
-    assert sent[0]["x-vercel-protection-bypass"] == "preview-secret"
-    assert platform_cli._preview_headers() == {"x-vercel-protection-bypass": "preview-secret"}
 
 
 def test_session_scope_update_persists_only_for_stored_session(
