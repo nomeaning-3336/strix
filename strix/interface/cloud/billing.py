@@ -9,6 +9,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import webbrowser
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -391,6 +393,9 @@ def _run_link_wallet_flow(
 
     if not quiet:
         console.print(f"[yellow]Approve the payment in the Link app:[/] {approval_url}")
+        if sys.stdin.isatty() and sys.stdout.isatty() and approval_url.startswith("https://"):
+            with suppress(Exception):
+                webbrowser.open(approval_url)
     polled = run_step(
         [
             "spend-request",
