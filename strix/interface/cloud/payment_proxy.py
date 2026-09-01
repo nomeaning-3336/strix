@@ -45,6 +45,7 @@ _HOP_BY_HOP_HEADERS = frozenset(
 class _BridgeState:
     upstream_url: str
     authorization: str
+    workspace_id: str | None
     expected_body: bytes
     path: str
     timeout: float
@@ -112,6 +113,7 @@ def _forward_request_headers(handler: BaseHTTPRequestHandler) -> dict[str, str]:
         "x-forwarded-proto",
         "x-real-ip",
         "x-strix-authorization",
+        "x-strix-workspace",
         "x-vercel-forwarded-for",
     }
     return {name: value for name, value in handler.headers.items() if name.lower() not in blocked}
@@ -163,6 +165,8 @@ def _make_handler(state: _BridgeState) -> type[BaseHTTPRequestHandler]:
 
             headers = _forward_request_headers(self)
             headers["X-Strix-Authorization"] = state.authorization
+            if state.workspace_id:
+                headers["X-Strix-Workspace"] = state.workspace_id
             try:
                 response = requests.request(
                     "POST",
@@ -243,6 +247,7 @@ def wallet_payment_bridge(
     *,
     upstream_url: str,
     api_token: str,
+    workspace_id: str | None = None,
     expected_body: bytes,
     timeout: float | None = None,
     response_observer: Callable[[WalletUpstreamResponse], None] | None = None,
@@ -258,6 +263,7 @@ def wallet_payment_bridge(
     state = _BridgeState(
         upstream_url=upstream_url,
         authorization=f"Bearer {api_token}",
+        workspace_id=workspace_id,
         expected_body=expected_body,
         path=path,
         timeout=timeout or _DEFAULT_REQUEST_TIMEOUT_S,

@@ -159,7 +159,7 @@ def request(
     headers = {
         "Authorization": f"Bearer {api_token(token)}",
     }
-    workspace_id = _expected_workspace_id(token_override=token is not None)
+    workspace_id = expected_workspace_id(token_override=token is not None)
     if workspace_id:
         headers["X-Strix-Workspace"] = workspace_id
     if idempotency_key is not None:
@@ -185,7 +185,7 @@ def request(
     return response
 
 
-def _expected_workspace_id(*, token_override: bool) -> str | None:
+def expected_workspace_id(*, token_override: bool) -> str | None:
     """Pin every request in this process to the workspace selected at startup."""
     if _workspace_id_override:
         return _workspace_id_override

@@ -84,6 +84,7 @@ def test_bridge_forwards_only_the_approved_request_and_protected_headers(
     with payment_proxy.wallet_payment_bridge(
         upstream_url="https://app.example.test/api/v1/billing/topup",
         api_token="strix-secret",  # noqa: S106
+        workspace_id="org_trusted",
         expected_body=b'{"credits":5}',
         response_observer=observed.append,
     ) as wallet_url:
@@ -94,6 +95,7 @@ def test_bridge_forwards_only_the_approved_request_and_protected_headers(
                 "Authorization": "Payment wallet-proof",
                 "Proxy-Authorization": "Basic drop-me",
                 "X-Strix-Authorization": "Bearer attacker",
+                "X-Strix-Workspace": "org_attacker",
             },
         )
 
@@ -101,6 +103,7 @@ def test_bridge_forwards_only_the_approved_request_and_protected_headers(
         headers = captured[0]["headers"]
         assert headers["Authorization"] == "Payment wallet-proof"
         assert headers["X-Strix-Authorization"] == "Bearer strix-secret"
+        assert headers["X-Strix-Workspace"] == "org_trusted"
         assert "Proxy-Authorization" not in headers
         assert not any(name.lower() in {"host", "content-length"} for name in headers)
         assert observed == [

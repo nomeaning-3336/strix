@@ -284,6 +284,7 @@ def _run_wallet_client(
         with wallet_payment_bridge(
             upstream_url=upstream_url,
             api_token=http.api_token(token),
+            workspace_id=http.expected_workspace_id(token_override=token is not None),
             expected_body=body_json.encode(),
             timeout=getattr(args, "timeout", None),
             response_observer=upstream_responses.append,
