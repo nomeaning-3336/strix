@@ -42,6 +42,13 @@ _LINK_LOGIN_TIMEOUT_S = 300
 # app. 150 attempts give the person 5 minutes.
 _LINK_APPROVAL_POLL_INTERVAL_S = 2
 _LINK_APPROVAL_MAX_ATTEMPTS = 150
+# Bound every wallet subprocess so a stalled npm download or wallet request
+# cannot block the top-up command forever. The poll step gets the full
+# approval window plus this margin.
+_WALLET_STEP_TIMEOUT_S = 300
+_LINK_APPROVAL_TIMEOUT_S = (
+    _LINK_APPROVAL_POLL_INTERVAL_S * _LINK_APPROVAL_MAX_ATTEMPTS + _WALLET_STEP_TIMEOUT_S
+)
 _NPM_REGISTRY = "https://registry.npmjs.org"
 _WALLET_ENV_NAMES = frozenset(
     {
@@ -330,14 +337,26 @@ def _run_wallet_client(
                 ]
                 if payment_method:
                     command += ["-M", f"paymentMethod={payment_method}"]
-                process = subprocess.run(  # noqa: S603
-                    command,
-                    check=False,
-                    capture_output=capture_output,
-                    text=True,
-                    env=wallet_env,
-                    cwd=wallet_root,
-                )
+                try:
+                    process = subprocess.run(  # noqa: S603
+                        command,
+                        check=False,
+                        capture_output=capture_output,
+                        text=True,
+                        env=wallet_env,
+                        cwd=wallet_root,
+                        timeout=_LINK_APPROVAL_TIMEOUT_S,
+                    )
+                except subprocess.TimeoutExpired as timeout_error:
+                    process = subprocess.CompletedProcess(
+                        args=command,
+                        returncode=1,
+                        stdout=_decoded_stream(timeout_error.stdout),
+                        stderr=(
+                            "The wallet step did not complete within "
+                            f"{_LINK_APPROVAL_TIMEOUT_S} seconds."
+                        ),
+                    )
     return _WalletClientResult(process=process, upstream_responses=tuple(upstream_responses))
 
 
@@ -354,16 +373,31 @@ def _run_link_wallet_flow(
 ) -> subprocess.CompletedProcess[str]:
     """Create the spend request, wait for approval in the Link app, then pay."""
 
-    def run_step(arguments: list[str], progress_message: str) -> subprocess.CompletedProcess[str]:
+    def run_step(
+        arguments: list[str],
+        progress_message: str,
+        timeout: int = _WALLET_STEP_TIMEOUT_S,
+    ) -> subprocess.CompletedProcess[str]:
+        command = [*npx_prefix, _LINK_CLI_PACKAGE, *arguments]
+
         def run() -> subprocess.CompletedProcess[str]:
-            return subprocess.run(  # noqa: S603
-                [*npx_prefix, _LINK_CLI_PACKAGE, *arguments],
-                check=False,
-                capture_output=True,
-                text=True,
-                env=wallet_env,
-                cwd=wallet_root,
-            )
+            try:
+                return subprocess.run(  # noqa: S603
+                    command,
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    env=wallet_env,
+                    cwd=wallet_root,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as timeout_error:
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=1,
+                    stdout=_decoded_stream(timeout_error.stdout),
+                    stderr=f"The wallet step did not complete within {timeout} seconds.",
+                )
 
         if quiet:
             return run()
@@ -409,6 +443,7 @@ def _run_link_wallet_flow(
             "jsonl",
         ],
         "Waiting for the approval in the Link app…",
+        timeout=_LINK_APPROVAL_TIMEOUT_S,
     )
     if _final_spend_request_status(polled.stdout) != "approved":
         return polled
@@ -429,6 +464,15 @@ def _run_link_wallet_flow(
         ],
         "Completing the payment…",
     )
+
+
+def _decoded_stream(stream: str | bytes | None) -> str:
+    """Return captured subprocess output as text."""
+    if stream is None:
+        return ""
+    if isinstance(stream, bytes):
+        return stream.decode(errors="replace")
+    return stream
 
 
 def _embedded_json_documents(text: str) -> list[Any]:
