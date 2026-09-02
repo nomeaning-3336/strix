@@ -147,6 +147,13 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         input_items: list[TResponseInputItem],
     ) -> None:
         context.context[LLM_TURN_KEY] = int(context.context.get(LLM_TURN_KEY, 0)) + 1
+        ctx = context.context if isinstance(context.context, dict) else {}
+        marker = getattr(ctx.get("coordinator"), "mark_llm_start", None)
+        if marker is not None:
+            try:
+                marker(ctx.get("agent_id"))
+            except Exception:
+                logger.exception("coordinator health mark_llm_start failed")
         try:
             self._maybe_warn_turns(context, input_items)
             self._maybe_warn_budget(context, input_items)
@@ -228,6 +235,13 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         agent: Agent[dict[str, Any]],
         response: ModelResponse,
     ) -> None:
+        ctx = context.context if isinstance(context.context, dict) else {}
+        marker = getattr(ctx.get("coordinator"), "mark_llm_end", None)
+        if marker is not None:
+            try:
+                marker(ctx.get("agent_id"))
+            except Exception:
+                logger.exception("coordinator health mark_llm_end failed")
         report_state = get_global_report_state()
         if report_state is None:
             return

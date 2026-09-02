@@ -58,6 +58,7 @@ class AgentHealth:
     recent_empty_outputs: int = 0
     tool_errors: int = 0
     recent_tools: deque[str] = field(default_factory=lambda: deque(maxlen=20))
+    llm_started_at: float | None = None
 
 
 def _tool_output_is_empty(tool_name: str, output: object) -> bool:
@@ -149,6 +150,9 @@ class AgentCoordinator:
                 continue
             health = self.health.get(child_id, AgentHealth())
             since = int(now - health.last_progress_at) if health.last_progress_at else None
+            in_flight = None
+            if health.llm_started_at is not None:
+                in_flight = int(now - health.llm_started_at)
             out.append(
                 {
                     "id": child_id,
@@ -160,9 +164,28 @@ class AgentCoordinator:
                     "empty_output_count": health.recent_empty_outputs,
                     "tool_errors": health.tool_errors,
                     "recent_tools": list(health.recent_tools)[-8:],
+                    "llm_in_flight": in_flight is not None,
+                    "in_flight_seconds": in_flight,
                 }
             )
         return out
+
+    def mark_llm_start(self, agent_id: str) -> None:
+        """Record the start of a model turn (sync, hook-fed).
+
+        A long reasoning/streaming turn completes no tools, so
+        ``seconds_since_progress`` alone would mislabel a working agent as
+        stalled. An open ``llm_started_at`` marks the agent as in-flight.
+        """
+        health = self.health.setdefault(agent_id, AgentHealth())
+        if health.llm_started_at is None:
+            health.llm_started_at = time.monotonic()
+
+    def mark_llm_end(self, agent_id: str) -> None:
+        """Clear the in-flight marker once the agent's model turn completes."""
+        health = self.health.get(agent_id)
+        if health is not None:
+            health.llm_started_at = None
 
     def mark_shutting_down(self) -> None:
         self.is_shutting_down = True

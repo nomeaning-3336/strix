@@ -49,8 +49,13 @@ def _wait_timeout_payload(
                     "children health snapshot and intervene ONLY if a child is stalled "
                     "or pathological (many repeated identical actions, many empty tool "
                     "outputs, tool errors, or a long time since its last progress). "
-                    "Otherwise leave healthy children alone and wait again with a short "
-                    "timeout (30-60s)."
+                    "A child with llm_in_flight=true is mid-model-turn (reasoning or "
+                    "streaming a long response) — that is WORKING, not stalled: long "
+                    "in_flight_seconds simply means a slow backend or a deep reasoning "
+                    "turn over a large context. Treat a child as stalled only when "
+                    "seconds_since_progress is large AND llm_in_flight=false (no model "
+                    "activity and no tool output). Otherwise leave healthy children "
+                    "alone and wait again with a short timeout (30-60s)."
                 ),
             },
             ensure_ascii=False,

@@ -77,6 +77,30 @@ def test_children_health_excludes_terminal_and_foreign_children() -> None:
     assert [x["id"] for x in coord.children_health("root")] == ["c1"]
 
 
+def test_llm_in_flight_distinguishes_reasoning_from_stall() -> None:
+    coord = _make_coordinator()
+    # progress long ago (looks stalled by tool clock alone)...
+    coord.record_tool_start("c1", "exec_command")
+    coord.record_tool_end("c1", "exec_command", "Chunk ID: x\nOutput:\nreal\n")
+    # ...but the model is mid-turn: in flight must read as working
+    coord.mark_llm_start("c1")
+    c1 = next(x for x in coord.children_health("root") if x["id"] == "c1")
+    assert c1["llm_in_flight"] is True
+    assert c1["in_flight_seconds"] == 0
+
+    coord.mark_llm_end("c1")
+    c1 = next(x for x in coord.children_health("root") if x["id"] == "c1")
+    assert c1["llm_in_flight"] is False
+    assert c1["in_flight_seconds"] is None
+
+
+def test_llm_in_flight_defaults_false_without_model_activity() -> None:
+    coord = _make_coordinator()
+    c1 = next(x for x in coord.children_health("root") if x["id"] == "c1")
+    assert c1["llm_in_flight"] is False
+    assert c1["in_flight_seconds"] is None
+
+
 # --- hook wiring ---
 
 
