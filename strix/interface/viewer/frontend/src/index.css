@@ -206,6 +206,9 @@ body {
 .strix-dot-fast {
   animation: strix-breathe 0.8s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite alternate;
 }
+.strix-dot-transition {
+  animation: strix-breathe 1.3s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite alternate;
+}
 .strix-dot-medium {
   animation: strix-breathe 1.8s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite alternate;
 }

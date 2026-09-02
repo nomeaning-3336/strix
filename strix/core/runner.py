@@ -44,6 +44,7 @@ from strix.core.inputs import (
 )
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.core.sessions import open_agent_session
+from strix.dev.hotreload import HotReloadManager, hot_reload_enabled
 from strix.report.state import get_global_report_state
 from strix.runtime import session_manager
 from strix.telemetry.logging import set_scan_id, setup_scan_logging
@@ -294,6 +295,25 @@ async def run_strix_scan(
             await asyncio.sleep(1.0)
 
     runtime_task = asyncio.create_task(_runtime_writer())
+
+    # Opt-in hot reload: watch the Strix source tree and, when a new epoch is
+    # published, agents adopt refreshed prompts/skills/tools at their next turn
+    # boundary. Also exposes the per-run agent-models file for DSH-style live
+    # model switching. Disabled (None) by default: normal runs are untouched.
+    reloader: Any = None
+    _hotreload_watch_task: Any = None
+    if hot_reload_enabled():
+        from pathlib import Path as _Path
+
+        package_root = _Path(__file__).resolve().parents[1]
+        repo_root = package_root.parent
+        reloader = HotReloadManager(
+            watch_roots=[package_root, repo_root / "skills"],
+            models_file=state_dir / "agent-models.json",
+        )
+        reloader.start_watch()
+        logger.info("hot-reload enabled: watching %s for live code reload", package_root)
+        _hotreload_watch_task = asyncio.create_task(reloader.run_watcher())
 
     from strix.tools.coverage.tools import hydrate_coverage_from_disk
     from strix.tools.notes.tools import hydrate_notes_from_disk
@@ -556,11 +576,30 @@ async def run_strix_scan(
             "agent_id": root_id,
             "parent_id": None,
             "model": resolved_model,
+            "hot_reload": reloader,
             "interactive": interactive,
             "spawn_child_agent": spawn_child_agent,
             "scan_targets": build_scan_targets(scan_config),
             "max_context_images": settings.runtime.max_context_images,
         }
+
+        if reloader is not None and root_id is not None:
+            reloader.register(
+                root_id,
+                lambda: build_strix_agent(
+                    name="Root Agent",
+                    skills=list(skills),
+                    is_root=True,
+                    scan_mode=scan_mode,
+                    is_whitebox=is_whitebox,
+                    is_diff_scoped=is_diff_scoped,
+                    interactive=interactive,
+                    chat_completions_tools=chat_completions_tools,
+                    strict_tool_schemas=strict_tool_schemas,
+                    system_prompt_context=root_context,
+                    instructions_override=root_instructions,
+                ),
+            )
 
         root_session = open_agent_session(root_id, agents_db)
         sessions_to_close.append(root_session)
@@ -687,6 +726,9 @@ async def run_strix_scan(
                 await mcp_session.aclose()
         with contextlib.suppress(Exception):
             runtime_task.cancel()
+        if _hotreload_watch_task is not None:
+            with contextlib.suppress(Exception):
+                _hotreload_watch_task.cancel()
         with contextlib.suppress(Exception):
             runtime_path.unlink(missing_ok=True)
         with contextlib.suppress(Exception):

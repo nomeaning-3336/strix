@@ -110,7 +110,7 @@ export default function App() {
     const tick = async () => {
       if (cancelled) return;
       try {
-        const { summary, raw, finished } = await fetchRunSummary(activeRun);
+        const { summary, raw, finished, runtime } = await fetchRunSummary(activeRun);
         if (cancelled) return;
         if (finished && !finishedRef.current) {
           finishedRef.current = true;
@@ -127,6 +127,7 @@ export default function App() {
           summary,
           raw,
           finished,
+          runtime,
           transcript,
           vulnerabilities,
           reportMarkdown: prev?.reportMarkdown ?? null,
@@ -750,7 +751,10 @@ function TabButton({
 
 function AgentsTab({ run, canSteer }: { run: LoadedRun; canSteer: boolean }) {
   const { agents, events } = run.transcript;
-  const graphAgents = useMemo(() => buildGraphAgents(agents, events), [agents, events]);
+  const graphAgents = useMemo(
+    () => buildGraphAgents(agents, events, run.runtime),
+    [agents, events, run.runtime]
+  );
   // Clicking a graph node opens the agent's transcript in a modal; no node selected means no modal.
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const selectedAgent = selectedId ? (agents.find((a) => a.id === selectedId) ?? null) : null;

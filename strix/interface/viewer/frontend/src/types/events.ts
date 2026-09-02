@@ -49,6 +49,13 @@ export interface RunMetadata {
   max_iterations?: number;
 }
 
+export interface AgentRuntimeInfo {
+  llm_in_flight: boolean;
+  in_flight_seconds: number | null;
+}
+
+export type AgentRuntimeMap = Record<string, AgentRuntimeInfo>;
+
 export interface AgentNode {
   id: string;
   name: string;
@@ -61,6 +68,8 @@ export interface AgentNode {
   messageCount: number;
   /** True when the agent's newest tool event is still executing (vs thinking). */
   runningTool?: boolean;
+  /** Ephemeral live telemetry from the scan (llm_in_flight); null when stale. */
+  runtime?: AgentRuntimeInfo | null;
 }
 
 export interface ToolExecution {

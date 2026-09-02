@@ -1,4 +1,5 @@
 import type { Vulnerability } from "@/types/issues";
+import type { AgentRuntimeMap } from "@/types/events";
 import {
   parseRunJson,
   parseVulnerabilitiesJson,
@@ -80,6 +81,8 @@ export interface LoadedRun {
   vulnerabilities: Vulnerability[];
   reportMarkdown: string | null;
   transcript: Transcript;
+  /** Ephemeral live per-agent runtime (llm_in_flight); null when not live. */
+  runtime: AgentRuntimeMap | null;
 }
 
 async function getJson(path: string): Promise<unknown> {
@@ -97,12 +100,17 @@ export async function fetchRunSummary(runName?: string | null): Promise<{
   summary: ParsedRunSummary;
   raw: Record<string, unknown>;
   finished: boolean;
+  runtime: AgentRuntimeMap | null;
 }> {
   const raw = (await getJson("/api/run" + runQuery(runName))) as Record<string, unknown>;
   // parseRunJson tolerates extra keys and takes raw TEXT.
   const summary = parseRunJson(JSON.stringify(raw));
   const finished = raw.finished === true;
-  return { summary, raw, finished };
+  const runtime =
+    !finished && typeof raw.runtime === "object" && raw.runtime !== null
+      ? (raw.runtime as AgentRuntimeMap)
+      : null;
+  return { summary, raw, finished, runtime };
 }
 
 export async function fetchVulnerabilities(
@@ -128,13 +136,13 @@ export async function fetchTranscript(runName?: string | null): Promise<Transcri
 
 /** One-shot fetch of every endpoint (used on mount and on final settle). */
 export async function fetchAll(runName?: string | null): Promise<LoadedRun> {
-  const { summary, raw, finished } = await fetchRunSummary(runName);
+  const { summary, raw, finished, runtime } = await fetchRunSummary(runName);
   const [vulnerabilities, reportMarkdown, transcript] = await Promise.all([
     fetchVulnerabilities(summary.runId, runName).catch(() => [] as Vulnerability[]),
     fetchReportMarkdown(runName).catch(() => null),
     fetchTranscript(runName).catch(() => ({ agents: [], events: [] }) as Transcript),
   ]);
-  return { summary, raw, finished, vulnerabilities, reportMarkdown, transcript };
+  return { summary, raw, finished, vulnerabilities, reportMarkdown, transcript, runtime };
 }
 
 // ---------------------------------------------------------------------------

@@ -324,6 +324,9 @@ async def spawn_child_agent(
 
     child_id = uuid.uuid4().hex[:8]
     child_agent = factory(name=name, skills=skills)
+    reloader = parent_ctx.get("hot_reload")
+    if reloader is not None:
+        reloader.register(child_id, lambda: factory(name=name, skills=list(skills)))
     await coordinator.register(
         child_id,
         name,
@@ -415,6 +418,13 @@ async def respawn_subagents(
 
             child_skills = list(md.get("skills") or [])
             child_agent = factory(name=name, skills=child_skills)
+            reloader = parent_ctx.get("hot_reload")
+            if reloader is not None:
+                # Default args bind the loop variables explicitly.
+                reloader.register(
+                    child_id,
+                    (lambda n=name, cs=child_skills: factory(name=n, skills=list(cs))),
+                )
             await _start_child_runner(
                 parent_ctx=parent_ctx,
                 coordinator=coordinator,
@@ -482,6 +492,21 @@ async def _run_until_lifecycle(
         if coordinator.reserve_stopped and context.get("parent_id") is not None:
             await coordinator.set_status(agent_id, "stopped")
             raise SubagentBudgetReservedError("scan reached the sub-agent budget reserve")
+
+        # Hot-reload safe point: the previous turn fully settled (no in-flight
+        # model request or tool), so adopt any pending epoch — refreshed
+        # instructions/skills/tools — and any operator model change for the next
+        # cycle. Disabled when no manager is attached (default runs unchanged).
+        reloader = context.get("hot_reload")
+        if reloader is not None:
+            with contextlib.suppress(Exception):
+                await reloader.maybe_apply(agent_id, agent)
+            with contextlib.suppress(Exception):
+                run_config = await reloader.apply_model(
+                    agent_id,
+                    run_config,
+                    is_root=context.get("parent_id") is None,
+                )
 
         if interactive:
             result = await _run_cycle_parked(

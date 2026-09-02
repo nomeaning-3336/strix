@@ -9,11 +9,20 @@ import type { AgentNode as AgentNodeData } from "@/types/events";
 const DONE_DOT = "bg-emerald-500";
 const DEAD_DOT = "bg-red-500";
 
-/* Working agents pulse on a bezier curve. "thinking" (running, no tool in
-   flight) blinks fastest; executing a tool blinks medium; waiting/parked
-   blinks slowest. */
-function blinkClass(status: string, runningTool: boolean | undefined): string | null {
-  if (status === "running") return runningTool ? "strix-dot-medium" : "strix-dot-fast";
+/* Working agents pulse on a bezier curve. The authoritative "thinking" signal
+   is the live llm_in_flight telemetry (fastest); executing a tool (inferred
+   from the newest tool event) blinks medium; a running agent with neither is
+   mid-transition between phases; waiting/parked blinks slowest. */
+function blinkClass(
+  status: string,
+  runningTool: boolean | undefined,
+  runtime: { llm_in_flight?: boolean } | null | undefined
+): string | null {
+  if (status === "running") {
+    if (runtime?.llm_in_flight) return "strix-dot-fast";
+    if (runningTool) return "strix-dot-medium";
+    return "strix-dot-transition";
+  }
   if (status === "waiting" || status === "budget_paused") return "strix-dot-slow";
   return null;
 }
@@ -37,7 +46,7 @@ function AgentNodeComponent({ data, selected }: NodeProps) {
   else if (active) dotClass = "bg-blue-500";
   else dotClass = "bg-gray-600";
 
-  const blink = blinkClass(agent.status, agent.runningTool);
+  const blink = blinkClass(agent.status, agent.runningTool, agent.runtime);
   const terminal = done || dead;
 
   return (

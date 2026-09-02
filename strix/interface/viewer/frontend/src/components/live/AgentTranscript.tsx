@@ -2,7 +2,11 @@ import { Component, useMemo, type ReactNode } from "react";
 import { Brain, Bot } from "lucide-react";
 import { getToolRenderer, getToolIcon } from "./tool-renderers";
 import ChatBubble from "./tool-renderers/ChatBubble";
-import type { ToolRendererProps, AgentNode as GraphAgentNode } from "@/types/events";
+import type {
+  AgentRuntimeMap,
+  ToolRendererProps,
+  AgentNode as GraphAgentNode,
+} from "@/types/events";
 import type { TranscriptAgent, TranscriptEvent } from "@/data/serverSource";
 
 /* ---------- Error boundary so one bad event never blanks the transcript ---------- */
@@ -156,7 +160,8 @@ function graphStatus(status: string): GraphAgentNode["status"] {
  */
 export function buildGraphAgents(
   agents: TranscriptAgent[],
-  events: TranscriptEvent[]
+  events: TranscriptEvent[],
+  runtime: AgentRuntimeMap | null = null
 ): Map<string, GraphAgentNode> {
   const childrenOf = new Map<string, string[]>();
   for (const a of agents) {
@@ -204,6 +209,7 @@ export function buildGraphAgents(
       toolCount: toolCount.get(a.id) ?? 0,
       messageCount: messageCount.get(a.id) ?? 0,
       runningTool: toolRunning.get(a.id) ?? false,
+      runtime: runtime?.[a.id] ?? null,
     });
   }
   return map;
