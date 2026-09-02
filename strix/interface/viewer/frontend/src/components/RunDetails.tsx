@@ -93,6 +93,19 @@ export function RunDetails({
   const models = Array.from(
     new Set(agents.map((a) => str(a.model)).filter((m): m is string => !!m))
   );
+  // Role-aware model display: the root orchestrator vs the subagent workers.
+  const rootModel = str(
+    agents.find((a) => str(a.agent_name) === "Root Agent")?.model ?? ""
+  );
+  const subagentModels = Array.from(
+    new Set(
+      agents
+        .filter((a) => str(a.agent_name) !== "Root Agent")
+        .map((a) => str(a.model))
+        .filter((m): m is string => !!m)
+    )
+  );
+  const splitModels = !!rootModel && subagentModels.length > 0;
   const requests = num(usage.requests);
   const inputTokens = num(usage.input_tokens);
   const cached = num(rec(arr(usage.input_tokens_details)[0]).cached_tokens);
@@ -175,7 +188,14 @@ export function RunDetails({
           </h3>
           {hasUsage ? (
             <dl className="space-y-2.5 tabular-nums">
-              <Field label="Model">{models.length ? models.join(", ") : "n/a"}</Field>
+              {splitModels ? (
+                <>
+                  <Field label="Root model">{rootModel}</Field>
+                  <Field label="Subagent models">{subagentModels.join(", ")}</Field>
+                </>
+              ) : (
+                <Field label="Model">{models.length ? models.join(", ") : "n/a"}</Field>
+              )}
               {subscription && (
                 <Field label="Provider">
                   <span className="inline-flex items-center gap-1.5">
