@@ -12,7 +12,6 @@ import {
   type Node,
   type Edge,
 } from "@xyflow/react";
-import dagre from "@dagrejs/dagre";
 import AgentNodeComponent from "./AgentNode";
 import GraphSkeleton from "./GraphSkeleton";
 import type { AgentNode } from "@/types/events";
@@ -21,58 +20,88 @@ import "@xyflow/react/dist/style.css";
 
 const NODE_WIDTH = 260;
 const NODE_HEIGHT = 80;
+// Hierarchy rows: every spawn depth is one horizontal band; within a band each
+// subtree gets an equal slice so siblings cluster under their parent.
+const H_SPACING = NODE_WIDTH + 40;
+const ROW_SPACING = 92;
 
 const nodeTypes = { agentNode: AgentNodeComponent };
 
-function getLayoutedElements(
-  agents: Map<string, AgentNode>,
-  selectedAgentId: string | null
-) {
-  const g = new dagre.graphlib.Graph();
-  g.setDefaultEdgeLabel(() => ({}));
-  g.setGraph({ rankdir: "TB", nodesep: 60, ranksep: 80 });
+/**
+ * Layered tree layout: the root sits on row 0, the agents it spawns on row 1,
+ * their spawns on row 2, and so on — a clean hierarchy of horizontal rows.
+ * Leaves are ordered left→right by spawn order; internal nodes sit at the
+ * horizontal midpoint of their children, so each subtree stays visually
+ * contiguous under its parent. Deterministic across refreshes.
+ */
+function layoutAgentHierarchy(agents: Map<string, AgentNode>): Node[] {
+  const childrenByParent = new Map<string, string[]>();
+  const roots: string[] = [];
+  for (const [id, agent] of agents) {
+    if (agent.parentId && agents.has(agent.parentId)) {
+      const arr = childrenByParent.get(agent.parentId) ?? [];
+      arr.push(id);
+      childrenByParent.set(agent.parentId, arr);
+    } else {
+      roots.push(id);
+    }
+  }
+
+  const centerX = new Map<string, number>();
+  const depthY = new Map<string, number>();
+  let leafCursor = 0;
+
+  function place(id: string, depth: number): number {
+    const kids = childrenByParent.get(id) ?? [];
+    let center: number;
+    if (kids.length === 0) {
+      center = leafCursor * H_SPACING;
+      leafCursor += 1;
+    } else {
+      const xs: number[] = [];
+      for (const kid of kids) xs.push(place(kid, depth + 1));
+      center = (Math.min(...xs) + Math.max(...xs)) / 2;
+    }
+    centerX.set(id, center);
+    depthY.set(id, depth * ROW_SPACING);
+    return center;
+  }
+
+  for (const root of roots) place(root, 0);
+  // Recenter the whole tree horizontally around x=0.
+  const offset = (leafCursor * H_SPACING) / 2;
 
   const nodes: Node[] = [];
-  const edges: Edge[] = [];
-
   for (const [id, agent] of agents) {
-    g.setNode(id, { width: NODE_WIDTH, height: NODE_HEIGHT });
     nodes.push({
       id,
       type: "agentNode",
-      position: { x: 0, y: 0 },
-      data: { ...agent, isSelected: id === selectedAgentId },
+      position: {
+        x: (centerX.get(id) ?? 0) - NODE_WIDTH / 2 - offset,
+        y: (depthY.get(id) ?? 0) - NODE_HEIGHT / 2,
+      },
+      data: { ...agent },
     });
+  }
+  return nodes;
+}
 
+function layoutEdges(agents: Map<string, AgentNode>): Edge[] {
+  const edges: Edge[] = [];
+  for (const [id, agent] of agents) {
     if (agent.parentId && agents.has(agent.parentId)) {
-      const edgeId = `${agent.parentId}->${id}`;
-      g.setEdge(agent.parentId, id);
       edges.push({
-        id: edgeId,
+        id: `${agent.parentId}->${id}`,
         source: agent.parentId,
         target: id,
         style: { stroke: "#2a2a2a", strokeWidth: 1.5 },
       });
     }
   }
-
-  dagre.layout(g);
-
-  for (const node of nodes) {
-    const pos = g.node(node.id);
-    if (pos) {
-      node.position = {
-        x: pos.x - NODE_WIDTH / 2,
-        y: pos.y - NODE_HEIGHT / 2,
-      };
-    }
-  }
-
-  return { nodes, edges };
+  return edges;
 }
 
 const ZOOM_DURATION = 300;
-
 
 /** Centers viewport on the root node (no parentId) at a fixed zoom — only once on first load */
 function CenterOnRoot({ nodes }: { nodes: Node[] }) {
@@ -136,15 +165,16 @@ export default function AgentGraph({
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
 
+  // Lay out (or re-lay-out) the hierarchy when the agent set changes shape.
   useEffect(() => {
     if (agents.size === 0) return;
-    const { nodes: ln, edges: le } = getLayoutedElements(agents, selectedAgentId);
-    setNodes(ln);
-    setEdges(le);
+    setNodes(layoutAgentHierarchy(agents));
+    setEdges(layoutEdges(agents));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agents.size, setNodes, setEdges]);
 
-  // Sync agent data (status, name, etc.) into existing nodes without re-layout
+  // Sync agent data (status, name, runtime, etc.) into existing nodes without
+  // re-layout, so refreshes don't jitter the graph.
   useEffect(() => {
     if (agents.size === 0) return;
     setNodes((nds) =>
@@ -215,48 +245,48 @@ export default function AgentGraph({
           showGraph ? "opacity-100" : "opacity-0"
         }`}
       >
-    <ReactFlow
-      nodes={nodes}
-      edges={edges}
-      onNodesChange={onNodesChange}
-      onEdgesChange={onEdgesChange}
-      onNodeClick={onNodeClick}
-      onPaneClick={onPaneClick}
-      nodeTypes={nodeTypes}
-      nodesConnectable={false}
-      edgesFocusable={false}
-      edgesReconnectable={false}
-      minZoom={0.15}
-      maxZoom={1.5}
-      proOptions={{ hideAttribution: true }}
-      className="bg-black"
-    >
-      <Background color="#111" gap={20} />
-      <CenterOnRoot nodes={nodes} />
-      <SmoothControls />
-      <MiniMap
-        position="bottom-left"
-        nodeColor={(n) => {
-          const d = (n.data as Record<string, unknown>) ?? {};
-          const status = d.status as string;
-          const isRoot = !d.parentId;
-          if (status === "running") return isRoot ? "#f97316" : "#3b82f6";
-          if (status === "completed") return "#10b981";
-          if (
-            status === "failed" ||
-            status === "error" ||
-            status === "stopped" ||
-            status === "crashed"
-          )
-            return "#ef4444";
-          if (status === "waiting" || status === "budget_paused") return "#f59e0b";
-          return "#555";
-        }}
-        maskColor="rgba(0,0,0,0.8)"
-        style={{ width: 80, height: 50 }}
-        className="!bg-[#0a0a0a] !border-[#222]"
-      />
-    </ReactFlow>
+        <ReactFlow
+          nodes={nodes}
+          edges={edges}
+          onNodesChange={onNodesChange}
+          onEdgesChange={onEdgesChange}
+          onNodeClick={onNodeClick}
+          onPaneClick={onPaneClick}
+          nodeTypes={nodeTypes}
+          nodesConnectable={false}
+          edgesFocusable={false}
+          edgesReconnectable={false}
+          minZoom={0.15}
+          maxZoom={1.5}
+          proOptions={{ hideAttribution: true }}
+          className="bg-black"
+        >
+          <Background color="#111" gap={20} />
+          <CenterOnRoot nodes={nodes} />
+          <SmoothControls />
+          <MiniMap
+            position="bottom-left"
+            nodeColor={(n) => {
+              const d = (n.data as Record<string, unknown>) ?? {};
+              const status = d.status as string;
+              const isRoot = !d.parentId;
+              if (status === "running") return isRoot ? "#f97316" : "#3b82f6";
+              if (status === "completed") return "#10b981";
+              if (
+                status === "failed" ||
+                status === "error" ||
+                status === "stopped" ||
+                status === "crashed"
+              )
+                return "#ef4444";
+              if (status === "waiting" || status === "budget_paused") return "#f59e0b";
+              return "#555";
+            }}
+            maskColor="rgba(0,0,0,0.8)"
+            style={{ width: 80, height: 50 }}
+            className="!bg-[#0a0a0a] !border-[#222]"
+          />
+        </ReactFlow>
       </div>
     </div>
   );

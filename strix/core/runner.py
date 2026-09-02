@@ -275,6 +275,26 @@ async def run_strix_scan(
         coordinator = AgentCoordinator()
     coordinator.set_snapshot_path(agents_path)
 
+    # Live runtime telemetry for the viewer: a tiny per-second file of ephemeral
+    # per-agent state (llm_in_flight etc.). Transient by design — never written
+    # into run.json, removed when the scan ends; finished/old runs report none.
+    runtime_path = state_dir / "runtime.json"
+
+    async def _runtime_writer() -> None:
+        while True:
+            try:
+                tmp = runtime_path.with_name(".runtime.json.tmp")
+                tmp.write_text(
+                    json.dumps({"agents": coordinator.runtime_snapshot()}, default=str),
+                    encoding="utf-8",
+                )
+                tmp.replace(runtime_path)
+            except Exception:  # noqa: BLE001 - telemetry must never break the scan
+                logger.debug("runtime telemetry write failed", exc_info=True)
+            await asyncio.sleep(1.0)
+
+    runtime_task = asyncio.create_task(_runtime_writer())
+
     from strix.tools.coverage.tools import hydrate_coverage_from_disk
     from strix.tools.notes.tools import hydrate_notes_from_disk
     from strix.tools.threat_model.tools import hydrate_threat_models_from_disk
@@ -665,6 +685,10 @@ async def run_strix_scan(
         for mcp_session in mcp_sessions:
             with contextlib.suppress(Exception):
                 await mcp_session.aclose()
+        with contextlib.suppress(Exception):
+            runtime_task.cancel()
+        with contextlib.suppress(Exception):
+            runtime_path.unlink(missing_ok=True)
         with contextlib.suppress(Exception):
             await coordinator._maybe_snapshot()
         if cleanup_on_exit:

@@ -215,6 +215,27 @@ class AgentCoordinator:
         if health is not None:
             health.llm_started_at = None
 
+    def runtime_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Ephemeral per-agent runtime telemetry for the live viewer.
+
+        Deliberately NOT part of the resume snapshot or ``run.json``: this is
+        transient process state (is the model mid-turn right now?) that the
+        viewer consumes live and discards; finished/old runs report nothing.
+        """
+        now = time.monotonic()
+        out: dict[str, dict[str, Any]] = {}
+        for agent_id, status in self.statuses.items():
+            health = self.health.get(agent_id)
+            in_flight = None
+            if health is not None and health.llm_started_at is not None:
+                in_flight = int(now - health.llm_started_at)
+            out[agent_id] = {
+                "status": status,
+                "llm_in_flight": in_flight is not None,
+                "in_flight_seconds": in_flight,
+            }
+        return out
+
     def mark_shutting_down(self) -> None:
         self.is_shutting_down = True
 

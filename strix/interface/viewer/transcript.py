@@ -60,6 +60,28 @@ def read_run_summary(run_dir: Path) -> dict[str, Any]:
     return {**record, "finished": finished}
 
 
+def attach_runtime_telemetry(payload: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Fold the scan's ephemeral runtime telemetry into a /api/run payload.
+
+    The live scan writes ``.state/runtime.json`` (per-agent ``llm_in_flight`` /
+    ``in_flight_seconds``) once a second while it runs. It is transient process
+    state — never durable run history — so finished runs and stale/standalone
+    viewers get ``runtime: null`` and the SPA falls back to its event-derived
+    heuristic.
+    """
+    payload["runtime"] = None
+    if payload.get("finished"):
+        return payload
+    try:
+        data = json.loads((run_dir / ".state" / "runtime.json").read_text(encoding="utf-8"))
+        agents = data.get("agents")
+        if isinstance(agents, dict):
+            payload["runtime"] = agents
+    except (OSError, json.JSONDecodeError, ValueError):
+        pass
+    return payload
+
+
 def primary_target(record: dict[str, Any]) -> str | None:
     """The first target's original string from a run record, or None."""
     targets = record.get("targets_info")

@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 from strix.core.paths import run_record_path
 from strix.interface.viewer import auth
 from strix.interface.viewer.transcript import (
+    attach_runtime_telemetry,
     build_run_state,
     primary_target,
     read_report_markdown,
@@ -276,7 +277,9 @@ def _make_handler(state: _ViewerState) -> type[BaseHTTPRequestHandler]:
                 return
 
             if path == "/api/run":
-                self._send_json(HTTPStatus.OK, read_run_summary(run_dir))
+                payload = read_run_summary(run_dir)
+                attach_runtime_telemetry(payload, run_dir)
+                self._send_json(HTTPStatus.OK, payload)
             elif path == "/api/vulnerabilities":
                 self._send_json(HTTPStatus.OK, read_vulnerabilities(run_dir))
             elif path == "/api/report":
