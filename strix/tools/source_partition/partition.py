@@ -1,15 +1,17 @@
 """Phase 3 - deterministic locality-aware partition assignment.
 
-Pure function over units; the partitioner never spawns workers and knows
-nothing about agents, coordinators or report state (fan-out is the *next*
-commit's job - see ``__init__``).
+Pure function over already-built :class:`PartitionUnit` lists; the assignment
+core does no filesystem work and knows nothing about agents, coordinators or
+report state (fan-out is the *next* commit's job - see ``__init__``).  The
+``roots``-based convenience wrapper (:func:`partition_source`) only threads the
+three phases together and surfaces their notes.
 
 Algorithm (documented so the determinism tests can assert it):
 
 1. **Effective workers** ``E = min(requested, len(units))``; ``E == 0`` when
    there are no units.  Shards are never empty: after assignment, trailing
-   empty shards (possible only when a giant carve packs nearly everything into
-   one shard) are dropped and shard ids are renumbered contiguously, so
+   empty shards (possible only when a single file heavier than the cap is
+   placed alone) are dropped and shard ids are renumbered contiguously, so
    ``effective_workers`` can end up below ``E`` (the ``requested_workers``
    field still reports what was asked for).
 
@@ -24,22 +26,24 @@ Algorithm (documented so the determinism tests can assert it):
    under one of three rules:
 
    - a *file* is always assigned whole (a file is never split, never
-     duplicated);
+     duplicated) - a file is the only unit allowed to exceed ``cap``;
    - a *directory* is assigned whole when the least-loaded shard can take it
      within ``cap = ceil(total / E * balance_tolerance)`` - related
      directories (``src/server/auth`` + ``src/server/session``) therefore land
      in one shard whenever they fit together;
-   - a directory that exceeds ``cap`` *and* holds at least ``giant_share`` of
-     the total weight is the "giant subsystem" carve: it is assigned whole to
-     the least-loaded shard (fewest possible shards; at most one shard holds
-     the bulk - the spec's fallback for ``> 50%`` subtrees);
-   - any other directory that cannot fit is *expanded* into its children,
-     which re-enter the job queue in the same deterministic order - a subtree
-     is only ever split when it is too large to stay together.
+   - any directory that does not fit - including one whose subtree alone is
+     heavier than ``cap`` - is *recursively expanded* into its children, which
+     re-enter the job queue in the same deterministic order.  Expansion stops
+     only when children are useful-sized subtrees that fit or individual
+     files; nothing but an individual file ever stays whole above the cap, so
+     a repo where nearly everything lives under one directory is distributed
+     across the requested workers instead of being dumped onto one shard.
 
 4. **Result.**  Files are grouped per shard; within a shard they are ordered
    ``(casefold(path), path)``; shards are ordered by id; ``file_to_shard``
-   maps every included path to exactly one shard.
+   maps every included path to exactly one shard.  ``notes`` (inventory
+   warnings, oversized/streamed flags, conservative data skips) are carried
+   onto the manifest verbatim so the future team layer can surface them.
 
 Tie-breaking summary (the contract tests assert): inventory order
 ``(casefold, raw)``; unit order ``(casefold(display), display)``; job order
@@ -68,7 +72,7 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
 
-__all__ = ["partition_source"]
+__all__ = ["partition_source", "partition_units"]
 
 
 class _Node:
@@ -94,17 +98,38 @@ def partition_source(
     workers: int,
     config: PartitionConfig | None = None,
 ) -> PartitionManifest:
-    """Partition ``roots`` into ``workers`` locality-aware shards.
+    """Convenience wrapper: inventory -> units -> assignment in one call.
 
+    ``workers <= 0`` means "auto" (see :func:`partition_units`).  The wrapper
+    does not duplicate any phase logic - it threads the three stages and
+    surfaces every deterministic note (inventory warnings, oversized/streamed
+    flags) on the returned :class:`PartitionManifest` instead of swallowing
+    them.
+    """
+    cfg = config or PartitionConfig()
+    inventory = inventory_source(roots, config=cfg)
+    units, unit_notes = build_partition_units(inventory, config=cfg)
+    notes = (*inventory.notes, *unit_notes)
+    return partition_units(units, workers=workers, config=cfg, notes=notes)
+
+
+def partition_units(
+    units: Sequence[PartitionUnit],
+    *,
+    workers: int,
+    config: PartitionConfig | None = None,
+    notes: Sequence[str] = (),
+) -> PartitionManifest:
+    """Deterministically partition an already-built unit list.
+
+    The assignment core - pure over units, no roots, no filesystem access.
     ``workers <= 0`` means "auto": ``config.default_workers`` if set, else
-    ``os.cpu_count()``.  Pure composition of :func:`inventory_source` ->
-    :func:`build_partition_units` -> deterministic assignment.
+    ``os.cpu_count()``.  ``notes`` (optional deterministic diagnostics from the
+    earlier phases) are copied onto the manifest.
     """
     cfg = config or PartitionConfig()
     requested = workers if workers > 0 else _auto_workers(cfg)
-    inventory = inventory_source(roots, config=cfg)
-    units = build_partition_units(inventory, config=cfg)
-    return _assign(units, requested_workers=requested, cfg=cfg)
+    return _assign(list(units), requested_workers=requested, cfg=cfg, notes=tuple(notes))
 
 
 def _auto_workers(cfg: PartitionConfig) -> int:
@@ -138,10 +163,14 @@ def _build_trie(units: list[PartitionUnit]) -> _Node:
     return root
 
 
-def _place(
-    root: _Node, effective: int, total_weight: int, cap: int, giant_share: Fraction
-) -> dict[_Node, int]:
-    """Balanced LPT over subtrees; returns node -> shard for whole placements."""
+def _place(root: _Node, effective: int, cap: int) -> dict[_Node, int]:
+    """Balanced LPT over subtrees; returns node -> shard for whole placements.
+
+    Files are always placed whole.  Directories are placed whole only when the
+    least-loaded shard has room within ``cap``; otherwise they are recursively
+    expanded into their children (which re-enter the queue in deterministic
+    order).  A directory is never the unit that overflows ``cap``.
+    """
     loads = [0] * effective
     placed: dict[_Node, int] = {}
     heap: list[tuple[int, str, _Node]] = [
@@ -161,10 +190,7 @@ def _place(
             placed[node] = shard
             continue
         least = least_loaded()
-        giant_numerator = giant_share.numerator
-        giant_denominator = giant_share.denominator
-        is_giant = weight > cap and weight * giant_denominator >= total_weight * giant_numerator
-        if is_giant or loads[least] + weight <= cap:
+        if loads[least] + weight <= cap:
             loads[least] += weight
             placed[node] = least
             continue
@@ -200,6 +226,7 @@ def _assign(
     *,
     requested_workers: int,
     cfg: PartitionConfig,
+    notes: tuple[str, ...],
 ) -> PartitionManifest:
     total_weight = sum(unit.weight for unit in units)
     total_loc = sum(unit.loc for unit in units)
@@ -211,6 +238,7 @@ def _assign(
             total_loc=0,
             shards=(),
             file_to_shard={},
+            notes=notes,
         )
 
     effective = min(requested_workers, len(units))
@@ -218,17 +246,16 @@ def _assign(
     cap = (total_weight * tolerance.numerator + effective * tolerance.denominator - 1) // (
         effective * tolerance.denominator
     )
-    giant_share = Fraction(cfg.giant_share).limit_denominator(1_000_000)
 
     root = _build_trie(units)
-    placed = _place(root, effective, total_weight, cap, giant_share)
+    placed = _place(root, effective, cap)
     by_shard = _collect_shards(root, effective, placed)
 
-    # A giant carve (or a single file heavier than cap) can pack nearly the
-    # whole tree into one shard; the leftover jobs then fill shards from the
-    # lowest id upward, leaving only *trailing* shards empty.  Drop those and
-    # renumber contiguously: shards are never empty, so ``effective_workers``
-    # is the number of shards that actually received files.
+    # A single file heavier than cap can pack most of the weight into one
+    # shard; the leftover jobs then fill shards from the lowest id upward,
+    # leaving only *trailing* shards empty.  Drop those and renumber
+    # contiguously: shards are never empty, so ``effective_workers`` is the
+    # number of shards that actually received files.
     used_ids = sorted(shard_id for shard_id, shard_units in by_shard.items() if shard_units)
     renumber = {old_id: new_id for new_id, old_id in enumerate(used_ids)}
 
@@ -257,4 +284,5 @@ def _assign(
         total_loc=total_loc,
         shards=tuple(shards),
         file_to_shard=file_to_shard,
+        notes=notes,
     )

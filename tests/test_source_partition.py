@@ -20,15 +20,21 @@ import strix.tools.source_partition.inventory as inventory_module
 from strix.tools.source_partition import (
     FileKind,
     PartitionConfig,
+    PartitionUnit,
     SourceInventory,
     build_partition_units,
     inventory_source,
     partition_source,
+    partition_units,
 )
 from strix.tools.source_partition.classify import classify_file
 from strix.tools.source_partition.gitignore import chain_decides, parse_gitignore
 from strix.tools.source_partition.loc import count_loc, language_for
-from strix.tools.source_partition.normalize import normalize_rel_path, path_sort_key
+from strix.tools.source_partition.normalize import (
+    display_root_names,
+    normalize_rel_path,
+    path_sort_key,
+)
 from strix.tools.source_partition.units import effective_weight
 
 
@@ -91,14 +97,17 @@ def test_no_file_in_two_shards_and_mapping_is_consistent() -> None:
 
 def test_every_included_file_in_exactly_one_shard() -> None:
     inventory = inventory_source([FIXTURE])
-    units = build_partition_units(inventory)
+    units, unit_notes = build_partition_units(inventory)
     included = {unit.display for unit in units}
+    assert unit_notes == ()  # clean fixture produces no diagnostics
 
     manifest = partition_source([FIXTURE], workers=3)
     shard_files = {file for shard in manifest.shards for file in shard.files}
 
     assert shard_files == included
     assert set(manifest.file_to_shard) == included
+    # The wrapper surfaced the (empty) inventory/unit notes on the manifest.
+    assert manifest.notes == inventory.notes == ()
 
     # Against the inventory: only GENERATED/VENDOR (weight-policy exclusions)
     # are missing from the manifest; every other file appears exactly once.
@@ -149,9 +158,7 @@ def test_locality_subtrees_stay_together_when_they_fit(tmp_path: Path) -> None:
     _write_code(root / "scripts" / "run.py", lines=50)
     _write_text(root / "docs" / "guide.md", lines=40)
 
-    # giant_share=1.0 disables the >50% carve so this test exercises the plain
-    # whole-subtree rule.
-    manifest = partition_source([root], workers=2, config=PartitionConfig(giant_share=1.0))
+    manifest = partition_source([root], workers=2)
     mapping = manifest.file_to_shard
 
     assert manifest.effective_workers == 2
@@ -179,7 +186,7 @@ def test_locality_splits_only_at_necessary_boundary(tmp_path: Path) -> None:
     _write_code(root / "lib" / "x.py", lines=60)
     _write_code(root / "lib" / "y.py", lines=60)
 
-    manifest = partition_source([root], workers=3, config=PartitionConfig(giant_share=1.0))
+    manifest = partition_source([root], workers=3)
     mapping = manifest.file_to_shard
     assert manifest.effective_workers == 3
 
@@ -367,28 +374,56 @@ def test_identical_trees_produce_identical_manifest(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. Giant subsystem fallback
+# 10. Bulk distribution / single oversized file
 # ---------------------------------------------------------------------------
 
 
-def test_giant_subtree_carved_into_fewest_shards(tmp_path: Path) -> None:
+def test_bulk_distributed_across_shards_when_under_one_dir(tmp_path: Path) -> None:
+    # Nearly everything lives under src/: with workers=4 the recursive expand
+    # rule must distribute the bulk across multiple shards instead of dumping
+    # it onto one shard.
     root = tmp_path / "repo"
-    for index in range(4):
-        _write_code(root / "core" / f"f{index}.py", lines=100)
-    _write_code(root / "a" / "a.py", lines=100)
-    _write_code(root / "b" / "b.py", lines=100)
-    _write_code(root / "c" / "c.py", lines=100)
+    for index in range(16):
+        _write_code(root / "src" / f"pkg{index:02d}" / "code.py", lines=100)
+    _write_text(root / "README.md", lines=4)
 
     manifest = partition_source([root], workers=4)
-    mapping = manifest.file_to_shard
-    core_files = [file for file in mapping if file.startswith("core/")]
-    assert len(core_files) == 4
-    core_shards = {mapping[file] for file in core_files}
-    # >50% of the total: bulk lands in a single shard (at most 2 allowed).
-    assert len(core_shards) <= 2
-    assert len(core_shards) == 1
-    assert len(manifest.shards) == 4
+    assert manifest.effective_workers == 4
+    total = manifest.total_weight
+    assert total > 1600
+    weights = sorted(shard.weight for shard in manifest.shards)
+    # LPT on sixteen equal 100-weight subtrees: every shard carries 400-401.
+    assert all(weight >= 400 for weight in weights)
+    # No single shard holds >= 75% of the total.
+    assert weights[-1] / total < 0.75
+    # The bulk under src/ really is spread: src files live in every shard.
+    src_shards = {
+        manifest.file_to_shard[file] for file in manifest.file_to_shard if file.startswith("src/")
+    }
+    assert src_shards == {0, 1, 2, 3}
     assert all(shard.files for shard in manifest.shards)
+
+
+def test_single_oversized_file_may_hold_the_bulk(tmp_path: Path) -> None:
+    # The only unit allowed to stay whole above cap is an individual file.
+    root = tmp_path / "repo"
+    _write_code(root / "huge.py", lines=2000)
+    _write_code(root / "a.py", lines=100)
+    _write_code(root / "b.py", lines=100)
+    _write_code(root / "c.py", lines=100)
+
+    manifest = partition_source([root], workers=4)
+    total = manifest.total_weight
+    assert total == 2300
+    assert manifest.effective_workers == 4
+    heaviest = max(manifest.shards, key=lambda shard: shard.weight)
+    assert heaviest.weight / total >= 0.75
+    # ...and that shard contains exactly the one unsplittable file.
+    assert heaviest.files == ("huge.py",)
+    assert heaviest.weight == 2000
+    # No file is duplicated anywhere.
+    all_files = [file for shard in manifest.shards for file in shard.files]
+    assert len(all_files) == len(set(all_files)) == 4
 
 
 # ---------------------------------------------------------------------------
@@ -594,6 +629,115 @@ def test_json_serialization_shape(tmp_path: Path) -> None:
     assert payload["shards"][0]["files"] == ["a.py"]
     assert payload["shards"][0]["weight"] == 10
     assert payload["file_to_shard"] == {"a.py": 0}
+    assert payload["notes"] == []
+
+
+# ---------------------------------------------------------------------------
+# Hardening: oversized files, notes plumbing, composability, prefix registry
+# ---------------------------------------------------------------------------
+
+
+def test_oversized_source_file_still_partitioned_with_note(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    # ~2 KiB of real Python: far above the deliberately tiny 1 KiB threshold.
+    _write_code(root / "server.py", lines=220)
+    _write_code(root / "small.py", lines=5)
+
+    config = PartitionConfig(max_file_bytes=1024)
+    manifest = partition_source([root], workers=2, config=config)
+    assert manifest.effective_workers == 2
+
+    shard_files = {file for shard in manifest.shards for file in shard.files}
+    assert "server.py" in shard_files
+    assert "small.py" in shard_files
+    # The oversized file sits in exactly one shard with its streamed weight.
+    assert manifest.total_weight == 225
+    assert manifest.total_loc == 225
+    assert len({manifest.file_to_shard["server.py"]}) == 1
+    assert any(
+        "oversized file counted by streaming LOC" in note and "server.py" in note
+        for note in manifest.notes
+    )
+    # Deterministic across reruns, note included.
+    assert manifest.to_json() == partition_source([root], workers=2, config=config).to_json()
+
+
+def test_streaming_loc_parity_with_full_read(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
+    content = "".join(f"def f{i}():\n    return {i}\n\n" for i in range(90))
+    (root / "big.py").write_text(content, encoding="utf-8")
+
+    default_manifest = partition_source([root], workers=1)
+    streamed_manifest = partition_source(
+        [root], workers=1, config=PartitionConfig(max_file_bytes=1024)
+    )
+    # Same content must produce the same LOC/weight whether read whole or
+    # streamed line-by-line.
+    assert streamed_manifest.total_loc == default_manifest.total_loc == 180
+    assert streamed_manifest.total_weight == default_manifest.total_weight == 180
+    assert streamed_manifest.shards[0].files == default_manifest.shards[0].files
+    assert any("oversized" in note for note in streamed_manifest.notes)
+    assert default_manifest.notes == ()
+
+
+def test_oversized_data_artifact_skipped_with_note(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "dump.csv").write_text("\n".join(f"row{i}" for i in range(400)), encoding="utf-8")
+    _write_code(root / "app.py", lines=5)
+
+    manifest = partition_source([root], workers=1, config=PartitionConfig(max_file_bytes=512))
+    shard_files = [file for shard in manifest.shards for file in shard.files]
+    assert "dump.csv" not in shard_files  # oversized DATA: conservative limit
+    assert "app.py" in shard_files
+    assert any("oversized data artifact" in note and "dump.csv" in note for note in manifest.notes)
+
+
+def test_partition_units_is_pure_over_units() -> None:
+    # The assignment stage never touches the filesystem: hand-built units only.
+    units = [
+        PartitionUnit(
+            root_index=0, rel="a.py", display="a.py", kind=FileKind.SOURCE, loc=40, weight=40
+        ),
+        PartitionUnit(
+            root_index=0, rel="b.py", display="b.py", kind=FileKind.SOURCE, loc=40, weight=40
+        ),
+        PartitionUnit(
+            root_index=0, rel="c.py", display="c.py", kind=FileKind.SOURCE, loc=40, weight=40
+        ),
+    ]
+    first = partition_units(units, workers=2)
+    second = partition_units(list(reversed(units)), workers=2)
+    assert first.to_json() == second.to_json()
+    assert first.effective_workers == 2
+    assert {file for shard in first.shards for file in shard.files} == {"a.py", "b.py", "c.py"}
+    assert first.notes == ()
+    # Caller-supplied notes are surfaced on the manifest verbatim.
+    with_note = partition_units(units, workers=2, notes=("note-1",))
+    assert with_note.notes == ("note-1",)
+
+
+def test_display_root_names_never_collide_with_generated_suffixes(tmp_path: Path) -> None:
+    first = tmp_path / "a" / "checkout"
+    second = tmp_path / "b" / "checkout"
+    third = tmp_path / "c" / "checkout-2"
+    for root in (first, second, third):
+        _write_code(root / "a.py", lines=5)
+
+    # Unit-level guarantee: the generated prefix never collides with another
+    # root's natural name (the real checkout-2) or another generated prefix.
+    names = display_root_names([first, second, third])
+    assert len(names) == 3
+    assert len(set(names)) == 3
+
+    manifest = partition_source([first, second, third], workers=3)
+    display_paths = [file for shard in manifest.shards for file in shard.files]
+    assert len(display_paths) == len(set(display_paths)) == 3
+    prefixes = {path.split("/", 1)[0] for path in display_paths}
+    assert prefixes == set(names)
+    # Every included file maps to exactly one unique display path.
+    assert set(manifest.file_to_shard) == set(display_paths)
 
 
 # ---------------------------------------------------------------------------

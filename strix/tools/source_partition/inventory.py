@@ -25,8 +25,10 @@ Determinism contract:
   path in sorted order wins, later aliases are noted and skipped);
 - every path is NFC-normalized with forward slashes; ordering is
   ``(casefold(path), path)``;
-- files that cannot be read (or are larger than ``max_file_bytes``) are
-  skipped with a structured warning; they never abort the walk.
+- files that cannot be read are skipped with a structured warning; they never
+  abort the walk.  Files are *never* dropped by byte size here - oversized
+  text/source survives classification and is LOC-counted by streaming during
+  unit building.
 """
 
 from __future__ import annotations
@@ -94,13 +96,11 @@ class _Walker:
         self,
         root: Path,
         root_index: int,
-        cfg: PartitionConfig,
         entries: list[InventoryEntry],
         notes: list[str],
     ) -> None:
         self.root = root
         self.root_index = root_index
-        self.cfg = cfg
         self.entries = entries
         self.notes = notes
         self.visited: set[tuple[int, int] | str] = set()
@@ -207,13 +207,12 @@ class _Walker:
         if size == 0:
             logger.debug("source_partition: skip empty file %r", rel)
             return
-        if size > self.cfg.max_file_bytes:
-            self.note(f"skipping oversized file {rel!r}: {size} bytes")
-            return
         if self._already_seen(read_path, stat_result):
             return
         if self._is_binary(name, read_path, rel):
             return
+        # No size-based exclusion here: an oversized hand-written source file
+        # must survive classification and become a (streamed) partition unit.
         kind = classify_file(rel)
         self.entries.append(
             InventoryEntry(
@@ -281,9 +280,9 @@ def inventory_source(
 
     ``roots`` are canonicalized first (resolve + dedupe + sort); argument
     order therefore never affects the result.  Non-directory and nested roots
-    are dropped with a note.
+    are dropped with a note.  Files are *not* dropped by byte size - the
+    classification layer (later, in unit building) decides exclusion.
     """
-    cfg = config or PartitionConfig()
     notes: list[str] = []
     canonical = canonical_roots(roots)
     kept_roots: list[Path] = []
@@ -300,7 +299,7 @@ def inventory_source(
 
     entries: list[InventoryEntry] = []
     for root_index, root in enumerate(kept_roots):
-        walker = _Walker(root=root, root_index=root_index, cfg=cfg, entries=entries, notes=notes)
+        walker = _Walker(root=root, root_index=root_index, entries=entries, notes=notes)
         _walk_root(walker)
 
     entries.sort(key=lambda entry: path_sort_key(entry.rel))

@@ -24,7 +24,6 @@ manifest.
 from __future__ import annotations
 
 import unicodedata
-from collections import Counter
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -100,25 +99,40 @@ def canonical_roots(roots: Sequence[Path]) -> list[Path]:
 
 
 def display_root_names(roots: Sequence[Path]) -> tuple[str, ...]:
-    """Stable root-name prefixes for multi-root manifests.
+    """Stable, *globally unique* root-name prefixes for multi-root manifests.
 
-    Single root ⇒ no prefix (manifest paths are plain repo-relative paths, the
-    same spelling ``source_inspect_many`` accepts).  Multiple roots ⇒ each path
-    is prefixed with its root's directory name so files from different roots
-    can never collide; duplicate root names get deterministic ``-2``/``-3``
-    suffixes in canonical-root order.
+    Single root => no prefix (manifest paths are plain repo-relative paths, the
+    same spelling ``source_inspect_many`` accepts).  Multiple roots => every
+    root gets a prefix, reserved one at a time in canonical-root order so the
+    resulting prefix set is a set (no duplicates):
+
+    - the first root to want a natural name keeps it;
+    - later roots that collide with an already-reserved name get a ``-2`` /
+      ``-3`` / ... suffix, and the suffix keeps incrementing until it collides
+      with neither an already-reserved prefix *nor any other root's natural
+      name* (a generated ``checkout-2`` never shadows a real ``checkout-2``
+      root).
+
+    Determinism: identical for a given root list regardless of how the caller
+    ordered it (roots arrive canonical-sorted from the inventory).
     """
     if len(roots) <= 1:
         return ()
-    base_names = [normalize_name(root.name) or f"root{index}" for index, root in enumerate(roots)]
-    counts = Counter(base_names)
-    if all(count == 1 for count in counts.values()):
-        return tuple(base_names)
-    occurrences: dict[str, int] = {}
+    naturals = [normalize_name(root.name) or f"root{index}" for index, root in enumerate(roots)]
+    natural_set = set(naturals)
+    reserved: set[str] = set()
     result: list[str] = []
-    for name in base_names:
-        occurrences[name] = occurrences.get(name, 0) + 1
-        result.append(name if occurrences[name] == 1 else f"{name}-{occurrences[name]}")
+    for natural in naturals:
+        chosen = natural
+        if chosen in reserved:
+            suffix = 2
+            candidate = f"{chosen}-{suffix}"
+            while candidate in reserved or candidate in natural_set:
+                suffix += 1
+                candidate = f"{chosen}-{suffix}"
+            chosen = candidate
+        reserved.add(chosen)
+        result.append(chosen)
     return tuple(result)
 
 

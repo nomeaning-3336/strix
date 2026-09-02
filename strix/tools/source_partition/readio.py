@@ -10,15 +10,21 @@ UTF-8/UTF-16/UTF-32 BOM is present (those encodings legitimately contain NUL
 bytes).  A conservative extension hint is applied afterwards, only to skip
 obvious asset/binary formats without reading them (mirroring the suffix skips
 the ``source_inspect_many`` search walker already applies).
+
+``iter_text_lines`` streams decoded lines from a file (BOM-aware, universal
+newlines, replacement errors) so oversized meaningful source can be LOC-counted
+without ever loading the whole file into memory.
 """
 
 from __future__ import annotations
 
 import codecs
+import io
 from typing import TYPE_CHECKING
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 __all__ = [
@@ -27,6 +33,7 @@ __all__ = [
     "decode_text",
     "has_binary_extension",
     "is_binary_head",
+    "iter_text_lines",
     "read_bytes",
 ]
 
@@ -124,14 +131,40 @@ def has_binary_extension(name: str) -> bool:
     return any(folded.endswith(suffix) for suffix in ASSET_BINARY_SUFFIXES)
 
 
+def _decoding_for(head: bytes) -> tuple[str, str]:
+    """``(encoding, errors)`` matching :func:`decode_text` semantics."""
+    for bom, encoding in _BOMS:
+        if head.startswith(bom):
+            return encoding, "replace"
+    return "utf-8", "replace"
+
+
 def decode_text(data: bytes) -> str:
     """Decode file bytes for line counting.
 
     BOM-aware for UTF-8/16/32; everything else is decoded as UTF-8 with
-    replacement (non-UTF-8 text like Latin-1 still counts its lines — decoding
+    replacement (non-UTF-8 text like Latin-1 still counts its lines - decoding
     is for counting only, not for content fidelity).
     """
-    for bom, encoding in _BOMS:
-        if data.startswith(bom):
-            return data.decode(encoding, errors="replace")
-    return data.decode("utf-8", errors="replace")
+    encoding, errors = _decoding_for(data)
+    return data.decode(encoding, errors=errors)
+
+
+def iter_text_lines(path: Path) -> Iterator[str]:
+    """Stream decoded logical lines from ``path`` (never reads it whole).
+
+    Uses the same BOM detection and replacement decoding as
+    :func:`decode_text`, with universal-newline translation so each yielded
+    line matches a ``splitlines()`` line for ordinary content.  Raises
+    ``OSError`` for unreadable files, like :func:`read_bytes`.
+    """
+    with path.open("rb") as raw:
+        head = raw.read(4)
+        encoding, errors = _decoding_for(head)
+        raw.seek(0)
+        reader = io.TextIOWrapper(raw, encoding=encoding, errors=errors, newline=None)
+        for line in reader:
+            if line.endswith("\n"):
+                yield line[:-1]
+            else:
+                yield line

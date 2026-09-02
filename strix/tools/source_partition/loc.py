@@ -20,8 +20,13 @@ shard-level ``weight`` is the weighted sum used for balancing.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 
-__all__ = ["count_loc", "language_for"]
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+__all__ = ["count_loc", "count_loc_lines", "language_for"]
 
 #: suffix → profile name.  Profiles with markers get light comment stripping;
 #: everything else falls back to ``"text"`` (blank-line-only counting).
@@ -98,14 +103,24 @@ def _scan_line(
     return meaningful, in_block
 
 
-def count_loc(text: str, language: str) -> int:
-    """Count meaningful (non-blank, lightly comment-stripped) lines."""
+def count_loc_lines(lines: Iterable[str], language: str) -> int:
+    """Count meaningful lines from an iterable of logical lines.
+
+    Shared by the in-memory path (:func:`count_loc`) and the streaming path
+    (oversized files, whose lines come from ``readio.iter_text_lines``), so
+    both produce identical counts for identical content.
+    """
     markers = _LINE_COMMENT_MARKERS.get(language, ())
     pairs = _BLOCK_COMMENT_PAIRS.get(language, ())
     in_block = False
     count = 0
-    for raw_line in text.splitlines():
+    for raw_line in lines:
         meaningful, in_block = _scan_line(raw_line, markers, pairs, in_block)
         if meaningful:
             count += 1
     return count
+
+
+def count_loc(text: str, language: str) -> int:
+    """Count meaningful (non-blank, lightly comment-stripped) lines."""
+    return count_loc_lines(text.splitlines(), language)

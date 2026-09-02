@@ -29,9 +29,11 @@ __all__ = [
     "WeightFactors",
 ]
 
-#: Files larger than this are skipped during inventory (default).  A single
-#: "meaningful source" file above this ceiling is not something a worker shard
-#: can meaningfully review, and reading it fully would dominate runtime.
+#: Files above this size are never fully read into memory: their LOC is
+#: counted deterministically by streaming, so an oversized hand-written source
+#: file still becomes a normal (flagged) partition unit instead of silently
+#: disappearing.  Classification - not this byte threshold - decides whether a
+#: file belongs in the scan at all.
 DEFAULT_MAX_FILE_BYTES = 8 * 1024 * 1024
 
 
@@ -94,12 +96,14 @@ class PartitionConfig:
 
     #: Locality/balance knob: a whole subtree is placed into a shard while
     #: ``least_loaded + subtree_weight <= ceil(total_weight / E * balance_tolerance)``.
+    #: A directory that cannot fit (or is heavier than the cap) is recursively
+    #: expanded into its children - only an individual *file* may stay whole
+    #: above the cap (files are never split).
     balance_tolerance: float = 1.25
-    #: A directory whose weight is at least this share of the total is treated
-    #: as a "giant subsystem": it is carved whole into the least-loaded shard
-    #: (fewest possible shards; at most one shard holds the bulk).
-    giant_share: float = 0.5
-    #: Inventory skips files strictly larger than this many bytes.
+    #: Files strictly larger than this many bytes are LOC-counted by streaming
+    #: (never fully read); oversized ``DATA`` artifacts are skipped with a note
+    #: (conservative data safety limit - classification still decides
+    #: inclusion for every other kind).
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     #: When ``partition_source(..., workers<=0)`` means "auto".
     default_workers: int | None = None
@@ -150,7 +154,9 @@ class PartitionUnit:
 
     ``display`` is the manifest spelling of the path (root-prefixed when the
     source spans several roots); ``rel`` is the root-relative path used for
-    classification and reading.
+    classification and reading.  ``oversized`` flags units whose LOC was
+    counted by streaming (the file exceeded ``PartitionConfig.max_file_bytes``
+    and was never fully read into memory).
     """
 
     root_index: int
@@ -159,6 +165,7 @@ class PartitionUnit:
     kind: FileKind
     loc: int
     weight: int
+    oversized: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +185,10 @@ class PartitionManifest:
     Same checkout + same config + same worker count => byte-for-byte identical
     JSON (see :meth:`to_json`).  Shards are ordered by id; file lists and the
     ``file_to_shard`` mapping are ordered lexicographically case-folded.
+
+    ``notes`` carries deterministic, machine-readable diagnostics (inventory
+    warnings and oversized/streamed-file flags) so the team layer can surface
+    them at the call site instead of relying on log files.
     """
 
     requested_workers: int
@@ -186,6 +197,7 @@ class PartitionManifest:
     total_loc: int
     shards: tuple[PartitionShard, ...]
     file_to_shard: dict[str, int]
+    notes: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -203,6 +215,7 @@ class PartitionManifest:
                 for shard in self.shards
             ],
             "file_to_shard": dict(self.file_to_shard),
+            "notes": list(self.notes),
         }
 
     def to_json(self) -> str:
