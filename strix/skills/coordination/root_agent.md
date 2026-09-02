@@ -111,6 +111,8 @@ When a child looks stalled, act in this order:
 1. `send_message_to_agent` with a specific course correction (e.g. "stop retrying the same shell command; switch mechanism or report the blocker").
 2. If it stays stuck, `stop_agent` it and spawn a fresh replacement child with a clean context and the same task — do NOT preserve a child that has burned hundreds of repetitive turns.
 
+**Name discipline.** Always refer to children by their exact registered name (`Server-Protocol-Mapper-2`, not "Server mapper") in `wait_for_agents` reasons, status notes, and messages — the reason is shown verbatim to the human operator and to other agents, and a retired child can share a similar base name. When you spawn a replacement for a stopped/retired agent, give it a recognizable, unique name (append `-2`, `-3`, …) so it is never confused with its retired sibling.
+
 Never keep waiting on a child you have stopped or that has no runnable status; if no active children remain, finish your work rather than polling.
 
 ## Completion

@@ -330,8 +330,11 @@ async def wait_for_agents(  # noqa: PLR0911
 
     Args:
         reason: One-line note shown in graph snapshots while you're
-            waiting (helps a human or sibling agent debug who's stuck
-            on what).
+            waiting (helps a human or sibling agent debug who's stuck on
+            what). Always name the agents involved by their EXACT
+            registered name (e.g. `Server-Protocol-Mapper-2`) — never an
+            abbreviation — because this text is shown verbatim to the
+            human operator.
         timeout_seconds: Max seconds to wait (default 45, hard-capped at 60
             so the root re-checks children at least once a minute). This is
             only a cap — the tool returns the INSTANT a message arrives, so a
