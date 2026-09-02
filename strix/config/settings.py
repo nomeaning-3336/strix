@@ -23,6 +23,11 @@ class LlmSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
     model: str | None = Field(default=None, alias="STRIX_LLM")
+    # Role-aware routing: the root orchestrator can run on a stronger model while
+    # spawned subagents default to a cheaper worker model. STRIX_LLM remains the
+    # fallback for both roles when no per-role override is configured.
+    root_model: str | None = Field(default=None, alias="STRIX_ROOT_LLM")
+    subagent_model: str | None = Field(default=None, alias="STRIX_SUBAGENT_LLM")
     api_key: str | None = Field(
         default=None,
         validation_alias=AliasChoices("LLM_API_KEY", "OPENAI_API_KEY"),

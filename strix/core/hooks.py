@@ -283,12 +283,18 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         agent_id = ctx.get("agent_id")
         if not isinstance(agent_id, str) or not agent_id:
             agent_id = agent_name or "unknown"
+        # Attribute usage to the model the agent actually ran on (the child may
+        # run a different worker model than the root).
+        model_name = self._model
+        ctx_model = ctx.get("model")
+        if isinstance(ctx_model, str) and ctx_model:
+            model_name = ctx_model
 
         try:
             report_state.record_sdk_usage(
                 agent_id=agent_id,
                 agent_name=agent_name,
-                model=self._model,
+                model=model_name,
                 usage=response.usage,
             )
         except Exception:

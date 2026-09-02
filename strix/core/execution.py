@@ -6,7 +6,6 @@ import asyncio
 import contextlib
 import dataclasses
 import logging
-import os
 import uuid
 from collections.abc import Callable
 from functools import cache
@@ -1006,11 +1005,30 @@ async def _start_child_runner(
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
 ) -> None:
-    subagent_model = os.environ.get("STRIX_SUBAGENT_LLM")
-    if subagent_model:
-        # Per-agent model split: spawned subagents run on the cheaper worker
-        # model while the root/orchestrator keeps the run-level STRIX_LLM.
-        run_config = dataclasses.replace(run_config, model=subagent_model)
+    # Role-aware model routing: spawned subagents run on the configured worker
+    # model (STRIX_SUBAGENT_LLM / settings), with their own model settings, while
+    # the root keeps the run-level (root) model. Falls back to the run model when
+    # no worker override is configured.
+    from strix.config.loader import load_settings
+    from strix.core.inputs import make_model_settings
+
+    child_model = (load_settings().llm.subagent_model or "").strip()
+    if child_model:
+        llm = load_settings().llm
+        run_config = dataclasses.replace(
+            run_config,
+            model=child_model,
+            model_settings=make_model_settings(
+                llm.reasoning_effort,
+                model_name=child_model,
+                force_required_tool_choice=llm.force_required_tool_choice,
+                request_timeout=llm.timeout,
+                prompt_cache=llm.prompt_cache,
+                extra_headers=llm.extra_headers,
+            ),
+        )
+    else:
+        child_model = run_config.model if isinstance(run_config.model, str) else ""
     session = open_agent_session(child_id, agents_db_path)
     sessions_to_close.append(session)
     await coordinator.attach_runtime(child_id, session=session)
@@ -1019,6 +1037,7 @@ async def _start_child_runner(
     child_ctx["agent_id"] = child_id
     child_ctx["parent_id"] = parent_id
     child_ctx["task"] = task
+    child_ctx["model"] = child_model or child_ctx.get("model")
 
     async def _child_loop() -> None:
         # A budget stop is a clean scan-wide shutdown, not a child failure: the

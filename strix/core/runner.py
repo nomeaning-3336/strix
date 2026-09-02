@@ -21,6 +21,7 @@ from strix.agents.prompt import render_system_prompt
 from strix.config import load_settings
 from strix.config.models import (
     StrixProvider,
+    _mirror_api_key_to_provider_env,
     configure_sdk_model_defaults,
     supports_strict_tool_schemas,
     uses_chat_completions_tool_schema,
@@ -246,14 +247,27 @@ async def run_strix_scan(
 
     settings = load_settings()
     configure_sdk_model_defaults(settings)
-    resolved_model = (model or settings.llm.model or "").strip()
+    # Role-aware routing: the root orchestrates on the primary model; spawned
+    # subagents default to a cheaper worker model when STRIX_SUBAGENT_LLM (or the
+    # legacy STRIX_LLM alias chain) is configured. Fallbacks keep single-model
+    # runs byte-for-byte compatible.
+    resolved_model = (model or settings.llm.root_model or settings.llm.model or "").strip()
+    subagent_model = (settings.llm.subagent_model or resolved_model).strip()
     if not resolved_model:
         raise RuntimeError(
             "No LLM model configured. Set STRIX_LLM env or pass model= to run_strix_scan().",
         )
-    logger.info("LLM model resolved: %s", resolved_model)
+    logger.info("Root LLM model resolved: %s", resolved_model)
+    if subagent_model != resolved_model:
+        logger.info("Subagent LLM model resolved: %s", subagent_model)
+        if settings.llm.api_key:
+            # Ensure the worker model's own provider env var (e.g. OPENROUTER_API_KEY
+            # for an openrouter/... worker under a different root provider) is set.
+            _mirror_api_key_to_provider_env(subagent_model, settings.llm.api_key)
     chat_completions_tools = uses_chat_completions_tool_schema(resolved_model, settings)
     strict_tool_schemas = supports_strict_tool_schemas(resolved_model)
+    sub_chat_completions_tools = uses_chat_completions_tool_schema(subagent_model, settings)
+    sub_strict_tool_schemas = supports_strict_tool_schemas(subagent_model)
     if not strict_tool_schemas:
         logger.info("Sending non-strict tool schemas: %s caps strict tools", resolved_model)
 
@@ -495,8 +509,8 @@ async def run_strix_scan(
             is_whitebox=is_whitebox,
             is_diff_scoped=is_diff_scoped,
             interactive=interactive,
-            chat_completions_tools=chat_completions_tools,
-            strict_tool_schemas=strict_tool_schemas,
+            chat_completions_tools=sub_chat_completions_tools,
+            strict_tool_schemas=sub_strict_tool_schemas,
             system_prompt_context=scope_context,
         )
 
@@ -521,6 +535,7 @@ async def run_strix_scan(
             "mcp_registry": mcp_registry,
             "agent_id": root_id,
             "parent_id": None,
+            "model": resolved_model,
             "interactive": interactive,
             "spawn_child_agent": spawn_child_agent,
             "scan_targets": build_scan_targets(scan_config),
