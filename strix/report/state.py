@@ -33,6 +33,30 @@ logger = logging.getLogger(__name__)
 
 _global_report_state: Optional["ReportState"] = None
 
+
+class DuplicateVulnerabilityError(Exception):
+    """A filing would duplicate a report committed after the caller's snapshot.
+
+    The LLM dedupe check compares against the snapshot taken when the agent
+    began filing; two agents can both pass it against the same stale snapshot.
+    The deterministic commit-time guard (``finding_fingerprint``) raises this
+    inside the reports lock, so the losing filing learns which report won.
+    """
+
+    def __init__(
+        self,
+        *,
+        duplicate_id: str,
+        duplicate_title: str,
+        reason: str,
+        confidence: float = 1.0,
+    ) -> None:
+        super().__init__(f"duplicate of {duplicate_id}: {reason}")
+        self.duplicate_id = duplicate_id
+        self.duplicate_title = duplicate_title
+        self.reason = reason
+        self.confidence = confidence
+
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
 
@@ -216,6 +240,9 @@ class ReportState:
         }
         self._run_dir: Path | None = None
         self._saved_vuln_ids: set[str] = set()
+        # Serializes check-then-append so concurrent filings can't both pass a
+        # stale dedupe snapshot and both land (see _duplicate_guard).
+        self._reports_lock = threading.Lock()
 
         self.caido_url: str | None = None
         self.vulnerability_found_callback: Callable[[dict[str, Any]], None] | None = None
@@ -339,80 +366,110 @@ class ReportState:
         dependency_metadata: dict[str, str] | None = None,
         agent_id: str | None = None,
         agent_name: str | None = None,
+        _duplicate_guard: tuple[frozenset[str], str] | None = None,
     ) -> str:
-        report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
+        """Append a new report and return its id.
 
-        report: dict[str, Any] = {
-            "id": report_id,
-            "title": _clean_title(title),
-            "severity": severity.lower().strip(),
-            "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
-        }
+        When ``_duplicate_guard`` is ``(known_ids, fingerprint)`` the commit is
+        atomic against the deterministic re-check: ``known_ids`` are the report
+        ids already visible when the caller ran its (slow, LLM) dedupe check, and
+        only reports committed since — i.e. within the same concurrent filing
+        window — are compared by ``finding_fingerprint``. A match raises
+        :class:`DuplicateVulnerabilityError` instead of appending, closing the
+        race where two agents both pass dedupe against the same stale snapshot.
+        """
+        with self._reports_lock:
+            if _duplicate_guard is not None:
+                known_ids, fingerprint = _duplicate_guard
+                if fingerprint:
+                    from strix.report.dedupe import finding_fingerprint
 
-        if description:
-            report["description"] = description.strip()
-        if impact:
-            report["impact"] = impact.strip()
-        if target:
-            report["target"] = target.strip()
-        if technical_analysis:
-            report["technical_analysis"] = technical_analysis.strip()
-        if poc_description:
-            report["poc_description"] = poc_description.strip()
-        if poc_script_code:
-            report["poc_script_code"] = poc_script_code.strip()
-        if remediation_steps:
-            report["remediation_steps"] = remediation_steps.strip()
-        if evidence:
-            report["evidence"] = evidence.strip()
-        if assumptions:
-            report["assumptions"] = assumptions.strip()
-        if counterevidence:
-            report["counterevidence"] = counterevidence.strip()
-        if confidence:
-            report["confidence"] = confidence.strip().lower()
-        if confidence_rationale:
-            report["confidence_rationale"] = confidence_rationale.strip()
-        if severity_change_conditions:
-            report["severity_change_conditions"] = severity_change_conditions.strip()
-        if fix_effort:
-            report["fix_effort"] = fix_effort.strip().lower()
-        if cvss is not None:
-            report["cvss"] = cvss
-        if cvss_breakdown:
-            report["cvss_breakdown"] = cvss_breakdown
-        if endpoint:
-            report["endpoint"] = endpoint.strip()
-        if method:
-            report["method"] = method.strip()
-        if cve:
-            report["cve"] = cve.strip()
-        if cwe:
-            report["cwe"] = cwe.strip()
-        if code_locations:
-            report["code_locations"] = code_locations
-        if fix_verification:
-            report["fix_verification"] = fix_verification.strip()
-        if fix_pr_body:
-            report["fix_pr_body"] = fix_pr_body.strip()
-        report["finding_class"] = (finding_class or "dynamic").strip().lower()
-        if dependency_metadata:
-            report["dependency_metadata"] = dependency_metadata
-        if agent_id:
-            report["agent_id"] = agent_id
-        if agent_name:
-            report["agent_name"] = agent_name
+                    for report in self.vulnerability_reports:
+                        rid = report.get("id")
+                        if isinstance(rid, str) and rid in known_ids:
+                            continue
+                        if finding_fingerprint(report) == fingerprint:
+                            raise DuplicateVulnerabilityError(
+                                duplicate_id=str(rid or ""),
+                                duplicate_title=str(report.get("title") or "Unknown"),
+                                reason=(
+                                    "Deterministic fingerprint matches a report "
+                                    "filed concurrently after this caller's snapshot"
+                                ),
+                            )
+            report_id = f"vuln-{len(self.vulnerability_reports) + 1:04d}"
 
-        self.vulnerability_reports.append(report)
-        logger.info(f"Added vulnerability report: {report_id} - {title}")
-        posthog.finding(severity, cwe=cwe, is_cve=bool(cve))
-        scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
+            report: dict[str, Any] = {
+                "id": report_id,
+                "title": _clean_title(title),
+                "severity": severity.lower().strip(),
+                "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+            }
 
-        if self.vulnerability_found_callback:
-            self.vulnerability_found_callback(report)
+            if description:
+                report["description"] = description.strip()
+            if impact:
+                report["impact"] = impact.strip()
+            if target:
+                report["target"] = target.strip()
+            if technical_analysis:
+                report["technical_analysis"] = technical_analysis.strip()
+            if poc_description:
+                report["poc_description"] = poc_description.strip()
+            if poc_script_code:
+                report["poc_script_code"] = poc_script_code.strip()
+            if remediation_steps:
+                report["remediation_steps"] = remediation_steps.strip()
+            if evidence:
+                report["evidence"] = evidence.strip()
+            if assumptions:
+                report["assumptions"] = assumptions.strip()
+            if counterevidence:
+                report["counterevidence"] = counterevidence.strip()
+            if confidence:
+                report["confidence"] = confidence.strip().lower()
+            if confidence_rationale:
+                report["confidence_rationale"] = confidence_rationale.strip()
+            if severity_change_conditions:
+                report["severity_change_conditions"] = severity_change_conditions.strip()
+            if fix_effort:
+                report["fix_effort"] = fix_effort.strip().lower()
+            if cvss is not None:
+                report["cvss"] = cvss
+            if cvss_breakdown:
+                report["cvss_breakdown"] = cvss_breakdown
+            if endpoint:
+                report["endpoint"] = endpoint.strip()
+            if method:
+                report["method"] = method.strip()
+            if cve:
+                report["cve"] = cve.strip()
+            if cwe:
+                report["cwe"] = cwe.strip()
+            if code_locations:
+                report["code_locations"] = code_locations
+            if fix_verification:
+                report["fix_verification"] = fix_verification.strip()
+            if fix_pr_body:
+                report["fix_pr_body"] = fix_pr_body.strip()
+            report["finding_class"] = (finding_class or "dynamic").strip().lower()
+            if dependency_metadata:
+                report["dependency_metadata"] = dependency_metadata
+            if agent_id:
+                report["agent_id"] = agent_id
+            if agent_name:
+                report["agent_name"] = agent_name
 
-        self.save_run_data()
-        return report_id
+            self.vulnerability_reports.append(report)
+            logger.info(f"Added vulnerability report: {report_id} - {title}")
+            posthog.finding(severity, cwe=cwe, is_cve=bool(cve))
+            scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
+
+            if self.vulnerability_found_callback:
+                self.vulnerability_found_callback(report)
+
+            self.save_run_data()
+            return report_id
 
     def update_vulnerability_report(
         self,
@@ -509,7 +566,8 @@ class ReportState:
         return report
 
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
-        return list(self.vulnerability_reports)
+        with self._reports_lock:
+            return list(self.vulnerability_reports)
 
     def record_sdk_usage(
         self,

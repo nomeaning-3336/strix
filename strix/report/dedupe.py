@@ -285,6 +285,102 @@ def _check_dependency_duplicate(
     }
 
 
+def _norm_token_text(value: Any) -> str:
+    """Lowercase alphanumeric tokens of a value, sorted and space-joined.
+
+    Rewording ("SQL injection in /login" vs "Login endpoint: SQL injection")
+    normalises to the same token bag; word order does not matter, but the
+    token multiset does, so distinct identifiers stay distinct.
+    """
+    if value is None:
+        return ""
+    tokens = re.findall(r"[a-z0-9]+", str(value).lower())
+    return " ".join(sorted(tokens))
+
+
+def _norm_lower(value: Any) -> str:
+    """Lowercase, whitespace-collapsed value (punctuation preserved)."""
+    if value is None:
+        return ""
+    return " ".join(str(value).strip().lower().split())
+
+
+def _norm_cwe(value: Any) -> str:
+    """``CWE-79``, ``cwe: 79``, ``79`` → ``CWE-79`` (mirrors the SARIF rule id)."""
+    digits = "".join(c for c in str(value or "") if c.isdigit())
+    return f"CWE-{digits}" if digits else ""
+
+
+def _report_location(report: dict[str, Any]) -> str:
+    """The finding's location: ``endpoint`` when present, else the first code
+    location's file/path. Deliberately file-granular (no line): the identity
+    must survive a line shift between two concurrent filings of the same sink.
+    """
+    endpoint = str(report.get("endpoint") or "").strip()
+    if endpoint:
+        return _norm_lower(endpoint)
+    locations = report.get("code_locations")
+    if isinstance(locations, list):
+        for location in locations:
+            if not isinstance(location, dict):
+                continue
+            path = location.get("file") or location.get("path")
+            if isinstance(path, str) and path.strip():
+                return _norm_lower(path)
+    return ""
+
+
+def _dependency_key(report: dict[str, Any]) -> str:
+    """Deterministic SCA identity: CVE + ecosystem + package + manifest path."""
+    metadata = report.get("dependency_metadata")
+    if not isinstance(metadata, dict):
+        return ""
+    cve = str(report.get("cve") or "").strip().upper()
+    package_name = str(metadata.get("package_name") or "").strip().lower()
+    if not cve or not package_name:
+        return ""
+    ecosystem = str(metadata.get("package_ecosystem") or "").strip().lower()
+    manifest_path = str(metadata.get("manifest_path") or "").strip()
+    return f"{cve}|{ecosystem}|{package_name}|{manifest_path}"
+
+
+def finding_fingerprint(report: dict[str, Any]) -> str | None:
+    """Deterministic identity fingerprint for the concurrent-filing re-check.
+
+    LLM dedupe compares a candidate against the snapshot of reports taken when
+    the agent started filing; two agents filing the same finding concurrently
+    can both pass that check against the same stale snapshot. The fingerprint
+    closes that window with a deterministic, no-LLM comparison at commit time:
+    ``finding_class + target + location(endpoint | code file) + method + CWE +
+    normalised-title tokens`` (dependency findings use CVE/package identity).
+
+    Exact-equality only: the composite is only compared against reports that
+    landed after the caller's snapshot, i.e. reports filed within the same
+    race window that describe the same underlying finding. Different endpoints,
+    methods, CWEs, or targets fingerprint differently.
+
+    Returns ``None`` when the report carries no identity-bearing field, so the
+    caller can skip the guard instead of risking a spurious match on bare text.
+    """
+    dep_key = _dependency_key(report)
+    if dep_key:
+        return f"dependency\x1f{dep_key}"
+
+    fields = {
+        "class": str(report.get("finding_class") or "dynamic").strip().lower(),
+        "target": _norm_lower(report.get("target")),
+        "location": _report_location(report),
+        "method": _norm_lower(report.get("method")),
+        "cwe": _norm_cwe(report.get("cwe")),
+        "title": _norm_token_text(report.get("title")),
+    }
+    if not any(fields[key] for key in ("target", "location", "method", "cwe", "title")):
+        return None
+    # \x1f cannot appear in any normalised value, so string equality is
+    # unambiguous even when some fields are empty on both sides.
+    return "\x1f".join(f"{key}:{fields[key]}" for key in fields)
+
+
 def _parse_dedupe_response(content: str) -> dict[str, Any]:
     text = content.strip()
     if text.startswith("```"):
