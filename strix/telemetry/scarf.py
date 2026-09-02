@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from strix.config import load_settings
-from strix.report.finding_state import active_reports
 from strix.telemetry._common import (
     SEND_TIMEOUT,
     SESSION_ID,
@@ -114,6 +113,11 @@ def end(report_state: ReportState, exit_reason: str = "completed") -> None:
         return
     if report_state.scan_ended_exit_reason is None:
         report_state.scan_ended_exit_reason = exit_reason
+
+    # Imported lazily: strix.skills imports this module during boot, and a
+    # top-level strix.report import would pull report.state -> coverage ->
+    # skills while skills/__init__ is still initializing.
+    from strix.report.finding_state import active_reports  # noqa: PLC0415
 
     # Retracted/rejected findings are not vulnerabilities; telemetry must not
     # report the scan as ending with findings it itself walked back.
