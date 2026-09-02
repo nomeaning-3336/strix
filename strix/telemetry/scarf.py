@@ -14,6 +14,7 @@ from strix.telemetry._common import (
     get_version,
     is_first_run,
 )
+from strix.telemetry.dispatch import dispatcher
 
 
 if TYPE_CHECKING:
@@ -29,10 +30,8 @@ def _is_enabled() -> bool:
     return load_settings().telemetry.enabled
 
 
-def _send(event: str, properties: dict[str, Any]) -> bool:
-    if not _is_enabled():
-        logger.debug("scarf disabled; skipping event %s", event)
-        return False
+def _http_post(event: str, properties: dict[str, Any]) -> None:
+    """The actual (blocking) HTTP send; runs on the telemetry worker thread."""
     try:
         props = dict(properties)
         version = str(props.pop("strix_version", get_version()) or "unknown")
@@ -47,10 +46,18 @@ def _send(event: str, properties: dict[str, Any]) -> bool:
             pass
     except Exception:  # noqa: BLE001
         logger.debug("scarf send failed for event %s", event, exc_info=True)
-        return False
     else:
         logger.debug("scarf event sent: %s", event)
-        return True
+
+
+def _send(event: str, properties: dict[str, Any]) -> bool:
+    """Enqueue one event. Never blocks the event loop; drops on overflow."""
+    if not _is_enabled():
+        logger.debug("scarf disabled; skipping event %s", event)
+        return False
+    return dispatcher.submit(
+        lambda: _http_post(event, properties), label=f"scarf:{event}"
+    )
 
 
 def start(

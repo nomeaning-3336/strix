@@ -10,6 +10,7 @@ from strix.telemetry._common import (
     base_props,
     is_first_run,
 )
+from strix.telemetry.dispatch import dispatcher
 
 
 if TYPE_CHECKING:
@@ -26,25 +27,29 @@ def _is_enabled() -> bool:
     return load_settings().telemetry.enabled
 
 
-def _send(event: str, properties: dict[str, Any]) -> bool:
-    if not _is_enabled():
-        logger.debug("posthog disabled; skipping event %s", event)
-        return False
+def _http_post(payload: dict[str, Any]) -> None:
+    """The actual (blocking) HTTP send; runs on the telemetry worker thread."""
     try:
-        payload = {
-            "api_key": _POSTHOG_PUBLIC_API_KEY,
-            "event": event,
-            "distinct_id": SESSION_ID,
-            "properties": properties,
-        }
         with requests.post(f"{_POSTHOG_HOST}/capture/", json=payload, timeout=SEND_TIMEOUT):
             pass
     except Exception:  # noqa: BLE001
-        logger.debug("posthog send failed for event %s", event, exc_info=True)
-        return False
+        logger.debug("posthog send failed for event %s", payload.get("event"), exc_info=True)
     else:
-        logger.debug("posthog event sent: %s", event)
-        return True
+        logger.debug("posthog event sent: %s", payload.get("event"))
+
+
+def _send(event: str, properties: dict[str, Any]) -> bool:
+    """Enqueue one event. Never blocks the event loop; drops on overflow."""
+    if not _is_enabled():
+        logger.debug("posthog disabled; skipping event %s", event)
+        return False
+    payload = {
+        "api_key": _POSTHOG_PUBLIC_API_KEY,
+        "event": event,
+        "distinct_id": SESSION_ID,
+        "properties": properties,
+    }
+    return dispatcher.submit(lambda: _http_post(payload), label=f"posthog:{event}")
 
 
 def start(
