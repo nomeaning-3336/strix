@@ -501,7 +501,15 @@ class AgentCoordinator:
         *,
         include_items: bool = False,
     ) -> tuple[int, list[Any]]:
-        """Drain the agent's mailbox into its own SDK session."""
+        """Drain the agent's mailbox into its own SDK session.
+
+        Delivery only counts once the messages are durably written to the SDK
+        session. If the write fails (or there is no session to write to), the
+        drained messages are restored to the FRONT of the mailbox and the
+        pending count is rebuilt, so nothing is silently lost — the caller gets
+        ``(0, [])`` and a later retry delivers them. This keeps message loss off
+        the hot-reload/turn-boundary and inter-agent delivery paths.
+        """
         async with self._lock:
             runtime = self.runtimes.setdefault(agent_id, AgentRuntime())
             queued = list(runtime.mailbox)
@@ -512,23 +520,46 @@ class AgentCoordinator:
         if count <= 0:
             return 0, []
         items = [self._message_to_session_item(m) for m in queued]
-        if items:
-            if session is None:
-                logger.warning(
-                    "agent %s has no SDK session attached; %d queued messages were not persisted",
-                    agent_id,
+        if not items:
+            await self._maybe_snapshot()
+            return 0, []
+
+        delivered = False
+        if session is None:
+            logger.warning(
+                "agent %s has no SDK session attached; %d queued messages could not be "
+                "persisted and were restored to its mailbox",
+                agent_id,
+                len(items),
+            )
+        else:
+            try:
+                async with session_write_lock(session):
+                    await session.add_items(items)
+                delivered = True
+            except Exception:
+                logger.exception(
+                    "failed to append %d queued messages to the session of %s",
                     len(items),
+                    agent_id,
                 )
-            else:
-                try:
-                    async with session_write_lock(session):
-                        await session.add_items(items)
-                except Exception:
-                    logger.exception(
-                        "failed to append %d queued messages to the session of %s",
-                        len(items),
-                        agent_id,
-                    )
+
+        if not delivered:
+            # Re-acquire the lock and PREPEND the drained messages back. A
+            # concurrent arrival during the failed write is already appended
+            # ahead of us, so prepending preserves [original..., new].
+            async with self._lock:
+                runtime = self.runtimes.get(agent_id) or runtime
+                runtime.mailbox[0:0] = queued
+                self.pending_counts[agent_id] = (
+                    self.pending_counts.get(agent_id, 0) + len(queued)
+                )
+                # Wake a parked agent so it does not sleep forever with
+                # restored-but-undelivered work in its mailbox.
+                runtime.wake.set()
+            await self._maybe_snapshot()
+            return 0, []
+
         await self._maybe_snapshot()
         if not include_items:
             return count, []

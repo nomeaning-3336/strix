@@ -1097,6 +1097,16 @@ async def test_interactive_subagent_exhaustion_tells_its_parent(
     await _drive(coordinator, "child", interactive=True)
 
     assert coordinator.statuses["child"] == "waiting"
+    # Give the root a real (working) session so the parent notice is durably
+    # persisted; consume_pending only reports delivery once the write succeeds.
+    class _Session:
+        def __init__(self) -> None:
+            self.items: list[Any] = []
+
+        async def add_items(self, items: list[Any]) -> None:
+            self.items.extend(items)
+
+    coordinator.runtimes["root"].session = _Session()
     pending, items = await coordinator.consume_pending("root", include_items=True)
     assert pending == 1
     notice = str(items[0])
