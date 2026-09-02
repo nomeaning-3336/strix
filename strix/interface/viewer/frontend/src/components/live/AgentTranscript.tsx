@@ -33,6 +33,26 @@ class RendererErrorBoundary extends Component<
   }
 }
 
+/** Chat messages are plain bubbles; one odd payload must not blank the agent. */
+class ChatMessageGuard extends Component<
+  { children: ReactNode },
+  { hasError: boolean }
+> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) {
+      return <span className="text-[#555] text-sm italic">(unreadable message)</span>;
+    }
+    return this.props.children;
+  }
+}
+
 function SafeToolRenderer(props: ToolRendererProps) {
   const Renderer = getToolRenderer(props.toolName, props.mcpConnection);
   return (
@@ -321,10 +341,12 @@ export function AgentTranscript({
                       }
                     />
                   ) : (
-                    <ChatBubble
-                      role={role}
-                      content={String(event.data?.content ?? "")}
-                    />
+                    <ChatMessageGuard>
+                      <ChatBubble
+                        role={role}
+                        content={String(event.data?.content ?? "")}
+                      />
+                    </ChatMessageGuard>
                   )}
                 </div>
               </div>

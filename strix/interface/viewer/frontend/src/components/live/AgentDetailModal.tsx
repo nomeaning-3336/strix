@@ -7,22 +7,30 @@ import type { TranscriptAgent, TranscriptEvent } from "@/data/serverSource";
 /** One bad agent event must never blank the whole app: isolate the transcript. */
 class TranscriptErrorBoundary extends Component<
   { agentName: string; children: ReactNode },
-  { hasError: boolean }
+  { hasError: boolean; message: string }
 > {
   constructor(props: { agentName: string; children: ReactNode }) {
     super(props);
-    this.state = { hasError: false };
+    this.state = { hasError: false, message: "" };
   }
-  static getDerivedStateFromError() {
-    return { hasError: true };
+  static getDerivedStateFromError(error: unknown) {
+    return {
+      hasError: true,
+      message: error instanceof Error ? error.message : String(error),
+    };
   }
   render() {
     if (this.state.hasError) {
       return (
-        <p className="text-sm text-[#888]">
-          Could not render the transcript for <span className="text-[#ccc]">{this.props.agentName}</span>
-          {" "}(an event in its session failed to render).
-        </p>
+        <div className="space-y-1 text-sm">
+          <p className="text-[#888]">
+            Could not render the transcript for{" "}
+            <span className="text-[#ccc]">{this.props.agentName}</span>.
+          </p>
+          <pre className="whitespace-pre-wrap break-all font-mono text-xs text-red-400/80">
+            {this.state.message}
+          </pre>
+        </div>
       );
     }
     return this.props.children;
