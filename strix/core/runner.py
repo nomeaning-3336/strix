@@ -251,9 +251,12 @@ async def run_strix_scan(
     # Role-aware routing: the root orchestrates on the primary model; spawned
     # subagents default to a cheaper worker model when STRIX_SUBAGENT_LLM (or the
     # legacy STRIX_LLM alias chain) is configured. Fallbacks keep single-model
-    # runs byte-for-byte compatible.
-    resolved_model = (model or settings.llm.root_model or settings.llm.model or "").strip()
-    subagent_model = (settings.llm.subagent_model or resolved_model).strip()
+    # runs byte-for-byte compatible. getattr guards keep lightweight test
+    # doubles that predate the role fields working unchanged.
+    configured_root = getattr(settings.llm, "root_model", None)
+    configured_subagent = getattr(settings.llm, "subagent_model", None)
+    resolved_model = (model or configured_root or settings.llm.model or "").strip()
+    subagent_model = (configured_subagent or resolved_model).strip()
     if not resolved_model:
         raise RuntimeError(
             "No LLM model configured. Set STRIX_LLM env or pass model= to run_strix_scan().",
