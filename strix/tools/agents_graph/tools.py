@@ -28,6 +28,47 @@ def _ctx(ctx: RunContextWrapper) -> dict[str, Any]:
     return ctx.context if isinstance(ctx.context, dict) else {}
 
 
+def _wait_timeout_payload(
+    coordinator: Any,
+    me: str,
+    timeout_seconds: int,
+    reason: str,
+) -> str:
+    """Build the wait_for_agents timeout result (supervision_tick when children exist)."""
+    children = coordinator.children_health(me)
+    if children:
+        return json.dumps(
+            {
+                "success": True,
+                "wait_outcome": "supervision_tick",
+                "children": children,
+                "timeout_seconds": timeout_seconds,
+                "reason": reason,
+                "note": (
+                    "No child messages within the supervision window. Inspect the "
+                    "children health snapshot and intervene ONLY if a child is stalled "
+                    "or pathological (many repeated identical actions, many empty tool "
+                    "outputs, tool errors, or a long time since its last progress). "
+                    "Otherwise leave healthy children alone and wait again with a short "
+                    "timeout (30-60s)."
+                ),
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+    return json.dumps(
+        {
+            "success": True,
+            "wait_outcome": "timeout",
+            "timeout_seconds": timeout_seconds,
+            "reason": reason,
+            "note": "No messages within timeout — continue work or call agent_finish.",
+        },
+        ensure_ascii=False,
+        default=str,
+    )
+
+
 def _render_completion_report(
     *,
     agent_name: str,
@@ -227,11 +268,13 @@ def _session_items_payload(items: list[Any]) -> list[dict[str, Any]]:
     return payload
 
 
-_WAIT_DEFAULT_TIMEOUT_S = 300
-# Enforced by the SDK around the whole tool call, so it caps an oversized
-# ``timeout_seconds`` the model asks for. One second of headroom lets the
-# tool's own timeout fire first and return a clean result.
-_WAIT_HARD_CEILING_S = _WAIT_DEFAULT_TIMEOUT_S + 1
+_WAIT_DEFAULT_TIMEOUT_S = 45
+# The root orchestrator monitors subagents on a ~30-60s cadence: cap every
+# wait so it wakes at least once a minute and re-checks/pings its children.
+_WAIT_MAX_TIMEOUT_S = 60
+# Enforced by the SDK around the whole tool call; one second of headroom lets
+# the tool's own clamp fire first and return a clean result.
+_WAIT_HARD_CEILING_S = _WAIT_MAX_TIMEOUT_S + 1
 _WAITED_TURN_KEY = "waited_llm_turn"
 
 
@@ -247,6 +290,15 @@ async def wait_for_agents(  # noqa: PLR0911
     responds — typically after spawning subagents and you want their
     completion reports. You resume the instant any message arrives, so
     size ``timeout_seconds`` to the work you're awaiting.
+
+    **Root supervision:** when the root has active children, a wait that
+    times out returns ``wait_outcome: "supervision_tick"`` carrying a
+    per-child health snapshot (repeated-action count, empty-output count,
+    tool errors, seconds since last progress). On that tick, intervene
+    (``send_message_to_agent`` to redirect, ``stop_agent`` to cancel and
+    respawn a replacement) only for children that look stalled or
+    pathological; leave healthy children alone. Use a short timeout
+    (30-60s) so you re-check at least once a minute.
 
     **Issue exactly one wait, then stop and react to what it returns.**
     This call blocks and resumes on its own; it is not a poll you repeat.
@@ -280,20 +332,15 @@ async def wait_for_agents(  # noqa: PLR0911
         reason: One-line note shown in graph snapshots while you're
             waiting (helps a human or sibling agent debug who's stuck
             on what).
-        timeout_seconds: Max seconds to wait (default 300, and values above
-            that are cut short by a hard ceiling). This is only
-            a cap — the tool returns the INSTANT a message arrives, so a
+        timeout_seconds: Max seconds to wait (default 45, hard-capped at 60
+            so the root re-checks children at least once a minute). This is
+            only a cap — the tool returns the INSTANT a message arrives, so a
             larger value never makes you wait longer when the reply does
-            come. Right-size it to what you're waiting on: a short wait
-            (e.g. 10-60s) for a quick ack or a small/fast subtask, and a
-            longer one (e.g. ~100-200s) only for genuinely long-running
-            work (deep recon, exploitation, a full sub-scan). The cap only
-            bites when the expected message never arrives — so an oversized
-            timeout on a trivial wait just strands you idle until it
-            elapses. On timeout the tool returns and you decide whether to
-            keep working or wait again.
+            come. On timeout the tool returns and you decide whether to keep
+            working or wait again.
     """
     inner = _ctx(ctx)
+    timeout_seconds = max(1, min(int(timeout_seconds), _WAIT_MAX_TIMEOUT_S))
     coordinator = coordinator_from_context(inner)
     me = inner.get("agent_id")
     interactive = bool(inner.get("interactive", False))
@@ -369,17 +416,7 @@ async def wait_for_agents(  # noqa: PLR0911
         await asyncio.wait_for(coordinator.wait_for_message(me), timeout_seconds)
     except TimeoutError:
         await coordinator.mark_running(me)
-        return json.dumps(
-            {
-                "success": True,
-                "wait_outcome": "timeout",
-                "timeout_seconds": timeout_seconds,
-                "reason": reason,
-                "note": "No messages within timeout — continue work or call agent_finish.",
-            },
-            ensure_ascii=False,
-            default=str,
-        )
+        return _wait_timeout_payload(coordinator, me, timeout_seconds, reason)
 
     async with coordinator._lock:
         stopped = coordinator.statuses.get(me) == "stopped"

@@ -95,6 +95,24 @@ Complex findings warrant specialized subagents:
 - Use message passing only when essential (requests/answers, critical handoffs)
 - Prefer batched updates over routine status messages
 
+## Supervision
+
+While children are active, supervise them on a **30-60s cadence**. `wait_for_agents` returns a `supervision_tick` (a per-child health snapshot) when its timeout elapses, so use a short timeout and re-check at least once a minute. A tick is not an invitation to ping every child — healthy children need no status messages.
+
+Intervene only when a child looks stalled or pathological:
+
+- high `repeated_action_count` (the same action over and over);
+- high `empty_output_count` (tool results with no usable output, especially `exec_command`);
+- `tool_errors`;
+- long `seconds_since_progress` with no new artifact, note, or coverage entry.
+
+When a child looks stalled, act in this order:
+
+1. `send_message_to_agent` with a specific course correction (e.g. "stop retrying the same shell command; switch mechanism or report the blocker").
+2. If it stays stuck, `stop_agent` it and spawn a fresh replacement child with a clean context and the same task — do NOT preserve a child that has burned hundreds of repetitive turns.
+
+Never keep waiting on a child you have stopped or that has no runnable status; if no active children remain, finish your work rather than polling.
+
 ## Completion
 
 When all agents report completion:

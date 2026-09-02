@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import logging
+import os
 import uuid
 from collections.abc import Callable
 from functools import cache
@@ -1004,6 +1006,11 @@ async def _start_child_runner(
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
 ) -> None:
+    subagent_model = os.environ.get("STRIX_SUBAGENT_LLM")
+    if subagent_model:
+        # Per-agent model split: spawned subagents run on the cheaper worker
+        # model while the root/orchestrator keeps the run-level STRIX_LLM.
+        run_config = dataclasses.replace(run_config, model=subagent_model)
     session = open_agent_session(child_id, agents_db_path)
     sessions_to_close.append(session)
     await coordinator.attach_runtime(child_id, session=session)

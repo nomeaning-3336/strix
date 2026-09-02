@@ -271,3 +271,38 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
                         f"(>= {round(_SUBAGENT_BUDGET_RESERVE * 100)}% reserve); stopping this "
                         "sub-agent so the root agent can finish the scan."
                     )
+
+    async def on_tool_start(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        _agent: Agent[dict[str, Any]],
+        tool: Any,
+    ) -> None:
+        """Feed the coordinator's per-agent health tracker (repeated-action signal)."""
+        ctx = context.context if isinstance(context.context, dict) else {}
+        coordinator = ctx.get("coordinator")
+        recorder = getattr(coordinator, "record_tool_start", None)
+        if recorder is None:
+            return
+        try:
+            recorder(ctx.get("agent_id"), getattr(tool, "name", "?"))
+        except Exception:
+            logger.exception("coordinator health record_tool_start failed")
+
+    async def on_tool_end(
+        self,
+        context: RunContextWrapper[dict[str, Any]],
+        _agent: Agent[dict[str, Any]],
+        tool: Any,
+        result: object,
+    ) -> None:
+        """Feed the coordinator's per-agent health tracker (empty-output/stall signal)."""
+        ctx = context.context if isinstance(context.context, dict) else {}
+        coordinator = ctx.get("coordinator")
+        recorder = getattr(coordinator, "record_tool_end", None)
+        if recorder is None:
+            return
+        try:
+            recorder(ctx.get("agent_id"), getattr(tool, "name", "?"), result)
+        except Exception:
+            logger.exception("coordinator health record_tool_end failed")

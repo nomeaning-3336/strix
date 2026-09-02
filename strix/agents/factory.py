@@ -436,6 +436,11 @@ def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
         if isinstance(parsed, dict):
             if "shell" not in parsed:
                 parsed["shell"] = "bash"
+            # Guard against the empty-stdout failure observed on concurrent
+            # non-tty exec (one child got exit-0/empty stdout while a sibling
+            # got normal output): PTY-backed capture is reliable per call, so
+            # default to tty unless the model explicitly opts out.
+            parsed.setdefault("tty", True)
             _apply_shell_output_cap(parsed)
             raw_input = json.dumps(parsed)
         try:

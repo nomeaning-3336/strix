@@ -81,6 +81,28 @@ async def test_wrap_exec_command_preserves_explicit_shell(shell: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_wrap_exec_command_defaults_tty_for_reliable_stdout() -> None:
+    captured: dict[str, str] = {}
+    wrapped = factory._wrap_exec_command(_capturing_exec_tool(captured))
+
+    await wrapped.on_invoke_tool(cast("Any", None), json.dumps({"cmd": "ls /workspace"}))
+
+    assert json.loads(captured["raw_input"])["tty"] is True
+
+
+@pytest.mark.asyncio
+async def test_wrap_exec_command_preserves_explicit_tty_false() -> None:
+    captured: dict[str, str] = {}
+    wrapped = factory._wrap_exec_command(_capturing_exec_tool(captured))
+
+    await wrapped.on_invoke_tool(
+        cast("Any", None), json.dumps({"cmd": "ls /workspace", "tty": False})
+    )
+
+    assert json.loads(captured["raw_input"])["tty"] is False
+
+
+@pytest.mark.asyncio
 async def test_responses_filesystem_custom_tool_output_is_bounded() -> None:
     async def invoke(_ctx: Any, _inp: str) -> str:
         return "line\n" * 50_000

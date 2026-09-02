@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import tempfile
+import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -41,6 +43,43 @@ class AgentRuntime:
     user_wake_required: bool = False
 
 
+@dataclass(slots=True)
+class AgentHealth:
+    """Ephemeral per-agent observability for root supervision ticks.
+
+    Updated synchronously from the SDK tool hooks; never persisted in the
+    resume snapshot (a fresh process re-derives it from new tool activity).
+    """
+
+    last_progress_at: float = 0.0
+    last_progress_tool: str | None = None
+    last_tool: str | None = None
+    consecutive_repeats: int = 0
+    recent_empty_outputs: int = 0
+    tool_errors: int = 0
+    recent_tools: deque[str] = field(default_factory=lambda: deque(maxlen=20))
+
+
+def _tool_output_is_empty(tool_name: str, output: object) -> bool:
+    """Detect tool results that yielded no usable output to the model.
+
+    The SDK shell tools (``exec_command`` / ``write_stdin``) return a framed
+    string ending in ``Output:`` followed by the captured stdout. When stdout
+    capture fails, the tail is empty even though the command ran — the exact
+    failure mode that stranded the OpenFront Server-Protocol-Mapper.
+    """
+    if output is None:
+        return True
+    text = str(output).strip()
+    if not text:
+        return True
+    if tool_name in {"exec_command", "write_stdin"} and "Output:" in str(output):
+        tail = str(output).rsplit("Output:", 1)[1]
+        if not tail.strip():
+            return True
+    return False
+
+
 class AgentCoordinator:
     """Single owner for graph state, SDK runtimes, messages, and resume snapshots."""
 
@@ -55,6 +94,7 @@ class AgentCoordinator:
         self.idle_resume_counts: dict[str, int] = {}
         self.wait_kinds: dict[str, WaitKind] = {}
         self.runtimes: dict[str, AgentRuntime] = {}
+        self.health: dict[str, AgentHealth] = {}
         self._parent_notified: set[str] = set()
         self._lock = asyncio.Lock()
         self._snapshot_path: Path | None = None
@@ -66,6 +106,63 @@ class AgentCoordinator:
 
     def set_snapshot_path(self, path: Path) -> None:
         self._snapshot_path = path
+
+    def record_tool_start(self, agent_id: str, tool_name: str) -> None:
+        """Track tool-call onset for repeated-action detection (sync, hook-fed)."""
+        health = self.health.setdefault(agent_id, AgentHealth())
+        health.recent_tools.append(tool_name)
+        if tool_name == health.last_tool:
+            health.consecutive_repeats += 1
+        else:
+            health.consecutive_repeats = 1
+            health.last_tool = tool_name
+
+    def record_tool_end(
+        self,
+        agent_id: str,
+        tool_name: str,
+        output: object,
+        *,
+        error: bool = False,
+    ) -> None:
+        """Track tool results for empty-output and stall detection (sync, hook-fed)."""
+        health = self.health.setdefault(agent_id, AgentHealth())
+        if error:
+            health.tool_errors += 1
+            return
+        if _tool_output_is_empty(tool_name, output):
+            health.recent_empty_outputs += 1
+        else:
+            health.last_progress_at = time.monotonic()
+            health.last_progress_tool = tool_name
+            health.recent_empty_outputs = 0
+
+    def children_health(self, agent_id: str) -> list[dict[str, Any]]:
+        """Return a health snapshot for each non-terminal child of ``agent_id``."""
+        now = time.monotonic()
+        out: list[dict[str, Any]] = []
+        for child_id, parent in self.parent_of.items():
+            if parent != agent_id:
+                continue
+            status = self.statuses.get(child_id, "unknown")
+            if status not in {"running", "waiting"}:
+                continue
+            health = self.health.get(child_id, AgentHealth())
+            since = int(now - health.last_progress_at) if health.last_progress_at else None
+            out.append(
+                {
+                    "id": child_id,
+                    "name": self.names.get(child_id, child_id),
+                    "status": status,
+                    "seconds_since_progress": since,
+                    "last_progress_tool": health.last_progress_tool,
+                    "repeated_action_count": health.consecutive_repeats,
+                    "empty_output_count": health.recent_empty_outputs,
+                    "tool_errors": health.tool_errors,
+                    "recent_tools": list(health.recent_tools)[-8:],
+                }
+            )
+        return out
 
     def mark_shutting_down(self) -> None:
         self.is_shutting_down = True
