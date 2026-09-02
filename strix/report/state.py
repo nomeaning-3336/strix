@@ -14,6 +14,15 @@ from strix.config import codex
 from strix.config.loader import load_settings
 from strix.core.paths import run_dir_for, runtime_state_dir
 from strix.report.coverage import write_coverage
+from strix.report.finding_state import (
+    ALLOWED_TRANSITIONS,
+    FINDING_STATES,
+    STATE_REASON_FIELD,
+    active_reports,
+    normalize_state,
+    state_of,
+    transition_allowed,
+)
 from strix.report.pricing import resolve_litellm_model
 from strix.report.sarif import write_sarif
 from strix.report.writer import (
@@ -320,6 +329,11 @@ class ReportState:
                     r["finding_class"] = (
                         "dependency_cve" if r.get("dependency_metadata") else "dynamic"
                     )
+                # A finding written before lifecycle states existed (or retracted
+                # by an ad-hoc title prefix / `retracted` flag) gets its state
+                # canonicalised once, so every later consumer agrees on it.
+                if normalize_state(r.get("state")) is None:
+                    r["state"] = state_of(r)
                 title = r.get("title")
                 stale_md = False
                 if isinstance(title, str):
@@ -366,9 +380,16 @@ class ReportState:
         dependency_metadata: dict[str, str] | None = None,
         agent_id: str | None = None,
         agent_name: str | None = None,
+        state: str | None = None,
         _duplicate_guard: tuple[frozenset[str], str] | None = None,
     ) -> str:
         """Append a new report and return its id.
+
+        ``state`` is the finding's lifecycle state (see
+        :mod:`strix.report.finding_state`); it defaults to ``verified`` because a
+        report filed through the reporting tools carries working evidence. A
+        finding that later turns out false is *retracted* through
+        :meth:`set_finding_state` — never silently edited down.
 
         When ``_duplicate_guard`` is ``(known_ids, fingerprint)`` the commit is
         atomic against the deterministic re-check: ``known_ids`` are the report
@@ -453,6 +474,7 @@ class ReportState:
             if fix_pr_body:
                 report["fix_pr_body"] = fix_pr_body.strip()
             report["finding_class"] = (finding_class or "dynamic").strip().lower()
+            report["state"] = normalize_state(state) or "verified"
             if dependency_metadata:
                 report["dependency_metadata"] = dependency_metadata
             if agent_id:
@@ -565,9 +587,112 @@ class ReportState:
         self.save_run_data()
         return report
 
+    def set_finding_state(
+        self,
+        report_id: str,
+        new_state: str,
+        *,
+        reason: str,
+        changed_by_agent_id: str | None = None,
+        changed_by_agent_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Move a finding through its lifecycle, recording why and by whom.
+
+        Retracting a finding keeps its evidence, PoC, and remediation intact for
+        audit — what changes is that it stops counting as a vulnerability, stops
+        appearing in SARIF/CSV/the customer report, and stops being rendered as
+        actionable guidance. See :mod:`strix.report.finding_state` for the state
+        set and the two canonical regression cases (false security premise →
+        rejected, incomplete exploitation evidence → open proof gap, not
+        verified).
+
+        ``reason`` is mandatory: a finding leaving the active set without a
+        documented reason is exactly the bug this replaces.
+
+        Raises ``ValueError`` for an unknown state or a disallowed transition,
+        and returns ``None`` when the finding already sits in ``new_state``.
+        """
+        state = normalize_state(new_state)
+        if state is None:
+            raise ValueError(
+                f"Invalid finding state {new_state!r}. Must be one of: "
+                f"{sorted(FINDING_STATES)}"
+            )
+        reason_text = (reason or "").strip()
+        if not reason_text:
+            raise ValueError("A lifecycle change needs a reason.")
+
+        with self._reports_lock:
+            report = next(
+                (r for r in self.vulnerability_reports if r.get("id") == report_id), None
+            )
+            if report is None:
+                logger.warning("cannot change the state of unknown report %s", report_id)
+                return None
+
+            current = state_of(report)
+            if current == state:
+                logger.info("report %s is already %s; keeping it as is", report_id, state)
+                return None
+            if not transition_allowed(current, state):
+                raise ValueError(
+                    f"Cannot move report {report_id} from {current} to {state}. "
+                    f"Allowed next states: {sorted(ALLOWED_TRANSITIONS.get(current, ()))}"
+                )
+
+            entry: dict[str, Any] = {
+                "timestamp": datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "fields": ["state"],
+                "reason": reason_text[:500],
+                "previous_state": current,
+                "state": state,
+            }
+            if changed_by_agent_id:
+                entry["agent_id"] = changed_by_agent_id
+            if changed_by_agent_name:
+                entry["agent_name"] = changed_by_agent_name
+
+            history = report.get("update_history")
+            history = [e for e in history if isinstance(e, dict)] if isinstance(history, list) else []
+            history.append(entry)
+
+            report["update_history"] = history
+            report["state"] = state
+            report[STATE_REASON_FIELD] = reason_text[:500]
+            report["state_changed_at"] = entry["timestamp"]
+            if changed_by_agent_id:
+                report["state_changed_by_agent_id"] = changed_by_agent_id
+            if changed_by_agent_name:
+                report["state_changed_by_agent_name"] = changed_by_agent_name
+            # Leave the active set is a rendering change as much as a data
+            # change: the markdown on disk must stop presenting the archived
+            # PoC/remediation as actionable.
+            self._saved_vuln_ids.discard(report_id)
+
+            logger.info("Report %s state: %s → %s", report_id, current, state)
+
+            if self.vulnerability_updated_callback:
+                self.vulnerability_updated_callback(report)
+
+            self.save_run_data()
+            return report
+
     def get_existing_vulnerabilities(self) -> list[dict[str, Any]]:
         with self._reports_lock:
             return list(self.vulnerability_reports)
+
+    def get_active_vulnerabilities(self) -> list[dict[str, Any]]:
+        """Only the findings that currently count as vulnerabilities."""
+        with self._reports_lock:
+            return active_reports(self.vulnerability_reports)
+
+    def get_state_counts(self) -> dict[str, int]:
+        """Per-state finding counts, for summaries that must not double-count."""
+        counts: dict[str, int] = dict.fromkeys(sorted(FINDING_STATES), 0)
+        with self._reports_lock:
+            for report in self.vulnerability_reports:
+                counts[state_of(report)] = counts[state_of(report)] + 1
+        return counts
 
     def record_sdk_usage(
         self,

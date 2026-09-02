@@ -17,12 +17,75 @@ from pygments.lexers.special import TextLexer
 from pygments.util import ClassNotFound
 
 from strix.core.paths import run_record_path
+from strix.report.finding_state import (
+    PROOF_GAP,
+    REJECTED,
+    RETRACTED,
+    active_reports,
+    state_of,
+    state_reason,
+)
 
 
 if TYPE_CHECKING:
     from pygments.lexer import Lexer
 
 logger = logging.getLogger(__name__)
+
+_STATE_HEADINGS = {
+    RETRACTED: "RETRACTED — NOT A VULNERABILITY",
+    REJECTED: "REJECTED — NOT PROMOTED TO A FINDING",
+    PROOF_GAP: "OPEN PROOF GAP — NOT DEMONSTRATED",
+    "candidate": "CANDIDATE — NOT YET VERIFIED",
+}
+
+_STATE_NOTES = {
+    RETRACTED: (
+        "This finding was retracted after it was filed. The evidence, Proof of "
+        "Concept and remediation below are kept verbatim for audit history only — "
+        "they are superseded and must not be acted on."
+    ),
+    REJECTED: (
+        "This candidate was rejected and never counted as a vulnerability. The "
+        "material below is retained for audit history only."
+    ),
+    PROOF_GAP: (
+        "The invariant discrepancy described below is real but no exploitation "
+        "impact was demonstrated. It is recorded as an open proof gap — it must "
+        "not be treated as a verified vulnerability."
+    ),
+    "candidate": (
+        "This finding is filed but not yet verified. Treat the material below as "
+        "unconfirmed until a verifier promotes it."
+    ),
+}
+
+
+def state_banner(report: dict[str, Any]) -> list[str]:
+    """Markdown lines framing a non-active finding's retained material.
+
+    A retracted finding keeps its PoC and remediation on disk, but nothing may
+    render them as actionable guidance: the banner states the finding's status,
+    the reason, and who recorded it.
+    """
+    state = state_of(report)
+    heading = _STATE_HEADINGS.get(state)
+    if heading is None:
+        return []
+
+    lines = ["", f"> **{heading}**", ">"]
+    reason = state_reason(report)
+    if reason:
+        lines.append(f"> **Reason:** {reason}")
+    actor = report.get("state_changed_by_agent_name") or report.get("state_changed_by_agent_id")
+    if actor:
+        lines.append(f"> **Recorded by:** {actor}")
+    if report.get("state_changed_at"):
+        lines.append(f"> **When:** {report['state_changed_at']}")
+    lines.append(">")
+    lines.append(f"> {_STATE_NOTES[state]}")
+    lines.append("")
+    return lines
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
@@ -163,7 +226,10 @@ def write_vulnerabilities(
         saved_vuln_ids.add(report["id"])
 
     sorted_reports = sorted(
-        vulnerability_reports,
+        # Retracted/rejected findings are not vulnerabilities: the CSV index is
+        # a customer-facing artifact, so it lists active findings only. The full
+        # history (including retracted evidence) stays in vulnerabilities.json.
+        active_reports(vulnerability_reports),
         key=lambda r: (_SEVERITY_ORDER.get(r["severity"], 5), r["timestamp"]),
     )
     csv_path = run_dir / "vulnerabilities.csv"
@@ -227,6 +293,7 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
         f"**Severity:** {report.get('severity', 'unknown').upper()}",
         f"**Found:** {report.get('timestamp', 'unknown')}",
     ]
+    lines.extend(state_banner(report))
 
     dep_meta = report.get("dependency_metadata") or {}
     metadata: list[tuple[str, Any]] = [

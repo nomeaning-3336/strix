@@ -1409,6 +1409,154 @@ _DEP_SEVERITY_FROM_CVSS = {
 }
 
 
+def _do_set_finding_state(  # noqa: PLR0911 - validation branches return distinct errors
+    *,
+    report_id: str,
+    new_state: str,
+    reason: str,
+    agent_id: str | None = None,
+    agent_name: str | None = None,
+) -> dict[str, Any]:
+    """Apply a finding lifecycle change, returning a structured result dict."""
+    from strix.report.finding_state import FINDING_STATES, state_of
+    from strix.report.state import get_global_report_state
+
+    state = new_state.strip().lower()
+    reason_text = (reason or "").strip()
+    errors: list[str] = []
+    if state not in FINDING_STATES:
+        errors.append(
+            f"Invalid state {new_state!r}. Must be one of: {sorted(FINDING_STATES)}"
+        )
+    if not reason_text:
+        errors.append("reason is required: a lifecycle change must be documented")
+    if errors:
+        return {"success": False, "error": "Validation failed", "errors": errors}
+
+    report_state = get_global_report_state()
+    if report_state is None:
+        return {
+            "success": False,
+            "error": "No report state available",
+        }
+
+    existing = next(
+        (r for r in report_state.vulnerability_reports if r.get("id") == report_id), None
+    )
+    if existing is None:
+        return {
+            "success": False,
+            "error": f"Report with id '{report_id}' not found",
+        }
+
+    previous_state = state_of(existing)
+    if previous_state == state:
+        return {
+            "success": True,
+            "action": "no_change",
+            "message": f"Report '{report_id}' is already {state} — nothing changed.",
+            "report_id": report_id,
+            "state": state,
+        }
+
+    try:
+        updated = report_state.set_finding_state(
+            report_id,
+            state,
+            reason=reason_text,
+            changed_by_agent_id=agent_id,
+            changed_by_agent_name=agent_name,
+        )
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+    if updated is None:
+        return {
+            "success": False,
+            "error": f"Report '{report_id}' could not change state",
+        }
+
+    guidance = (
+        "It no longer counts toward totals or appears in SARIF/CSV/customer output. "
+        "Do not re-file it."
+        if state in ("retracted", "rejected", "proof_gap")
+        else "Reopened: file new evidence with update_vulnerability_report, then "
+        "promote only what is demonstrated."
+    )
+    logger.info(
+        "Finding %s state changed by agent %s: %s -> %s (%s)",
+        report_id,
+        agent_id or agent_name or "unknown",
+        previous_state,
+        state,
+        reason_text[:80],
+    )
+    return {
+        "success": True,
+        "action": "state_changed",
+        "message": f"Report '{report_id}' moved from {previous_state} to {state}. {guidance}",
+        "report_id": report_id,
+        "previous_state": previous_state,
+        "state": state,
+        "state_reason": reason_text,
+    }
+
+
+@function_tool(timeout=30, strict_mode=False)
+async def set_finding_state(
+    ctx: RunContextWrapper,
+    report_id: str,
+    new_state: str,
+    reason: str,
+) -> str:
+    """Change a finding's lifecycle state — retract, reject, record a proof gap, or reopen.
+
+    Every vulnerability report has a lifecycle state:
+
+      verified   (default) — a demonstrated vulnerability that counts
+      candidate           — filed but not yet confirmed
+      retracted           — was filed and counted, later found false
+      rejected            — never counted: the claimed prerequisite does not exist
+      proof_gap           — a real invariant discrepancy, but no demonstrated impact
+
+    **When to use which** (use this tool instead of editing titles with
+    ``[RETRACTED]`` prefixes — the prefix hack leaves the stale PoC/remediation
+    in place and the finding still counts):
+
+    - The security mechanic the finding depends on does NOT exist (e.g. a claimed
+      fog-of-war bypass where the target has no visibility boundary) →
+      ``rejected``, reason "no such invariant: NON-ISSUE" (CASE A). If it was
+      already filed and counted before you established this, use ``retracted``
+      instead.
+    - The finding was filed but its evidence does not demonstrate exploitation
+      impact, even though an invariant discrepancy is real → ``proof_gap``
+      (CASE B). Never leave such a finding ``verified`` with a downgraded
+      severity.
+    - A filed finding is now known false → ``retracted`` with the concrete
+      reason; its evidence stays on record but stops counting and stops being
+      rendered as actionable.
+    - Reopening a retracted/rejected/proof_gap finding with new evidence →
+      ``verified`` (or ``candidate`` when still unconfirmed).
+
+    Allowed transitions: verified → retracted | candidate | proof_gap;
+    candidate → verified | rejected | proof_gap; any inactive state →
+    verified | candidate. ``reason`` is mandatory and is recorded with your
+    agent identity and a timestamp; a finding leaving the active set no longer
+    counts toward totals and no longer appears in SARIF, the CSV index, or the
+    customer report. Use ``get_report`` to read the current state first.
+    """
+    agent_id, agent_name = _caller_identity(ctx)
+    result = await asyncio.to_thread(
+        _do_set_finding_state,
+        report_id=report_id,
+        new_state=new_state,
+        reason=reason,
+        agent_id=agent_id,
+        agent_name=agent_name,
+    )
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
 def _dependency_severity(advisory_cvss: float | None) -> tuple[float, str]:
     if advisory_cvss is None:
         return 0.0, "info"
@@ -2101,9 +2249,12 @@ def _mark_authorship(
 def _to_report_summary_entry(
     report: dict[str, Any], caller_agent_id: str | None = None
 ) -> dict[str, Any]:
+    from strix.report.finding_state import state_of
+
     entry = {
         field: report[field] for field in _REPORT_SUMMARY_FIELDS if report.get(field) is not None
     }
+    entry["state"] = state_of(report)
     description = str(report.get("description", "")).strip()
     if description:
         if len(description) > _REPORT_DESCRIPTION_PREVIEW_CHARS:
@@ -2155,6 +2306,7 @@ def _do_list_reports(
     if errors:
         return {"success": False, "error": "Validation failed", "errors": errors}
 
+    from strix.report.finding_state import active_reports
     from strix.report.state import get_global_report_state
 
     report_state = get_global_report_state()
@@ -2193,7 +2345,9 @@ def _do_list_reports(
         "reports": reports,
         "filtered_count": len(reports),
         "total_count": len(all_reports),
-        "severity_counts": _severity_counts(all_reports),
+        # Retracted/rejected/proof_gap findings are not vulnerabilities; the
+        # histogram an orchestrator reasons over must not count them.
+        "severity_counts": _severity_counts(active_reports(all_reports)),
     }
 
 

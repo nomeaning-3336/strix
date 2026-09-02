@@ -19,6 +19,7 @@ from rich.panel import Panel
 from rich.text import Text
 
 from strix.config import load_settings
+from strix.report.finding_state import active_reports
 from strix.utils.api_spec import detect_spec_format
 
 
@@ -226,15 +227,37 @@ def format_vulnerability_report(report: dict[str, Any]) -> Text:  # noqa: PLR091
     return text
 
 
+def _severity_counts(report_state: Any) -> dict[str, int]:
+    """Severity histogram over active findings, with the count under "total".
+
+    Retracted and rejected findings are excluded: a summary that counted them
+    would report vulnerabilities the scan does not claim.
+    """
+    severity_counts: dict[str, int] = {
+        "total": 0,
+        "critical": 0,
+        "high": 0,
+        "medium": 0,
+        "low": 0,
+        "info": 0,
+    }
+    reports = getattr(report_state, "vulnerability_reports", None) or []
+    for report in active_reports(reports):
+        severity_counts["total"] += 1
+        severity = str(report.get("severity", "")).lower()
+        if severity in severity_counts:
+            severity_counts[severity] += 1
+    return severity_counts
+
+
 def _build_vulnerability_stats(stats_text: Text, report_state: Any) -> None:
-    vuln_count = len(report_state.vulnerability_reports)
+    # Only findings that are still active count: a retracted or rejected
+    # finding is not a vulnerability, and the summary must not count it.
+    counts = _severity_counts(report_state)
+    vuln_count = counts.pop("total")
 
     if vuln_count > 0:
-        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-        for report in report_state.vulnerability_reports:
-            severity = report.get("severity", "").lower()
-            if severity in severity_counts:
-                severity_counts[severity] += 1
+        severity_counts = counts
 
         stats_text.append("Vulnerabilities  ", style="bold red")
 
@@ -390,16 +413,13 @@ def build_live_stats_text(report_state: Any) -> Text:
         stats_text.append("ChatGPT subscription", style="#22c55e")
     stats_text.append("\n")
 
-    vuln_count = len(report_state.vulnerability_reports)
+    counts = _severity_counts(report_state)
+    vuln_count = counts.pop("total")
     stats_text.append("Vulnerabilities ", style="dim")
     stats_text.append(f"{vuln_count}", style="white")
     stats_text.append("\n")
     if vuln_count > 0:
-        severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-        for report in report_state.vulnerability_reports:
-            severity = report.get("severity", "").lower()
-            if severity in severity_counts:
-                severity_counts[severity] += 1
+        severity_counts = counts
 
         severity_parts = []
         for severity in ["critical", "high", "medium", "low", "info"]:

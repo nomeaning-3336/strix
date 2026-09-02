@@ -52,6 +52,7 @@ from strix.tools.reporting.tool import (
     create_vulnerability_report,
     get_report,
     list_reports,
+    set_finding_state,
     update_vulnerability_report,
 )
 from strix.tools.respond.tool import respond_to_user
@@ -587,6 +588,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     create_vulnerability_report,
     create_dependency_report,
     update_vulnerability_report,
+    set_finding_state,
     list_reports,
     get_report,
     list_requests,

@@ -519,8 +519,13 @@ def main() -> None:
 
     if args.non_interactive:
         report_state = get_global_report_state()
-        if report_state and report_state.vulnerability_reports:
-            sys.exit(2)
+        if report_state:
+            from strix.report.finding_state import active_reports
+
+            # Exit code 2 means vulnerabilities found — retracted/rejected
+            # findings are not vulnerabilities.
+            if active_reports(report_state.vulnerability_reports):
+                sys.exit(2)
 
 
 if __name__ == "__main__":

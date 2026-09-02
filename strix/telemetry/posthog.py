@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any
 import requests
 
 from strix.config import load_settings
+from strix.report.finding_state import active_reports
 from strix.telemetry._common import (
     SEND_TIMEOUT,
     SESSION_ID,
@@ -103,8 +104,11 @@ def end(report_state: "ReportState", exit_reason: str = "completed") -> None:
     if report_state.scan_ended_exit_reason is None:
         report_state.scan_ended_exit_reason = exit_reason
 
+    # Retracted/rejected findings are not vulnerabilities; telemetry must not
+    # report the scan as ending with findings it itself walked back.
+    active = active_reports(report_state.vulnerability_reports)
     vulnerabilities_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for v in report_state.vulnerability_reports:
+    for v in active:
         sev = v.get("severity", "info").lower()
         if sev in vulnerabilities_counts:
             vulnerabilities_counts[sev] += 1
@@ -132,7 +136,7 @@ def end(report_state: "ReportState", exit_reason: str = "completed") -> None:
             "auth_mode": report_state.run_record.get("auth_mode") or "api_key",
             "exit_reason": report_state.scan_ended_exit_reason,
             "duration_seconds": round(duration),
-            "vulnerabilities_total": len(report_state.vulnerability_reports),
+            "vulnerabilities_total": len(active),
             **{f"vulnerabilities_{k}": v for k, v in vulnerabilities_counts.items()},
             **llm_props,
         },

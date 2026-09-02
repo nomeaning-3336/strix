@@ -63,7 +63,11 @@ def _do_finish(
             technical_analysis=technical_analysis.strip(),
             recommendations=recommendations.strip(),
         )
-        vuln_count = len(report_state.vulnerability_reports)
+        from strix.report.finding_state import active_reports
+
+        # A retracted/rejected finding is not a vulnerability: the scan must not
+        # end "with N vulnerabilities" for findings it itself walked back.
+        vuln_count = len(active_reports(report_state.vulnerability_reports))
         coverage_summary = _coverage_summary(agent_graph)
     except (ImportError, AttributeError) as e:
         logger.exception("finish_scan persistence failed")

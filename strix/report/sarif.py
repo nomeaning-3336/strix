@@ -56,6 +56,8 @@ import re
 from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
+from strix.report.finding_state import active_reports
+
 
 logger = logging.getLogger(__name__)
 
@@ -233,7 +235,7 @@ def build_sarif_report(
     synthetic_location_count = 0
     dropped_unsafe_location_findings: list[dict[str, Any]] = []
 
-    for report in vulnerability_reports:
+    for report in active_reports(vulnerability_reports):
         locations, is_synthetic, dropped_location_count = _build_locations(report)
         if is_synthetic:
             synthetic_location_count += 1
