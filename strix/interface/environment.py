@@ -37,7 +37,7 @@ def validate_environment() -> None:
         logger.info("Environment OK (ChatGPT subscription)")
         return
 
-    if not settings.llm.model:
+    if not (settings.llm.model or settings.llm.root_model):
         missing_required_vars.append("STRIX_LLM")
 
     if not settings.llm.api_key:
@@ -70,8 +70,10 @@ def validate_environment() -> None:
                 error_text.append("• ", style="white")
                 error_text.append("STRIX_LLM", style="bold cyan")
                 error_text.append(
-                    " - Model name to use (e.g., 'openai/gpt-5.4' or "
-                    "'anthropic/claude-opus-4-7')\n",
+                    " (or STRIX_ROOT_LLM) - Model name to use "
+                    "(e.g., 'openai/gpt-5.4' or 'anthropic/claude-opus-4-7'); "
+                    "set STRIX_ROOT_LLM + STRIX_SUBAGENT_LLM to route the root and "
+                    "subagents to different models\n",
                     style="white",
                 )
 
