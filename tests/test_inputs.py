@@ -311,8 +311,11 @@ def test_make_model_settings_forces_required_for_anyllm_routed_openai_model() ->
     assert settings.tool_choice == "required"
 
 
-def test_make_model_settings_disables_parallel_tool_calls_by_default() -> None:
-    assert make_model_settings("none", model_name="gpt-4o").parallel_tool_calls is False
+def test_make_model_settings_enables_parallel_tool_calls_by_default() -> None:
+    # WideTurn: auto-enable for tool-bearing calls unless STRIX_PARALLEL_TOOLS=0;
+    # mutating/unknown tools are kept serial at execution time by their policy
+    # locks, so widening the turn cannot interleave state changes.
+    assert make_model_settings("none", model_name="gpt-4o").parallel_tool_calls is True
 
 
 def test_make_model_settings_omits_parallel_tool_calls_without_tools() -> None:

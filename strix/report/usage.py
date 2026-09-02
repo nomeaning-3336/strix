@@ -23,6 +23,8 @@ class LLMUsageLedger:
         self._observed_cost = 0.0
         self._estimated_cost = 0.0
         self._has_observed_cost = False
+        self._cached_input = 0
+        self._uncached_input = 0
         # When True, tokens are still tracked but cost stays $0 — the run is on a
         # model subscription, so there is no metered per-token charge to report.
         self.zero_cost = False
@@ -41,6 +43,13 @@ class LLMUsageLedger:
         normalized_agent_id = str(agent_id or "unknown")
         self._total_usage.add(usage)
         self._agent_usage.setdefault(normalized_agent_id, Usage()).add(usage)
+
+        # Cache accounting: prompt-cache reuse is what makes wide-but-short
+        # contexts cheap, so the run record must be able to report the ratio.
+        cached = cached_input_tokens(usage)
+        self._cached_input += cached
+        input_tokens = max(0, int(getattr(usage, "input_tokens", 0) or 0))
+        self._uncached_input += max(0, input_tokens - cached)
 
         metadata = self._agent_metadata.setdefault(normalized_agent_id, {})
         if agent_name:
@@ -71,6 +80,12 @@ class LLMUsageLedger:
     def to_record(self) -> dict[str, Any]:
         record = serialize_usage(self._total_usage)
         record["cost"] = self.total_cost
+        record["cached_input_tokens"] = self._cached_input
+        record["uncached_input_tokens"] = self._uncached_input
+        total_prompt = self._cached_input + self._uncached_input
+        record["cache_ratio"] = (
+            round(self._cached_input / total_prompt, 4) if total_prompt > 0 else 0.0
+        )
         record["agents"] = []
 
         agent_tokens = {aid: _resolve_total_tokens(u) for aid, u in self._agent_usage.items()}
@@ -115,6 +130,8 @@ class LLMUsageLedger:
         persisted_cost = _float_or_zero(raw_usage.get("cost"))
         self._observed_cost = persisted_cost
         self._estimated_cost = persisted_cost
+        self._cached_input = _int_or_zero(raw_usage.get("cached_input_tokens"))
+        self._uncached_input = _int_or_zero(raw_usage.get("uncached_input_tokens"))
 
         for raw_agent in raw_usage.get("agents") or []:
             if not isinstance(raw_agent, dict):
@@ -155,6 +172,27 @@ def _usage_has_activity(usage: Usage) -> bool:
         or usage.total_tokens
         or usage.request_usage_entries
     )
+
+
+def cached_input_tokens(usage: Any) -> int:
+    """Cached prompt tokens reported by a Usage object (entries or top level).
+
+    Providers report prompt-cache hits under ``input_tokens_details.cached_tokens``
+    (OpenAI shape) on each request; an aggregate Usage may carry per-request
+    entries. Prefer the per-request entries when present — the aggregate
+    top-level detail is only the last request's. Never raises: any shape that
+    lacks cache reporting counts as zero.
+    """
+    entries = getattr(usage, "request_usage_entries", None)
+    if entries:
+        total = 0
+        for entry in entries:
+            if entry is usage:
+                continue
+            total += cached_input_tokens(entry)
+        return total
+    details = _details_to_dict(getattr(usage, "input_tokens_details", None))
+    return _int_or_zero(details.get("cached_tokens"))
 
 
 def _estimate_litellm_cost(usage: Usage, model: str | None) -> float | None:

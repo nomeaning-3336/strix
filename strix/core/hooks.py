@@ -11,6 +11,7 @@ from agents.lifecycle import RunHooks
 
 from strix.core.agents import action_fingerprint
 from strix.report.state import get_global_report_state
+from strix.report.usage import cached_input_tokens
 
 
 if TYPE_CHECKING:
@@ -57,6 +58,41 @@ _TURN_WARN_BANDS: tuple[float, ...] = (0.70, 0.85, 0.95)
 _ROOT_BUDGET_WARN_BANDS: tuple[float, ...] = (0.70, 0.85, 0.95)
 _SUBAGENT_BUDGET_WARN_BANDS: tuple[float, ...] = (0.75, 0.80, 0.85)
 _SUBAGENT_BUDGET_RESERVE = 0.90
+
+
+def _wide_usage_counts(response: Any) -> tuple[int, int, int]:
+    """(input_tokens, cached_input_tokens, output_tokens) from a model response.
+
+    Never raises: cache/count reporting varies by provider and shape.
+    """
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0, 0, 0
+    input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    cached = cached_input_tokens(usage)
+    output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    return input_tokens, cached, output_tokens
+
+
+def record_wide_usage(context: Any, response: Any) -> None:
+    """Feed per-agent wide-turn token/cache counters from a completed turn."""
+    ctx = context.context if isinstance(context.context, dict) else {}
+    agent_id = ctx.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        return
+    usage_recorder = getattr(ctx.get("coordinator"), "record_llm_usage", None)
+    if usage_recorder is None:
+        return
+    try:
+        input_tokens, cached, output_tokens = _wide_usage_counts(response)
+        usage_recorder(
+            agent_id,
+            input_tokens=input_tokens,
+            cached_input_tokens=cached,
+            output_tokens=output_tokens,
+        )
+    except Exception:
+        logger.exception("coordinator wide-turn usage recording failed")
 
 
 class BudgetExceededError(RuntimeError):
@@ -272,6 +308,7 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
                 marker(ctx.get("agent_id"))
             except Exception:
                 logger.exception("coordinator health mark_llm_end failed")
+        record_wide_usage(context, response)
         report_state = get_global_report_state()
         if report_state is None:
             return

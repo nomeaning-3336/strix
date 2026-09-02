@@ -49,6 +49,10 @@ class AgentHealth:
 
     Updated synchronously from the SDK tool hooks; never persisted in the
     resume snapshot (a fresh process re-derives it from new tool activity).
+
+    The wide-turn counters (model_requests, tool_calls, tool_groups, widths,
+    timings, cache tokens) answer "is continuing this agent worth another
+    turn": requests and wall time spent versus evidence acquired.
     """
 
     last_progress_at: float = 0.0
@@ -59,6 +63,20 @@ class AgentHealth:
     tool_errors: int = 0
     recent_tools: deque[str] = field(default_factory=lambda: deque(maxlen=20))
     llm_started_at: float | None = None
+    # --- wide-turn efficiency counters (in-process, per agent) ---
+    model_requests: int = 0
+    tool_calls: int = 0
+    tool_groups: int = 0
+    width_sum: int = 0
+    tools_serial_ms: float = 0.0
+    tools_wall_ms: float = 0.0
+    input_tokens: int = 0
+    cached_input_tokens: int = 0
+    output_tokens: int = 0
+    _tool_group_open: bool = False
+    _group_wall_start: float = 0.0
+    _group_width: int = 0
+    _open_tools: list[tuple[str, float]] = field(default_factory=list)
 
 
 def action_fingerprint(tool_name: str, arguments: Any) -> str:
@@ -136,7 +154,10 @@ class AgentCoordinator:
 
         ``action_key`` fingerprints the exact action (tool name + normalized
         arguments), so consecutive identical *commands* count as repeats while
-        a stream of different commands on the same tool does not.
+        a stream of different commands on the same tool does not. Also drives
+        the wide-turn group accounting: every tool call between two model turns
+        belongs to one "tool group" whose width, serial-equivalent time, and
+        wall time feed the efficiency telemetry.
         """
         health = self.health.setdefault(agent_id, AgentHealth())
         health.recent_tools.append(tool_name)
@@ -145,6 +166,15 @@ class AgentCoordinator:
         else:
             health.consecutive_repeats = 1
             health.last_action_key = action_key
+
+        now = time.monotonic()
+        if not health._tool_group_open:
+            health._tool_group_open = True
+            health._group_wall_start = now
+            health._group_width = 0
+        health._group_width += 1
+        health.tool_calls += 1
+        health._open_tools.append((tool_name, now))
 
     def record_tool_end(
         self,
@@ -158,13 +188,91 @@ class AgentCoordinator:
         health = self.health.setdefault(agent_id, AgentHealth())
         if error:
             health.tool_errors += 1
-            return
-        if _tool_output_is_empty(tool_name, output):
+        elif _tool_output_is_empty(tool_name, output):
             health.recent_empty_outputs += 1
         else:
             health.last_progress_at = time.monotonic()
             health.last_progress_tool = tool_name
             health.recent_empty_outputs = 0
+
+        # Close this call's open start (same-name LIFO; falls back to the most
+        # recent open call) and charge its duration to the serial-equivalent
+        # time — the time a narrow one-call-at-a-time loop would have spent.
+        now = time.monotonic()
+        for index in range(len(health._open_tools) - 1, -1, -1):
+            if health._open_tools[index][0] == tool_name:
+                start = health._open_tools.pop(index)[1]
+                break
+        else:
+            if health._open_tools:
+                start = health._open_tools.pop()[1]
+            else:
+                return
+        health.tools_serial_ms += (now - start) * 1000.0
+
+    def record_llm_usage(
+        self,
+        agent_id: str,
+        *,
+        input_tokens: int,
+        cached_input_tokens: int,
+        output_tokens: int,
+    ) -> None:
+        """Accumulate per-agent token/cache totals (sync, fed from llm_end)."""
+        health = self.health.setdefault(agent_id, AgentHealth())
+        health.input_tokens += max(0, int(input_tokens or 0))
+        health.cached_input_tokens += max(0, int(cached_input_tokens or 0))
+        health.output_tokens += max(0, int(output_tokens or 0))
+
+    @staticmethod
+    def _close_tool_group(health: AgentHealth) -> None:
+        if not health._tool_group_open:
+            return
+        now = time.monotonic()
+        health.tools_wall_ms += (now - health._group_wall_start) * 1000.0
+        health.tool_groups += 1
+        health.width_sum += health._group_width
+        health._tool_group_open = False
+        health._group_width = 0
+        health._group_wall_start = 0.0
+        health._open_tools.clear()
+
+    def _counters(self, health: AgentHealth | None) -> dict[str, Any]:
+        """Wide-turn efficiency counters for a health record (or empty set)."""
+        if health is None:
+            return {
+                "model_requests": 0,
+                "tool_calls": 0,
+                "tool_groups": 0,
+                "avg_tool_width": None,
+                "tools_serial_ms": 0,
+                "tools_wall_ms": 0,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "output_tokens": 0,
+                "cache_ratio": None,
+            }
+        uncached = max(0, health.input_tokens - health.cached_input_tokens)
+        return {
+            "model_requests": health.model_requests,
+            "tool_calls": health.tool_calls,
+            "tool_groups": health.tool_groups,
+            "avg_tool_width": (
+                round(health.width_sum / health.tool_groups, 2)
+                if health.tool_groups
+                else None
+            ),
+            "tools_serial_ms": round(health.tools_serial_ms),
+            "tools_wall_ms": round(health.tools_wall_ms),
+            "input_tokens": health.input_tokens,
+            "cached_input_tokens": health.cached_input_tokens,
+            "output_tokens": health.output_tokens,
+            "cache_ratio": (
+                round(health.cached_input_tokens / (health.cached_input_tokens + uncached), 4)
+                if (health.cached_input_tokens + uncached) > 0
+                else None
+            ),
+        }
 
     def children_health(self, agent_id: str) -> list[dict[str, Any]]:
         """Return a health snapshot for each non-terminal child of ``agent_id``."""
@@ -194,6 +302,7 @@ class AgentCoordinator:
                     "recent_tools": list(health.recent_tools)[-8:],
                     "llm_in_flight": in_flight is not None,
                     "in_flight_seconds": in_flight,
+                    **self._counters(health),
                 }
             )
         return out
@@ -210,10 +319,13 @@ class AgentCoordinator:
             health.llm_started_at = time.monotonic()
 
     def mark_llm_end(self, agent_id: str) -> None:
-        """Clear the in-flight marker once the agent's model turn completes."""
+        """Close a model turn: clear in-flight, count the request, close its
+        tool group (wall time for the group spans turn-start to turn-end)."""
         health = self.health.get(agent_id)
         if health is not None:
             health.llm_started_at = None
+            health.model_requests += 1
+            self._close_tool_group(health)
 
     def runtime_snapshot(self) -> dict[str, dict[str, Any]]:
         """Ephemeral per-agent runtime telemetry for the live viewer.
@@ -233,6 +345,7 @@ class AgentCoordinator:
                 "status": status,
                 "llm_in_flight": in_flight is not None,
                 "in_flight_seconds": in_flight,
+                **self._counters(health),
             }
         return out
 

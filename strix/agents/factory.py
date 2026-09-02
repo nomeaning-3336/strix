@@ -18,6 +18,12 @@ from pydantic import ValidationError
 
 from strix.agents.prompt import render_system_prompt
 from strix.config import load_settings
+from strix.core.tool_policy import (
+    is_parallel_safe,
+    serial_group_for,
+    serialized,
+    wide_turn_guidance,
+)
 from strix.tools.agents_graph.tools import (
     agent_finish,
     create_agent,
@@ -348,23 +354,31 @@ def _configure_filesystem_tools(
     for name, tool in vars(toolset).items():
         if chat_completions:
             if isinstance(tool, CustomTool):
-                setattr(toolset, name, _custom_tool_as_function_tool(tool))
+                setattr(
+                    toolset,
+                    name,
+                    _with_execution_serialization(_custom_tool_as_function_tool(tool)),
+                )
             elif isinstance(tool, FunctionTool):
                 setattr(
                     toolset,
                     name,
-                    _function_tool_with_error_result(
-                        _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                    _with_execution_serialization(
+                        _function_tool_with_error_result(
+                            _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                        )
                     ),
                 )
         elif isinstance(tool, CustomTool):
-            setattr(toolset, name, _bound_custom_tool(tool))
+            setattr(toolset, name, _with_execution_serialization(_bound_custom_tool(tool)))
         elif isinstance(tool, FunctionTool):
             setattr(
                 toolset,
                 name,
-                _with_bounded_result(
-                    _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                _with_execution_serialization(
+                    _with_bounded_result(
+                        _with_strictness(_with_coerced_arguments(tool), strict_schemas)
+                    )
                 ),
             )
 
@@ -424,6 +438,30 @@ def _apply_shell_output_cap(parsed: dict[str, Any]) -> None:
     parsed["max_output_tokens"] = (
         ceiling if not isinstance(requested, int) or requested > ceiling else requested
     )
+
+
+def _with_execution_serialization(tool: Any) -> Any:
+    """Serialize non-parallel-safe tools at invocation time.
+
+    With provider ``parallel_tool_calls`` enabled the model may emit several
+    calls in one turn; this wrapper guarantees state-changing or unknown tools
+    still never overlap (read-only policy-safe tools skip the lock and may
+    batch). The lock is per (event loop, serial group): agents run on separate
+    asyncio loops, so only the same-loop concurrent calls — exactly what one
+    wide turn produces — contend on the same lock. Works on ``FunctionTool``
+    and ``CustomTool`` alike (both expose ``name`` + ``on_invoke_tool``).
+    """
+    if is_parallel_safe(getattr(tool, "name", "")):
+        return tool
+    invoke_tool = tool.on_invoke_tool
+    group = serial_group_for(getattr(tool, "name", "?"))
+
+    async def invoke(ctx: Any, raw_input: str) -> Any:
+        async with serialized(group):
+            return await invoke_tool(ctx, raw_input)
+
+    tool.on_invoke_tool = invoke
+    return tool
 
 
 def _wrap_exec_command(tool: FunctionTool) -> FunctionTool:
@@ -495,6 +533,9 @@ def _configure_shell_tools(
             wrapped = _wrap_write_stdin(wrapped)
         if chat_completions:
             wrapped = _function_tool_with_error_result(wrapped)
+        # Outermost: state-changing/unknown tools serialize; policy-safe
+        # readers may still batch inside a wide turn.
+        wrapped = _with_execution_serialization(wrapped)
         setattr(toolset, name, wrapped)
 
 
@@ -689,22 +730,45 @@ def build_strix_agent(
             interactive=interactive,
             system_prompt_context=system_prompt_context,
         )
+        # Wide-turn guidance (built-in prompt only — an override is verbatim):
+        # the model must know which tools may batch and which stay one-per-turn.
+        if (
+            load_settings().llm.parallel_tool_calls is not False
+            and load_settings().llm.tool_width > 1
+        ):
+            instructions = (
+                f"{instructions}\n\n{wide_turn_guidance(load_settings().llm.tool_width)}"
+            )
 
     agent_tools = [*_EXTRA_TOOLS, *(extra_tools or [])]
     if interactive:
         # Yielding to the user is only meaningful when one is attached.
         agent_tools.append(respond_to_user)
+    # Deterministic tool order: the tool-schema block is part of the prompt
+    # prefix, so its order must never depend on registration timing or
+    # hot-reload rebuild order. Base tools keep their canonical tuple order and
+    # the lifecycle tool stays last; the dynamic extras are sorted by name.
+    ordered_extras = sorted(agent_tools, key=lambda tool: getattr(tool, "name", repr(tool)))
     if is_root:
-        tools: list[Tool] = [*_BASE_TOOLS, *agent_tools, finish_scan]
+        tools: list[Tool] = [*_BASE_TOOLS, *ordered_extras, finish_scan]
     else:
-        tools = [*_BASE_TOOLS, *agent_tools, agent_finish]
+        tools = [*_BASE_TOOLS, *ordered_extras, agent_finish]
     _ensure_unique_tool_names(tools)
-    tools = [
-        _with_bounded_result(_with_strictness(_with_coerced_arguments(tool), strict_tool_schemas))
-        if isinstance(tool, FunctionTool)
-        else tool
-        for tool in tools
-    ]
+    wrapped_tools: list[Tool] = []
+    for tool in tools:
+        if isinstance(tool, FunctionTool):
+            wrapped_tools.append(
+                _with_execution_serialization(
+                    _with_bounded_result(
+                        _with_strictness(_with_coerced_arguments(tool), strict_tool_schemas)
+                    )
+                )
+            )
+        elif isinstance(tool, CustomTool):
+            wrapped_tools.append(_with_execution_serialization(tool))
+        else:
+            wrapped_tools.append(tool)
+    tools = wrapped_tools
 
     logger.info(
         "Built %s agent '%s' (skills=%d, tools=%d, scan_mode=%s, whitebox=%s)",

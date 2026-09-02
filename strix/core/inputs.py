@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from agents.model_settings import ModelSettings
 from openai.types.shared import Reasoning
 
+from strix.config.loader import load_settings
 from strix.config.models import (
     DEFAULT_MODEL_RETRY,
     OPENROUTER_ATTRIBUTION_HEADERS,
@@ -244,6 +245,26 @@ def build_scan_targets(scan_config: dict[str, Any]) -> list[str]:
     return targets
 
 
+def _resolved_parallel_tool_calls(
+    _model_name: str, override: bool | None
+) -> bool | None:
+    """Resolve whether the model may issue several tool calls per turn.
+
+    ``override`` (caller-supplied) wins; otherwise the configured
+    ``STRIX_PARALLEL_TOOLS`` decides; unset means auto-enable — modern
+    chat-completions routes accept parallel function calls, and Strix keeps
+    mutating/unknown tools serial at execution time via their policy locks
+    (see :mod:`strix.core.tool_policy`), so widening the turn cannot interleave
+    state-changing calls.
+    """
+    requested = override
+    if requested is None:
+        requested = load_settings().llm.parallel_tool_calls
+    if requested is None:
+        requested = True  # auto
+    return bool(requested)
+
+
 def make_model_settings(
     reasoning_effort: ReasoningEffort | None,
     *,
@@ -253,10 +274,15 @@ def make_model_settings(
     prompt_cache: bool = True,
     extra_headers: dict[str, str] | None = None,
     has_tools: bool = True,
+    parallel_tool_calls: bool | None = None,
 ) -> ModelSettings:
     headers = _request_headers(model_name, extra_headers)
     model_settings = ModelSettings(
-        parallel_tool_calls=False if has_tools else None,
+        parallel_tool_calls=(
+            _resolved_parallel_tool_calls(model_name, parallel_tool_calls)
+            if has_tools
+            else None
+        ),
         retry=DEFAULT_MODEL_RETRY,
         include_usage=True,
         extra_args=request_timeout_extra_args(request_timeout),

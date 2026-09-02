@@ -57,6 +57,13 @@ class LlmSettings(BaseSettings):
         default=True,
         alias="STRIX_PROMPT_CACHE",
     )
+    # Wide-turn execution: allow the model to issue several independent tool
+    # calls per reasoning turn. None/"auto" enables it for supported routes,
+    # False keeps the historic narrow one-tool-at-a-time loop, True forces it
+    # on. STRIX_PARALLEL_TOOLS accepts 1/true/enabled/0/false.
+    parallel_tool_calls: bool | None = Field(default=None, alias="STRIX_PARALLEL_TOOLS")
+    # Model guidance cap for independent tool calls per turn (parallel mode).
+    tool_width: int = Field(default=3, ge=1, alias="STRIX_TOOL_WIDTH")
     disable_streaming: bool = Field(
         default=False,
         alias="LLM_DISABLE_STREAMING",
