@@ -237,10 +237,19 @@ export default function AgentGraph({
       <MiniMap
         position="bottom-left"
         nodeColor={(n) => {
-          const status = (n.data as Record<string, unknown>)?.status as string;
-          if (status === "running") return "#3b82f6";
+          const d = (n.data as Record<string, unknown>) ?? {};
+          const status = d.status as string;
+          const isRoot = !d.parentId;
+          if (status === "running") return isRoot ? "#f97316" : "#3b82f6";
           if (status === "completed") return "#10b981";
-          if (status === "failed" || status === "error") return "#ef4444";
+          if (
+            status === "failed" ||
+            status === "error" ||
+            status === "stopped" ||
+            status === "crashed"
+          )
+            return "#ef4444";
+          if (status === "waiting" || status === "budget_paused") return "#f59e0b";
           return "#555";
         }}
         maskColor="rgba(0,0,0,0.8)"

@@ -4,15 +4,41 @@ import { memo } from "react";
 import { Handle, Position, type NodeProps } from "@xyflow/react";
 import type { AgentNode as AgentNodeData } from "@/types/events";
 
-const STATUS_STYLES: Record<string, string> = {
-  running: "bg-blue-500",
-  completed: "bg-emerald-500",
-  failed: "bg-red-500",
-  error: "bg-red-500",
-};
+/* Terminal-success agents keep their green dot; terminal-dead (stopped/crashed/
+   failed) agents show a red dot. The name is dimmed + struck through for both. */
+const DONE_DOT = "bg-emerald-500";
+const DEAD_DOT = "bg-red-500";
+
+/* Working agents pulse on a bezier curve. "thinking" (running, no tool in
+   flight) blinks fastest; executing a tool blinks medium; waiting/parked
+   blinks slowest. */
+function blinkClass(status: string, runningTool: boolean | undefined): string | null {
+  if (status === "running") return runningTool ? "strix-dot-medium" : "strix-dot-fast";
+  if (status === "waiting" || status === "budget_paused") return "strix-dot-slow";
+  return null;
+}
+
+function isDead(status: string): boolean {
+  return status === "stopped" || status === "crashed" || status === "failed" || status === "error";
+}
 
 function AgentNodeComponent({ data, selected }: NodeProps) {
   const agent = data as unknown as AgentNodeData & { isSelected: boolean };
+  const isRoot = !agent.parentId;
+
+  const done = agent.status === "completed";
+  const dead = isDead(agent.status);
+  const active = agent.status === "running" || agent.status === "waiting" || agent.status === "budget_paused";
+
+  let dotClass: string;
+  if (done) dotClass = DONE_DOT;
+  else if (dead) dotClass = DEAD_DOT;
+  else if (active && isRoot) dotClass = "bg-orange-500"; // unique root colour
+  else if (active) dotClass = "bg-blue-500";
+  else dotClass = "bg-gray-600";
+
+  const blink = blinkClass(agent.status, agent.runningTool);
+  const terminal = done || dead;
 
   return (
     <div
@@ -22,25 +48,37 @@ function AgentNodeComponent({ data, selected }: NodeProps) {
           : "border-[#222] bg-black hover:border-[#333]"
       }`}
     >
-      <Handle type="target" position={Position.Top} isConnectable={false} className={`!w-1.5 !h-1.5 !border-0 ${agent.parentId ? "!bg-[#444]" : "!bg-transparent"}`} />
+      <Handle
+        type="target"
+        position={Position.Top}
+        isConnectable={false}
+        className={`!w-1.5 !h-1.5 !border-0 ${agent.parentId ? "!bg-[#444]" : "!bg-transparent"}`}
+      />
 
       <div className="flex items-center gap-2">
-        <span className="relative flex h-2 w-2 shrink-0">
-          <span
-            className={`absolute inline-flex h-full w-full rounded-full opacity-75 ${STATUS_STYLES[agent.status] ?? "bg-gray-500"} ${
-              agent.status === "running" ? "animate-ping" : ""
-            }`}
-          />
-          <span
-            className={`relative inline-flex h-2 w-2 rounded-full ${STATUS_STYLES[agent.status] ?? "bg-gray-500"}`}
-          />
-        </span>
-        <span className="text-sm font-semibold text-white leading-snug line-clamp-3">
+        <span
+          className={`relative inline-flex h-2 w-2 shrink-0 rounded-full ${dotClass} ${
+            blink ?? ""
+          }`}
+        />
+        <span
+          className={`text-sm font-semibold leading-snug line-clamp-3 transition-opacity ${
+            terminal ? "opacity-60 line-through decoration-[#666] decoration-1" : "text-white"
+          }`}
+          title={isRoot ? `${agent.name} (orchestrator)` : agent.name}
+        >
           {agent.name}
         </span>
       </div>
 
-      <Handle type="source" position={Position.Bottom} isConnectable={false} className={`!w-1.5 !h-1.5 !border-0 ${agent.children && agent.children.length > 0 ? "!bg-[#444]" : "!bg-transparent"}`} />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        isConnectable={false}
+        className={`!w-1.5 !h-1.5 !border-0 ${
+          agent.children && agent.children.length > 0 ? "!bg-[#444]" : "!bg-transparent"
+        }`}
+      />
     </div>
   );
 }

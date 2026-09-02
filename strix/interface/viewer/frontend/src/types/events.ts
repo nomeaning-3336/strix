@@ -53,12 +53,14 @@ export interface AgentNode {
   id: string;
   name: string;
   task: string;
-  status: "running" | "completed" | "failed" | "error";
+  status: string; // engine status: running | waiting | completed | stopped | crashed | failed | error | budget_paused
   parentId: string | null;
   children: string[];
   createdAt: string;
   toolCount: number;
   messageCount: number;
+  /** True when the agent's newest tool event is still executing (vs thinking). */
+  runningTool?: boolean;
 }
 
 export interface ToolExecution {

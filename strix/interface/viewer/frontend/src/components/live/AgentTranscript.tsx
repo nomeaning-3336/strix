@@ -80,6 +80,14 @@ function eventSeq(id: string): number {
   return m ? parseInt(m[1], 10) : 0;
 }
 
+/** Compact local wall-clock label ("14:03:07") for an ISO event timestamp. */
+function timeLabel(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
 /** A chat event whose author is the human/user (vs an assistant "thinking"). */
 function isUserChat(event: TranscriptEvent): boolean {
   const role = event.data?.role;
@@ -161,12 +169,16 @@ export function buildGraphAgents(
 
   const toolCount = new Map<string, number>();
   const messageCount = new Map<string, number>();
+  // Whether each agent's NEWEST tool event is still executing — used by the
+  // graph nodes to tell "thinking" (no tool in flight) from "executing a tool".
+  const toolRunning = new Map<string, boolean>();
   // A create_agent call names the child but not its id, so map spawned tasks by
   // agent NAME (best-effort — used only for the graph node subtitle).
   const taskByName = new Map<string, string>();
   for (const e of events) {
     if (e.type === "tool") {
       toolCount.set(e.agent_id, (toolCount.get(e.agent_id) ?? 0) + 1);
+      toolRunning.set(e.agent_id, e.data?.status === "running");
       if (e.data?.tool_name === "create_agent") {
         const args = asRecord(e.data.args);
         const name = (args.name as string) ?? (args.agent_name as string) ?? "";
@@ -191,6 +203,7 @@ export function buildGraphAgents(
       createdAt: a.created_at,
       toolCount: toolCount.get(a.id) ?? 0,
       messageCount: messageCount.get(a.id) ?? 0,
+      runningTool: toolRunning.get(a.id) ?? false,
     });
   }
   return map;
@@ -283,6 +296,13 @@ export function AgentTranscript({
                   {!isLast && <div className="w-px flex-1 bg-[#1a1a1a] mt-1" />}
                 </div>
                 <div className="flex-1 min-w-0 pt-[5px] pb-6">
+                  {isTool && (
+                    <div className="flex justify-end -mt-[3px] mb-1">
+                      <span className="font-mono text-[10px] text-[#555]">
+                        {timeLabel(e.timestamp)}
+                      </span>
+                    </div>
+                  )}
                   {isTool ? (
                     <SafeToolRenderer
                       toolName={toolName}

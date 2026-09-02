@@ -190,6 +190,29 @@ body {
   animation: tab-in 200ms ease-out;
 }
 
+/* Live agent dots: breathing opacity pulse on a bezier curve. The dot swells
+   and fades to signal activity — thinking (fast) vs executing a tool (medium)
+   vs parked/waiting (slow). Terminal agents don't animate. */
+@keyframes strix-breathe {
+  from {
+    opacity: 0.15;
+    transform: scale(0.85);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.strix-dot-fast {
+  animation: strix-breathe 0.8s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite alternate;
+}
+.strix-dot-medium {
+  animation: strix-breathe 1.8s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite alternate;
+}
+.strix-dot-slow {
+  animation: strix-breathe 3.2s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite alternate;
+}
+
 /* Markdown prose styling */
 .prose-markdown {
   font-size: 14px;
