@@ -29,6 +29,8 @@ from strix.core.tool_policy import (
     policy_for,
     serial_group_for,
     serialized,
+    set_tool_width_override,
+    tool_slot,
     wide_turn_guidance,
 )
 from strix.report.usage import LLMUsageLedger, cached_input_tokens
@@ -46,30 +48,88 @@ def _settings_with(parallel_tool_calls: bool | None) -> SimpleNamespace:
 # --- tool policy -------------------------------------------------------------
 
 
-def test_read_only_reader_tools_are_parallel_safe() -> None:
+def test_read_only_reader_tools_are_parallel_safe_but_not_cacheable() -> None:
     for name in (
         "list_reports",
         "get_report",
         "list_todos",
         "get_threat_model",
         "view_agent_graph",
+        "list_coverage",
     ):
         policy = policy_for(name)
         assert policy.parallel_safe is True
         assert policy.side_effect_free is True
-        assert policy.cacheable is True
+        # Runtime-state readers change as the scan runs: parallel-safe yes,
+        # cacheable NO (a result cache must not replay stale scan state).
+        assert policy.cacheable is False
     assert policy_for("source_inspect_many").parallel_safe is True
+    assert policy_for("source_inspect_many").cacheable is True
 
 
 def test_shell_and_unknown_tools_stay_serial() -> None:
     assert policy_for("exec_command").parallel_safe is False
     assert policy_for("write_stdin").parallel_safe is False
     assert serial_group_for("exec_command") == serial_group_for("write_stdin") == "shell"
-    # Mutating / arbitrary tools default to fully serial, serialized alone.
+    # Mutating / arbitrary tools share ONE mutation group: two different
+    # state-changing tool names must never overlap inside a wide turn.
     assert policy_for("create_vulnerability_report") == DEFAULT_POLICY
-    assert serial_group_for("create_vulnerability_report") == "create_vulnerability_report"
+    assert serial_group_for("create_vulnerability_report") == "mutation"
+    assert serial_group_for("set_finding_state") == serial_group_for("create_agent") == "mutation"
     assert policy_for("some_unknown_tool").parallel_safe is False
     assert is_parallel_safe(None) is False
+
+
+async def test_different_mutating_tool_names_cannot_overlap() -> None:
+    # create_vulnerability_report and set_finding_state are different tool
+    # names; if a provider-parallel turn emitted both, the harness must still
+    # serialize them (shared "mutation" group).
+    group_a = serial_group_for("create_vulnerability_report")
+    group_b = serial_group_for("set_finding_state")
+    assert group_a == group_b == "mutation"
+
+    active = 0
+    peak = 0
+    lock_state = threading.Lock()
+
+    async def worker(group: str) -> None:
+        nonlocal active, peak
+        async with serialized(group):
+            with lock_state:
+                active += 1
+                peak = max(peak, active)
+            await asyncio.sleep(0.02)
+            with lock_state:
+                active -= 1
+
+    await asyncio.gather(
+        worker(group_a), worker(group_b), worker(group_a), worker(group_b)
+    )
+    assert peak == 1
+
+
+async def test_safe_calls_never_exceed_tool_width() -> None:
+    set_tool_width_override(2)
+    try:
+        active = 0
+        peak = 0
+        lock_state = threading.Lock()
+
+        async def worker() -> None:
+            nonlocal active, peak
+            async with tool_slot():
+                with lock_state:
+                    active += 1
+                    peak = max(peak, active)
+                await asyncio.sleep(0.02)
+                with lock_state:
+                    active -= 1
+
+        # 8 concurrent "safe" calls, width 2: at most 2 execute at once.
+        await asyncio.gather(*(worker() for _ in range(8)))
+        assert peak <= 2
+    finally:
+        set_tool_width_override(None)
 
 
 def test_guidance_names_only_safe_tools_and_width() -> None:

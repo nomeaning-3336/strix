@@ -22,6 +22,7 @@ from strix.core.tool_policy import (
     is_parallel_safe,
     serial_group_for,
     serialized,
+    tool_slot,
     wide_turn_guidance,
 )
 from strix.tools.agents_graph.tools import (
@@ -62,6 +63,7 @@ from strix.tools.reporting.tool import (
     update_vulnerability_report,
 )
 from strix.tools.respond.tool import respond_to_user
+from strix.tools.source_inspect.tool import source_inspect_many
 from strix.tools.thinking.tool import think
 from strix.tools.threat_model.tools import (
     amend_threat_model,
@@ -441,26 +443,43 @@ def _apply_shell_output_cap(parsed: dict[str, Any]) -> None:
 
 
 def _with_execution_serialization(tool: Any) -> Any:
-    """Serialize non-parallel-safe tools at invocation time.
+    """Enforce the wide-turn executor bounds on one tool's invocations.
 
-    With provider ``parallel_tool_calls`` enabled the model may emit several
-    calls in one turn; this wrapper guarantees state-changing or unknown tools
-    still never overlap (read-only policy-safe tools skip the lock and may
-    batch). The lock is per (event loop, serial group): agents run on separate
-    asyncio loops, so only the same-loop concurrent calls — exactly what one
-    wide turn produces — contend on the same lock. Works on ``FunctionTool``
+    Two guarantees, enforced in the harness (never left to the prompt):
+
+      - width: every call — parallel-safe or not — first acquires the per-loop
+        ``tool_slot()`` semaphore sized by STRIX_TOOL_WIDTH, so a provider can
+        never run more than that many tool calls concurrently on an agent.
+      - safety: a non-``parallel_safe`` call additionally holds its serial
+        group lock (all mutating/unknown tools share the ``mutation`` group),
+        so two different state-changing tool names cannot interleave.
+
+    Idempotent: the module-singleton tool objects are re-wrapped on every
+    ``build_strix_agent`` (each child spawn, each hot-reload rebuild). Stacking
+    wrappers would nest the width semaphore one level per build and self-
+    deadlock as soon as the nesting depth exceeds the configured width — the
+    first wrapper holds its permit while waiting for the inner chain to finish.
+    The marker makes re-wrapping a no-op.
+
+    Per-(event loop) accounting is safe because agents run one loop per agent
+    thread; the primitives are cached on that thread. Works on ``FunctionTool``
     and ``CustomTool`` alike (both expose ``name`` + ``on_invoke_tool``).
     """
-    if is_parallel_safe(getattr(tool, "name", "")):
+    if getattr(tool, "_strix_execution_wrapped", False):
         return tool
     invoke_tool = tool.on_invoke_tool
     group = serial_group_for(getattr(tool, "name", "?"))
+    safe = is_parallel_safe(getattr(tool, "name", ""))
 
     async def invoke(ctx: Any, raw_input: str) -> Any:
-        async with serialized(group):
-            return await invoke_tool(ctx, raw_input)
+        async with tool_slot():
+            if safe:
+                return await invoke_tool(ctx, raw_input)
+            async with serialized(group):
+                return await invoke_tool(ctx, raw_input)
 
     tool.on_invoke_tool = invoke
+    tool._strix_execution_wrapped = True  # type: ignore[attr-defined]
     return tool
 
 
@@ -632,6 +651,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     set_finding_state,
     list_reports,
     get_report,
+    source_inspect_many,
     list_requests,
     view_request,
     repeat_request,
