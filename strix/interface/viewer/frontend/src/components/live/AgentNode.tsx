@@ -72,7 +72,11 @@ function AgentNodeComponent({ data, selected }: NodeProps) {
         />
         <span
           className={`text-sm font-semibold leading-snug line-clamp-3 transition-opacity ${
-            terminal ? "opacity-60 line-through decoration-[#666] decoration-1" : "text-white"
+            terminal
+              ? `opacity-70 line-through decoration-2 ${
+                  done ? "decoration-emerald-400/80" : "decoration-red-400/80"
+                }`
+              : "text-white"
           }`}
           title={isRoot ? `${agent.name} (orchestrator)` : agent.name}
         >

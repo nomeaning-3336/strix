@@ -1,8 +1,33 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Component, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { X } from "lucide-react";
 import { AgentTranscript } from "./AgentTranscript";
 import { ScanPromptComposer } from "./ScanPromptComposer";
 import type { TranscriptAgent, TranscriptEvent } from "@/data/serverSource";
+
+/** One bad agent event must never blank the whole app: isolate the transcript. */
+class TranscriptErrorBoundary extends Component<
+  { agentName: string; children: ReactNode },
+  { hasError: boolean }
+> {
+  constructor(props: { agentName: string; children: ReactNode }) {
+    super(props);
+    this.state = { hasError: false };
+  }
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <p className="text-sm text-[#888]">
+          Could not render the transcript for <span className="text-[#ccc]">{this.props.agentName}</span>
+          {" "}(an event in its session failed to render).
+        </p>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 /** Status -> the small leading dot color, matching the graph node styling. */
 const STATUS_DOT: Record<string, string> = {
@@ -146,7 +171,9 @@ export function AgentDetailModal({
 
         <div ref={scrollRef} onScroll={handleScroll} className="flex-1 overflow-y-auto p-5">
           {contentReady && (
-            <AgentTranscript agent={shownAgent} events={events} showHeader={false} />
+            <TranscriptErrorBoundary agentName={shownAgent.name}>
+              <AgentTranscript agent={shownAgent} events={events} showHeader={false} />
+            </TranscriptErrorBoundary>
           )}
         </div>
 
