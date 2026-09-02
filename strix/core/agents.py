@@ -53,12 +53,35 @@ class AgentHealth:
 
     last_progress_at: float = 0.0
     last_progress_tool: str | None = None
-    last_tool: str | None = None
+    last_action_key: str | None = None
     consecutive_repeats: int = 0
     recent_empty_outputs: int = 0
     tool_errors: int = 0
     recent_tools: deque[str] = field(default_factory=lambda: deque(maxlen=20))
     llm_started_at: float | None = None
+
+
+def action_fingerprint(tool_name: str, arguments: Any) -> str:
+    """Stable fingerprint of one tool call: tool name + normalized arguments.
+
+    The arguments JSON is sorted and truncated to a bounded prefix so large or
+    exotic payloads cannot inflate the tracker. Identical calls produce
+    identical keys; different calls do not.
+    """
+    prefix = tool_name or "?"
+    if arguments is None:
+        return prefix
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            return f"{prefix}:{arguments[:200]}"
+        arguments = parsed
+    try:
+        normalized = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001 - never let fingerprinting break the hook
+        normalized = str(arguments)
+    return f"{prefix}:{normalized[:200]}"
 
 
 def _tool_output_is_empty(tool_name: str, output: object) -> bool:
@@ -108,15 +131,20 @@ class AgentCoordinator:
     def set_snapshot_path(self, path: Path) -> None:
         self._snapshot_path = path
 
-    def record_tool_start(self, agent_id: str, tool_name: str) -> None:
-        """Track tool-call onset for repeated-action detection (sync, hook-fed)."""
+    def record_tool_start(self, agent_id: str, tool_name: str, action_key: str) -> None:
+        """Track tool-call onset for repeated-action detection (sync, hook-fed).
+
+        ``action_key`` fingerprints the exact action (tool name + normalized
+        arguments), so consecutive identical *commands* count as repeats while
+        a stream of different commands on the same tool does not.
+        """
         health = self.health.setdefault(agent_id, AgentHealth())
         health.recent_tools.append(tool_name)
-        if tool_name == health.last_tool:
+        if action_key == health.last_action_key:
             health.consecutive_repeats += 1
         else:
             health.consecutive_repeats = 1
-            health.last_tool = tool_name
+            health.last_action_key = action_key
 
     def record_tool_end(
         self,

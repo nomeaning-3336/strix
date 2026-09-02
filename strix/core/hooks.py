@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 from typing import TYPE_CHECKING, Any
 
 from agents.lifecycle import RunHooks
 
+from strix.core.agents import action_fingerprint
 from strix.report.state import get_global_report_state
 
 
@@ -18,6 +20,34 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _result_looks_like_error(result: object) -> bool:
+    """Heuristic: did this tool invocation end in an error the agent saw?
+
+    Strix tools return structured JSON (``{"success": false, ...}`` /
+    ``{"error": ...}``) or error-prefixed text on failure; successful shell
+    output starts with ``Chunk ID:``. Conservative on purpose: only clear
+    markers count so we do not flag legitimate output as errors.
+    """
+    if result is None:
+        return False
+    if not isinstance(result, str):
+        result = json.dumps(result, ensure_ascii=False, default=str)
+    stripped = result.strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    if lowered.startswith(("error", "exception", "traceback", "failed:")):
+        return True
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return False
+        if isinstance(parsed, dict):
+            return parsed.get("success") is False or bool(parsed.get("error"))
+    return False
 
 
 LLM_TURN_KEY = "llm_turn"
@@ -292,14 +322,21 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         _agent: Agent[dict[str, Any]],
         tool: Any,
     ) -> None:
-        """Feed the coordinator's per-agent health tracker (repeated-action signal)."""
+        """Feed the coordinator's per-agent health tracker (repeated-action signal).
+
+        Fingerprints the exact action (tool name + normalized arguments), so
+        ``exec_command("grep foo")`` then ``exec_command("grep foo")`` counts as
+        a repeat while a stream of different commands on the same tool does not.
+        """
         ctx = context.context if isinstance(context.context, dict) else {}
         coordinator = ctx.get("coordinator")
         recorder = getattr(coordinator, "record_tool_start", None)
         if recorder is None:
             return
         try:
-            recorder(ctx.get("agent_id"), getattr(tool, "name", "?"))
+            tool_name = getattr(tool, "name", "?")
+            args = getattr(context, "tool_arguments", None)
+            recorder(ctx.get("agent_id"), tool_name, action_fingerprint(tool_name, args))
         except Exception:
             logger.exception("coordinator health record_tool_start failed")
 
@@ -317,6 +354,11 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         if recorder is None:
             return
         try:
-            recorder(ctx.get("agent_id"), getattr(tool, "name", "?"), result)
+            recorder(
+                ctx.get("agent_id"),
+                getattr(tool, "name", "?"),
+                result,
+                error=_result_looks_like_error(result),
+            )
         except Exception:
             logger.exception("coordinator health record_tool_end failed")
