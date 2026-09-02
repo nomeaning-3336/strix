@@ -325,7 +325,7 @@ export function AgentTranscript({
                   {isTool && (
                     <div className="flex justify-end -mt-[3px] mb-1">
                       <span className="font-mono text-[10px] text-[#555]">
-                        {timeLabel(e.timestamp)}
+                        {timeLabel(event.timestamp)}
                       </span>
                     </div>
                   )}
