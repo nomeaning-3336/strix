@@ -1,0 +1,3 @@
+def old() -> None:
+    pass
+

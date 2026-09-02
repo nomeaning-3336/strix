@@ -1,0 +1,1 @@
+var vendor = 1;

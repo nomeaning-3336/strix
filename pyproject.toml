@@ -160,6 +160,9 @@ extend-exclude = [
     "build",
     "dist",
     "migrations",
+    # Fake source trees used by source_partition tests (deliberately not
+    # lint-shaped source code).
+    "tests/fixtures/source_partition",
 ]
 
 [tool.ruff.lint]

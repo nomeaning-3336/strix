@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any
 
 from agents import function_tool
 
+from strix.tools.source_inspect.ignore_dirs import IGNORE_DIRS as _IGNORE_DIRS
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -31,24 +33,8 @@ logger = logging.getLogger(__name__)
 
 # --- deterministic constants -------------------------------------------------
 
-_IGNORE_DIRS: frozenset[str] = frozenset(
-    {
-        ".git",
-        ".hg",
-        ".svn",
-        ".venv",
-        "venv",
-        "node_modules",
-        "__pycache__",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".tox",
-        "dist",
-        "build",
-        ".next",
-    }
-)
+# Curated hard-exclusion directory names, kept identical to the search walker's
+# prune set (single source of truth in strix/tools/source_inspect/ignore_dirs.py).
 
 _READ_MAX_CHARS = 24_000
 _READ_MAX_LINES = 1_500
