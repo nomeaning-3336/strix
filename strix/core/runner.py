@@ -633,35 +633,46 @@ async def run_strix_scan(
         # whether team workers actually fire. width<=1 keeps the legacy
         # single-agent flow (no extra workers); width>1 spawns one worker per
         # effective shard through the same spawn_child_agent primitive the
-        # create_agent tool uses. Any failure here must never break the scan -
-        # it is logged and the legacy path continues unchanged.
+        # create_agent tool uses.
+        #
+        # The spawner adapter injects parent_ctx at this runner boundary:
+        # strix.core.execution.spawn_child_agent requires parent_ctx as a
+        # keyword-only argument, while TeamFanout deliberately only supplies
+        # the four worker kwargs (name/task/skills/parent_history).  Runtime
+        # context never leaks into the deterministic assignment layer.
+        # Any failure here must never break the scan - it is logged and the
+        # legacy path continues unchanged.
         if not is_resume and not interactive:
             try:
-                from strix.team.integration import stage_source_team_fanout
+                from strix.team.integration import (
+                    build_root_team_handoff,
+                    log_team_stage_outcome,
+                    stage_source_team_fanout,
+                )
+
+                runner_spawner: Any = context.get("spawn_child_agent")
+
+                async def spawn_team_worker(**spawn_kwargs: Any) -> Any:
+                    # ``context`` is the runner's parent-context dict (the same
+                    # ``inner`` the create_agent tool passes as parent_ctx).
+                    return await runner_spawner(parent_ctx=context, **spawn_kwargs)
 
                 team_stage = await stage_source_team_fanout(
                     report_state=get_global_report_state(),
                     local_sources=local_sources or [],
-                    spawn_worker=context.get("spawn_child_agent"),
+                    spawn_worker=spawn_team_worker,
                     objective=root_task,
+                    worker_skills=skills,
                 )
-                if team_stage.plan is not None:
-                    if team_stage.spawned:
+                log_team_stage_outcome(team_stage, scan_id=scan_id)
+                if team_stage.successfully_spawned:
+                    handoff = build_root_team_handoff(team_stage.plan, team_stage.spawned)
+                    if handoff:
+                        initial_input = f"{initial_input}\n\n{handoff}"
                         logger.info(
-                            "team fan-out: spawned %d worker(s) across %d shard(s) "
-                            "(notes=%d) for scan %s",
-                            len(team_stage.spawned),
-                            team_stage.plan.effective_workers,
-                            len(team_stage.plan.notes),
+                            "team fan-out: appended compact root handoff (len=%d) for scan %s",
+                            len(handoff),
                             scan_id,
-                        )
-                    elif team_stage.enabled:
-                        logger.info(
-                            "team fan-out: source scan, no workers (width=%d, "
-                            "effective=%s, reason=%s)",
-                            team_stage.team_width,
-                            team_stage.plan.effective_workers,
-                            team_stage.reason,
                         )
             except Exception:
                 logger.exception(
