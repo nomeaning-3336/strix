@@ -258,9 +258,7 @@ class AgentCoordinator:
             "tool_calls": health.tool_calls,
             "tool_groups": health.tool_groups,
             "avg_tool_width": (
-                round(health.width_sum / health.tool_groups, 2)
-                if health.tool_groups
-                else None
+                round(health.width_sum / health.tool_groups, 2) if health.tool_groups else None
             ),
             "tools_serial_ms": round(health.tools_serial_ms),
             "tools_wall_ms": round(health.tools_wall_ms),
@@ -327,6 +325,16 @@ class AgentCoordinator:
             health.model_requests += 1
             self._close_tool_group(health)
 
+    def agent_metrics_snapshot(self, agent_id: str) -> dict[str, Any]:
+        """Read-side metrics seam for one agent (status + wide-turn counters).
+
+        The smallest possible read accessor for observers (run settlement
+        telemetry): no parallel counter store is maintained - the caller
+        reads what the hooks already tracked on ``AgentHealth``.
+        """
+        health = self.health.get(agent_id)
+        return {"status": self.statuses.get(agent_id, "unknown"), **self._counters(health)}
+
     def runtime_snapshot(self) -> dict[str, dict[str, Any]]:
         """Ephemeral per-agent runtime telemetry for the live viewer.
 
@@ -336,16 +344,15 @@ class AgentCoordinator:
         """
         now = time.monotonic()
         out: dict[str, dict[str, Any]] = {}
-        for agent_id, status in self.statuses.items():
+        for agent_id in self.statuses:
             health = self.health.get(agent_id)
             in_flight = None
             if health is not None and health.llm_started_at is not None:
                 in_flight = int(now - health.llm_started_at)
             out[agent_id] = {
-                "status": status,
+                **self.agent_metrics_snapshot(agent_id),
                 "llm_in_flight": in_flight is not None,
                 "in_flight_seconds": in_flight,
-                **self._counters(health),
             }
         return out
 
@@ -664,9 +671,7 @@ class AgentCoordinator:
             async with self._lock:
                 runtime = self.runtimes.get(agent_id) or runtime
                 runtime.mailbox[0:0] = queued
-                self.pending_counts[agent_id] = (
-                    self.pending_counts.get(agent_id, 0) + len(queued)
-                )
+                self.pending_counts[agent_id] = self.pending_counts.get(agent_id, 0) + len(queued)
                 # Wake a parked agent so it does not sleep forever with
                 # restored-but-undelivered work in its mailbox.
                 runtime.wake.set()

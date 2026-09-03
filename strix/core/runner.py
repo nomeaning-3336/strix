@@ -626,6 +626,10 @@ async def run_strix_scan(
 
         initial_input: Any = [] if is_resume else root_task
 
+        # Set by the team stage below; consumed at scan settlement for the
+        # passive team_fanout telemetry section (early persist + finalize).
+        team_fanout_section: dict[str, Any] | None = None
+
         # Deterministic team fan-out for fresh whitebox/local-source scans.
         # The inventory -> partition -> plan stage always runs for a scan with
         # source roots (always-on manifest validation + note propagation);
@@ -649,6 +653,12 @@ async def run_strix_scan(
                     log_team_stage_outcome,
                     stage_source_team_fanout,
                 )
+                from strix.team.telemetry import (
+                    finalize_and_persist as telemetry_finalize,
+                )
+                from strix.team.telemetry import (
+                    record_stage as telemetry_record_stage,
+                )
 
                 runner_spawner: Any = context.get("spawn_child_agent")
 
@@ -665,6 +675,12 @@ async def run_strix_scan(
                     worker_skills=skills,
                 )
                 log_team_stage_outcome(team_stage, scan_id=scan_id)
+                # Passive telemetry: persist the stage facts immediately so an
+                # interrupted scan still records that the team existed. This
+                # must never break the scan (best-effort internally).
+                state_now = get_global_report_state()
+                if state_now is not None:
+                    team_fanout_section = telemetry_record_stage(state_now, team_stage)
                 if team_stage.successfully_spawned:
                     handoff = build_root_team_handoff(team_stage.plan, team_stage.spawned)
                     if handoff:
@@ -737,6 +753,21 @@ async def run_strix_scan(
                     "300 chars): %r",
                     scan_id,
                     str(final)[:300],
+                )
+
+        # Passive team telemetry settlement (best-effort, non-fatal): fill the
+        # per-agent metric blocks from existing coordinator/usage/coverage/
+        # finding state. Only runs when the team stage actually produced a
+        # section earlier; interrupted scans keep their early stage record.
+        if team_fanout_section is not None:
+            settlement_state = get_global_report_state()
+            if settlement_state is not None:
+                telemetry_finalize(
+                    settlement_state,
+                    coordinator=coordinator,
+                    root_agent_id=root_id,
+                    root_model=resolved_model,
+                    worker_model=subagent_model,
                 )
         return result  # noqa: TRY300
     except BudgetExceededError as exc:
