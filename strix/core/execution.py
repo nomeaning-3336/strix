@@ -317,6 +317,7 @@ async def spawn_child_agent(
     parent_history: list[Any],
     event_sink: StreamEventSink | None = None,
     hooks: RunHooks[dict[str, Any]] | None = None,
+    initial_input: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     parent_id = parent_ctx.get("agent_id")
     if not isinstance(parent_id, str):
@@ -335,6 +336,18 @@ async def spawn_child_agent(
         skills=skills,
     )
 
+    resolved_initial_input: list[dict[str, Any]] = (
+        initial_input
+        if initial_input is not None
+        else child_initial_input(
+            name=name,
+            child_id=child_id,
+            parent_id=parent_id,
+            task=task,
+            parent_history=parent_history,
+        )
+    )
+
     await _start_child_runner(
         parent_ctx=parent_ctx,
         coordinator=coordinator,
@@ -348,13 +361,7 @@ async def spawn_child_agent(
         name=name,
         parent_id=parent_id,
         task=task,
-        initial_input=child_initial_input(
-            name=name,
-            child_id=child_id,
-            parent_id=parent_id,
-            task=task,
-            parent_history=parent_history,
-        ),
+        initial_input=resolved_initial_input,
         event_sink=event_sink,
         hooks=hooks,
     )

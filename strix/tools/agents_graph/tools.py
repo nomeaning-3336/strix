@@ -13,6 +13,7 @@ from typing import Any, Literal, get_args
 from agents import RunContextWrapper, function_tool
 
 from strix.core.agents import Status, coordinator_from_context
+from strix.core.child_context import build_packet_from_task, render_packet
 from strix.core.execution import notify_parent_on_terminal
 from strix.core.hooks import LLM_TURN_KEY
 from strix.skills import validate_requested_skills
@@ -505,10 +506,35 @@ async def create_agent(
             told what is already known repeats it.
         inherit_context: Default ``True``. The child receives the
             parent's input history as background; only set ``False``
-            when starting a clean-slate task.
+            when starting a clean-slate task. **Prefer
+            ``inherit_context=False`` for focused specialists** when the
+            explicit ``task`` contains what they need - compact mode
+            sends a deterministic structured handoff (objective, scan
+            scope, do-not-repeat) and skips the parent's full trajectory,
+            saving repeated input cost across many parallel children.
+            Use ``inherit_context=True`` only when the child genuinely
+            needs the parent's full conversational history.
         skills: List of skill names (e.g. ``["xss", "sql_injection"]``).
             Max 5; prefer 1-3.
     """
+    return await _create_agent_impl(
+        ctx=ctx,
+        name=name,
+        task=task,
+        inherit_context=inherit_context,
+        skills=skills,
+    )
+
+
+async def _create_agent_impl(
+    *,
+    ctx: RunContextWrapper,
+    name: str,
+    task: str,
+    inherit_context: bool = True,
+    skills: list[str] | None = None,
+) -> str:
+    """Implementation extracted so tests can drive it without the SDK wrapper."""
     inner = _ctx(ctx)
     coordinator = coordinator_from_context(inner)
     parent_id = inner.get("agent_id")
@@ -539,15 +565,63 @@ async def create_agent(
             default=str,
         )
 
-    parent_history = list(ctx.turn_input) if inherit_context and ctx.turn_input else []
-    try:
-        result = await spawner(
-            parent_ctx=inner,
-            name=name,
-            task=task,
-            skills=skill_list,
-            parent_history=parent_history,
+    # Two-mode context handoff:
+    #   True  -> FULL: existing legacy behavior, parent_history = ctx.turn_input
+    #   False -> COMPACT: deterministic structured packet, parent_history = []
+    # The default is unchanged (True).
+    if inherit_context:
+        parent_history = list(ctx.turn_input) if ctx.turn_input else []
+        effective_task = task or ""
+        mode = "full"
+        initial_input: list[dict[str, Any]] | None = None
+    else:
+        parent_history = []
+        packet = build_packet_from_task(
+            task=task or "",
+            scan_targets=inner.get("scan_targets"),
         )
+        rendered_packet = render_packet(packet)
+        effective_task = task or ""
+        mode = "compact"
+        # Compact children still get the identity + termination framing that
+        # child_initial_input would otherwise add in full mode (child_id is
+        # only assigned inside spawn_child_agent, so it is omitted here). The
+        # original task text is preserved verbatim inside the packet's
+        # ``objective`` field, and the coordinator still registers the
+        # original ``task`` so graph observers see the real request.
+        initial_input = [
+            {
+                "role": "user",
+                "content": (
+                    f"You are agent {name}; your parent is {parent_id}. "
+                    "Maintain your own identity. Call agent_finish when your task is "
+                    f"complete.\n\n{rendered_packet}"
+                ),
+            },
+        ]
+
+    inherited_items = len(parent_history)
+    inherited_chars = (
+        len(json.dumps(parent_history, ensure_ascii=False, default=str)) if parent_history else 0
+    )
+    task_chars = len(effective_task or "")
+    compact_packet_chars = (
+        sum(len(part.get("content", "")) for part in initial_input)
+        if initial_input is not None
+        else 0
+    )
+
+    try:
+        spawn_kwargs: dict[str, Any] = {
+            "parent_ctx": inner,
+            "name": name,
+            "task": effective_task,
+            "skills": skill_list,
+            "parent_history": parent_history,
+        }
+        if initial_input is not None:
+            spawn_kwargs["initial_input"] = initial_input
+        result = await spawner(**spawn_kwargs)
     except Exception as e:
         logger.exception("create_agent: scan runner failed to spawn child '%s'", name)
         return json.dumps(
@@ -557,12 +631,19 @@ async def create_agent(
         )
 
     logger.info(
-        "create_agent: spawned %s (%s) parent=%s skills=%d task_len=%d",
+        "create_agent: spawned %s (%s) parent=%s skills=%d task_len=%d "
+        "context_mode=%s inherited_items=%d inherited_chars=%d "
+        "task_chars=%d compact_packet_chars=%d",
         result.get("agent_id"),
         name,
         parent_id or "-",
         len(skill_list),
-        len(task or ""),
+        len(effective_task or ""),
+        mode,
+        inherited_items,
+        inherited_chars,
+        task_chars,
+        compact_packet_chars,
     )
 
     return json.dumps(
