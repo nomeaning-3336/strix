@@ -485,6 +485,7 @@ async def run_strix_scan(
                         }
                         for summary in mcp_registry.summaries()
                     ]
+
                     # Feed a non-secret connection roster (name / provider /
                     # tool_count / dead) to two consumers: once now (all
                     # currently healthy) and again whenever a connection later
@@ -624,6 +625,49 @@ async def run_strix_scan(
             )
 
         initial_input: Any = [] if is_resume else root_task
+
+        # Deterministic team fan-out for fresh whitebox/local-source scans.
+        # The inventory -> partition -> plan stage always runs for a scan with
+        # source roots (always-on manifest validation + note propagation);
+        # STRIX_TEAM_WIDTH (default 1) is the cost-control gate that decides
+        # whether team workers actually fire. width<=1 keeps the legacy
+        # single-agent flow (no extra workers); width>1 spawns one worker per
+        # effective shard through the same spawn_child_agent primitive the
+        # create_agent tool uses. Any failure here must never break the scan -
+        # it is logged and the legacy path continues unchanged.
+        if not is_resume and not interactive:
+            try:
+                from strix.team.integration import stage_source_team_fanout
+
+                team_stage = await stage_source_team_fanout(
+                    report_state=get_global_report_state(),
+                    local_sources=local_sources or [],
+                    spawn_worker=context.get("spawn_child_agent"),
+                    objective=root_task,
+                )
+                if team_stage.plan is not None:
+                    if team_stage.spawned:
+                        logger.info(
+                            "team fan-out: spawned %d worker(s) across %d shard(s) "
+                            "(notes=%d) for scan %s",
+                            len(team_stage.spawned),
+                            team_stage.plan.effective_workers,
+                            len(team_stage.plan.notes),
+                            scan_id,
+                        )
+                    elif team_stage.enabled:
+                        logger.info(
+                            "team fan-out: source scan, no workers (width=%d, "
+                            "effective=%s, reason=%s)",
+                            team_stage.team_width,
+                            team_stage.plan.effective_workers,
+                            team_stage.reason,
+                        )
+            except Exception:
+                logger.exception(
+                    "team fan-out stage failed for scan %s; continuing with legacy scan",
+                    scan_id,
+                )
 
         # Resume + new ``--instruction``: SDK replay drives root from
         # agents.db with ``initial_input=[]``, so a brand-new instruction

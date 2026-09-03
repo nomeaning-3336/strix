@@ -156,6 +156,22 @@ class ViewerSettings(BaseSettings):
     app_url: str = Field(default="https://app.strix.ai", alias="STRIX_APP_URL")
 
 
+class TeamSettings(BaseSettings):
+    """Deterministic team fan-out cost-control gate.
+
+    ``STRIX_TEAM_WIDTH`` caps how many worker agents a source scan may fan out
+    to.  Default ``1`` preserves the legacy single-agent flow: inventory +
+    partition may still run (always-on manifest validation and notes), but no
+    team workers are spawned.  Set it to ``3``/``4`` deliberately on real
+    source scans to enable fan-out without silently multiplying PAYG model
+    usage just by updating the fork.
+    """
+
+    model_config = _BASE_CONFIG
+
+    team_width: int = Field(default=1, ge=1, alias="STRIX_TEAM_WIDTH")
+
+
 class Settings(BaseSettings):
     model_config = _BASE_CONFIG
 
@@ -166,3 +182,4 @@ class Settings(BaseSettings):
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
     integrations: IntegrationSettings = Field(default_factory=IntegrationSettings)
     viewer: ViewerSettings = Field(default_factory=ViewerSettings)
+    team: TeamSettings = Field(default_factory=TeamSettings)

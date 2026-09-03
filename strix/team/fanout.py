@@ -66,6 +66,8 @@ __all__ = [
     "build_team_plan",
     "build_worker_task_packet",
     "render_worker_task",
+    "validate_partition_manifest",
+    "validate_team_plan",
 ]
 
 #: Spawner shape compatible with ``strix.core.execution.spawn_child_agent``
@@ -78,13 +80,14 @@ WorkerSpawner = Callable[..., Awaitable[dict[str, Any]]]
 WORKER_SCOPE_DIRECTIVE = (
     "Your primary source scope is exactly this shard. "
     "Do not repeat broad repository discovery already completed by the coordinator. "
-    "Follow dependencies outside the shard only when evidence from assigned files "
-    "requires it, and record that boundary crossing."
+    "Follow dependencies outside the shard only when evidence from your assigned files "
+    "requires it. "
+    "Record any such boundary crossing explicitly."
 )
 
 _DEFAULT_DO_NOT_REPEAT: tuple[str, ...] = (
     "broad repository-level discovery already performed by the coordinator",
-    "scanning files that belong to another worker's shard",
+    "broadly scanning files that belong to another worker's shard",
 )
 
 
@@ -211,6 +214,80 @@ def _dedupe(values: Sequence[str]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(values))
 
 
+def validate_partition_manifest(manifest: PartitionManifest) -> None:
+    """Reject malformed manifests before any worker scope is produced.
+
+    A partition manifest is a coordinator-owned execution plan: if it is
+    structurally broken (worker count mismatch, duplicate/gapped shard ids, or
+    the same file in two shards) the team layer must fail loudly *before*
+    scheduling a spawn - never silently coerce, drop, or rebalance.
+
+    Raises ``ValueError`` naming the failing invariant and the offending value.
+    """
+    effective = manifest.effective_workers
+    shards = manifest.shards
+    if len(shards) != effective:
+        raise ValueError(
+            f"invalid partition manifest: effective_workers={effective} != "
+            f"len(shards)={len(shards)}"
+        )
+    shard_ids = [shard.shard_id for shard in shards]
+    if len(set(shard_ids)) != len(shard_ids):
+        duplicate_ids = sorted(
+            {shard_id for shard_id in shard_ids if shard_ids.count(shard_id) > 1}
+        )
+        raise ValueError(f"invalid partition manifest: duplicate shard ids {duplicate_ids}")
+    expected_ids = list(range(effective))
+    if shard_ids != expected_ids:
+        raise ValueError(
+            f"invalid partition manifest: shard ids must be contiguous 0..{effective - 1}, "
+            f"got {shard_ids}"
+        )
+    file_shards: dict[str, int] = {}
+    for shard in shards:
+        for file in shard.files:
+            if file in file_shards:
+                raise ValueError(
+                    f"invalid partition manifest: file {file!r} appears in shards "
+                    f"{file_shards[file]} and {shard.shard_id}"
+                )
+            file_shards[file] = shard.shard_id
+
+
+def validate_team_plan(plan: TeamPlan) -> None:
+    """Re-check assignment-level invariants at the fan-out boundary.
+
+    The manifest-level invariants were validated when the assignments were
+    built; this verifies the derived plan is still coherent (worker count,
+    contiguous unique worker ids, unique shard ids, no file in two
+    assignments).  Raises ``ValueError`` naming the broken invariant.
+    """
+    assignments = plan.assignments
+    if len(assignments) != plan.effective_workers:
+        raise ValueError(
+            f"invalid team plan: effective_workers={plan.effective_workers} != "
+            f"len(assignments)={len(assignments)}"
+        )
+    seen_shard_ids: set[int] = set()
+    seen_files: dict[str, int] = {}
+    for index, assignment in enumerate(assignments):
+        if assignment.worker_id != index:
+            raise ValueError(
+                f"invalid team plan: assignment at index {index} has worker_id "
+                f"{assignment.worker_id} (must be contiguous 0..n-1)"
+            )
+        if assignment.shard_id in seen_shard_ids:
+            raise ValueError(f"invalid team plan: duplicate shard id {assignment.shard_id}")
+        seen_shard_ids.add(assignment.shard_id)
+        for file in assignment.files:
+            if file in seen_files:
+                raise ValueError(
+                    f"invalid team plan: file {file!r} appears in assignments for "
+                    f"shards {seen_files[file]} and {assignment.shard_id}"
+                )
+            seen_files[file] = assignment.shard_id
+
+
 def build_team_assignments(
     manifest: PartitionManifest,
     *,
@@ -220,8 +297,10 @@ def build_team_assignments(
 
     Pure, deterministic: assignments come out in manifest shard order
     (already id-ordered and case-folded by the partitioner).  An empty
-    manifest yields no assignments - never an error.
+    manifest yields no assignments - never an error.  The manifest is
+    validated first; a malformed one raises before any assignment exists.
     """
+    validate_partition_manifest(manifest)
     assignments: list[TeamAssignment] = []
     for worker_id, shard in enumerate(manifest.shards):
         assignments.append(
@@ -317,6 +396,11 @@ class TeamFanout:
         skills: Sequence[str] = (),
         name_prefix: str = "worker",
     ) -> None:
+        # A malformed plan must fail before any spawn can be scheduled: no
+        # half-spawned team, ever (assignments were already validated against
+        # the manifest when the plan was built - this re-checks the
+        # assignment-level invariants at the fan-out boundary).
+        validate_team_plan(plan)
         self._plan = plan
         self._spawn_worker = spawn_worker
         self._skills = tuple(skills)

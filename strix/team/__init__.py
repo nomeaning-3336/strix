@@ -24,6 +24,8 @@ from strix.team.fanout import (
     build_team_plan,
     build_worker_task_packet,
     render_worker_task,
+    validate_partition_manifest,
+    validate_team_plan,
 )
 
 
@@ -42,4 +44,6 @@ __all__ = [
     "build_team_plan",
     "build_worker_task_packet",
     "render_worker_task",
+    "validate_partition_manifest",
+    "validate_team_plan",
 ]

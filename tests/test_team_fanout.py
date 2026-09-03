@@ -28,9 +28,11 @@ from strix.team import (
     build_team_plan,
     build_worker_task_packet,
     render_worker_task,
+    validate_partition_manifest,
 )
 from strix.team.fanout import _DEFAULT_DO_NOT_REPEAT
 from strix.tools.source_partition import partition_source
+from strix.tools.source_partition.models import PartitionManifest, PartitionShard
 
 
 if TYPE_CHECKING:
@@ -45,8 +47,9 @@ OBJECTIVE = "Review the assigned source for security weaknesses relevant to the 
 EXPECTED_WORKER_SCOPE_DIRECTIVE = (
     "Your primary source scope is exactly this shard. "
     "Do not repeat broad repository discovery already completed by the coordinator. "
-    "Follow dependencies outside the shard only when evidence from assigned files "
-    "requires it, and record that boundary crossing."
+    "Follow dependencies outside the shard only when evidence from your assigned files "
+    "requires it. "
+    "Record any such boundary crossing explicitly."
 )
 
 
@@ -348,3 +351,75 @@ def test_fanout_spawner_shape_matches_existing_child_spawner() -> None:
 def test_no_model_visible_tool_added() -> None:
     names = {getattr(tool, "name", repr(tool)) for tool in registered_agent_tools()}
     assert not any("team" in name or "fanout" in name or "shard" in name for name in names)
+
+
+# ---------------------------------------------------------------------------
+# 13. Manifest validation at the fan-out boundary (hand-built manifests)
+# ---------------------------------------------------------------------------
+
+
+def _hand_manifest(*, shards: list[PartitionShard], effective_workers: int) -> PartitionManifest:
+    file_to_shard = {file: shard.shard_id for shard in shards for file in shard.files}
+    return PartitionManifest(
+        requested_workers=effective_workers,
+        effective_workers=effective_workers,
+        total_weight=sum(shard.weight for shard in shards),
+        total_loc=sum(shard.loc for shard in shards),
+        shards=tuple(shards),
+        file_to_shard=file_to_shard,
+        notes=(),
+    )
+
+
+def _shard(shard_id: int, files: list[str], weight: int = 1, loc: int = 1) -> PartitionShard:
+    return PartitionShard(shard_id=shard_id, files=tuple(files), weight=weight, loc=loc)
+
+
+def test_manifest_validation_rejects_duplicate_shard_ids() -> None:
+    manifest = _hand_manifest(
+        shards=[_shard(0, ["a.py"]), _shard(0, ["b.py"])], effective_workers=2
+    )
+    with pytest.raises(ValueError, match="duplicate shard ids"):
+        validate_partition_manifest(manifest)
+    with pytest.raises(ValueError, match="duplicate shard ids"):
+        build_team_assignments(manifest, objective=OBJECTIVE)
+
+
+def test_manifest_validation_rejects_effective_mismatch() -> None:
+    manifest = _hand_manifest(shards=[_shard(0, ["a.py"])], effective_workers=2)
+    with pytest.raises(ValueError, match="effective_workers=2"):
+        validate_partition_manifest(manifest)
+    with pytest.raises(ValueError, match="effective_workers=2"):
+        build_team_assignments(manifest, objective=OBJECTIVE)
+
+
+def test_manifest_validation_rejects_gapped_shard_ids() -> None:
+    manifest = _hand_manifest(
+        shards=[_shard(0, ["a.py"]), _shard(2, ["b.py"])], effective_workers=2
+    )
+    with pytest.raises(ValueError, match="contiguous"):
+        validate_partition_manifest(manifest)
+
+
+def test_manifest_validation_rejects_duplicate_file_across_shards() -> None:
+    manifest = _hand_manifest(
+        shards=[_shard(0, ["a.py", "dup.py"]), _shard(1, ["dup.py"])], effective_workers=2
+    )
+    with pytest.raises(ValueError, match=r"dup\.py"):
+        validate_partition_manifest(manifest)
+    with pytest.raises(ValueError, match=r"dup\.py"):
+        build_team_assignments(manifest, objective=OBJECTIVE)
+
+
+def test_manifest_validation_valid_manifest_flows_through() -> None:
+    manifest = _hand_manifest(
+        shards=[_shard(0, ["a.py"]), _shard(1, ["b.py"])], effective_workers=2
+    )
+    validate_partition_manifest(manifest)  # must not raise
+    assignments = build_team_assignments(manifest, objective=OBJECTIVE)
+    assert len(assignments) == 2
+    plan = build_team_plan(manifest, objective=OBJECTIVE)
+    spawner = _FakeSpawner()
+    TeamFanout(plan, spawner.spawn)  # boundary validation accepts a valid plan
+    spawned = _run_async(_spawn_all(plan, spawner))
+    assert len(spawned) == 2
