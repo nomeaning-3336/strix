@@ -78,10 +78,12 @@ class TeamStageOutcome:
     explains why nothing (or fewer things) were spawned.
 
     Success accounting is explicit: ``spawned`` (the retained per-worker
-    tuple, for backwards compatibility) may contain failed attempts
-    (``SpawnedWorker.error is not None``); ``attempted`` /
-    ``successfully_spawned`` / ``failed_to_spawn`` are the counters the runner
-    should log and act on.
+    tuple, for backwards compatibility) contains every attempt - including
+    failures; ``attempted`` / ``successfully_spawned`` / ``failed_to_spawn``
+    are the counters the runner should log and act on.  A worker is a success
+    only when :func:`_is_successful_spawn` says so (no exception AND a
+    non-empty string ``agent_id``); a malformed success payload counts as a
+    failure.
     """
 
     enabled: bool
@@ -92,6 +94,17 @@ class TeamStageOutcome:
     attempted: int = 0
     successfully_spawned: int = 0
     failed_to_spawn: int = 0
+
+
+def _is_successful_spawn(spawned: SpawnedWorker) -> bool:
+    """Single source of truth for "did this worker actually spawn?".
+
+    A spawn counts as successful only when no exception was raised AND the
+    spawner returned a usable, non-empty string ``agent_id``.  A spawner that
+    returns a malformed success payload (``agent_id=None``, ``""``, or a
+    non-string) is a spawn failure even without an exception.
+    """
+    return spawned.error is None and isinstance(spawned.agent_id, str) and bool(spawned.agent_id)
 
 
 def resolve_team_roots(
@@ -208,7 +221,7 @@ async def stage_source_team_fanout(
     fanout = TeamFanout(plan, spawn_worker, skills=tuple(worker_skills))
     spawned = await fanout.spawn_all()
     attempted = len(spawned)
-    successfully_spawned = sum(1 for worker in spawned if worker.error is None)
+    successfully_spawned = sum(1 for worker in spawned if _is_successful_spawn(worker))
     failed_to_spawn = attempted - successfully_spawned
     if successfully_spawned and failed_to_spawn == 0:
         reason = "spawned"
@@ -245,32 +258,66 @@ def build_root_team_handoff(
 ) -> str | None:
     """Compact coordinator-owned handoff for the root's initial task.
 
-    Lists only workers that actually spawned (``error is None``), ordered by
-    shard id, with their agent ids - no file lists, no transcripts.  Returns
-    ``None`` when nothing spawned (the root then runs exactly as before).
+    All-success: a single ``Workers:`` section (successful workers ordered by
+    shard id, no file lists, no transcripts).  Partial failure: ``Active
+    workers:`` plus ``Uncovered shards:`` so the root knows exactly which
+    shards still have nobody assigned, with prose telling it to cover or
+    reassign them.  All-failed (or no plan): returns ``None`` - the root runs
+    exactly as before.  Success is decided by :func:`_is_successful_spawn`;
+    a spawner that returned a malformed success payload leaves that shard
+    uncovered.
     """
     if plan is None:
         return None
     successful = sorted(
-        (worker for worker in spawned if worker.error is None and worker.agent_id),
+        (worker for worker in spawned if _is_successful_spawn(worker)),
         key=lambda worker: (worker.shard_id, worker.worker_id),
     )
     if not successful:
         return None
-    worker_lines = [
+    expected_shard_ids = sorted({assignment.shard_id for assignment in plan.assignments})
+    covered_shard_ids = {worker.shard_id for worker in successful}
+    uncovered_shard_ids = [
+        shard_id for shard_id in expected_shard_ids if shard_id not in covered_shard_ids
+    ]
+
+    active_lines = [
         f"- {worker.name} ({worker.agent_id}) → shard {worker.shard_id}" for worker in successful
+    ]
+    if not uncovered_shard_ids:
+        # All shards covered - the compact all-success layout.
+        return "\n".join(
+            [
+                "Deterministic source team already started.",
+                "",
+                "Workers:",
+                *active_lines,
+                "",
+                "Broad repository discovery has already been partitioned.",
+                "Do not redo broad source discovery or spawn overlapping source workers.",
+                "Continue orchestration/non-duplicative investigation, monitor these children,",
+                "and consume their completion reports through the existing agent mechanisms.",
+            ]
+        )
+
+    uncovered_lines = [
+        f"- shard {shard_id} → worker failed to spawn" for shard_id in uncovered_shard_ids
     ]
     return "\n".join(
         [
             "Deterministic source team already started.",
             "",
-            "Workers:",
-            *worker_lines,
+            "Active workers:",
+            *active_lines,
+            "",
+            "Uncovered shards:",
+            *uncovered_lines,
             "",
             "Broad repository discovery has already been partitioned.",
-            "Do not redo broad source discovery or spawn overlapping source workers.",
-            "Continue orchestration/non-duplicative investigation, monitor these children,",
-            "and consume their completion reports through the existing agent mechanisms.",
+            "Do not duplicate work assigned to active workers.",
+            "Explicitly cover or reassign any uncovered shards before concluding source review.",
+            "Continue orchestration/non-duplicative investigation and consume child completion",
+            "reports through the existing agent mechanisms.",
         ]
     )
 

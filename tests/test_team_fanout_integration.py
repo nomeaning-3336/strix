@@ -18,10 +18,11 @@ import pytest
 
 from strix.config import loader
 from strix.config.loader import load_settings
-from strix.team import TeamFanout, build_team_plan
+from strix.team import SpawnedWorker, TeamFanout, build_team_plan
 from strix.team.fanout import WORKER_SCOPE_DIRECTIVE
 from strix.team.integration import (
     TeamStageOutcome,
+    _is_successful_spawn,
     build_root_team_handoff,
     log_team_stage_outcome,
     stage_source_team_fanout,
@@ -36,11 +37,33 @@ if TYPE_CHECKING:
 
 OBJECTIVE = "Investigate the assigned shard for security weaknesses."
 
-#: Root-handoff directive fragment the human approved - pinned so future
+#: Root-handoff directive fragments the human approved - pinned so future
 #: rewording of the handoff breaks a test.
-EXPECTED_HANDOFF_FRAGMENT = (
+EXPECTED_HANDOFF_FRAGMENT_SUCCESS = (
     "Do not redo broad source discovery or spawn overlapping source workers."
 )
+EXPECTED_HANDOFF_FRAGMENT_PARTIAL = (
+    "Do not duplicate work assigned to active workers.\n"
+    "Explicitly cover or reassign any uncovered shards before concluding source review."
+)
+
+
+class _MalformedSpawner:
+    """Fake spawner that returns a "success" payload with a bad agent_id."""
+
+    def __init__(self, agent_id_value: Any) -> None:
+        self.agent_id_value = agent_id_value
+        self.calls: list[dict[str, Any]] = []
+        self.count = 0
+
+    async def spawn(
+        self, *, name: str, task: str, skills: list[str], parent_history: list[Any]
+    ) -> dict[str, Any]:
+        self.count += 1
+        self.calls.append(
+            {"name": name, "task": task, "skills": list(skills), "parent_history": parent_history}
+        )
+        return {"success": True, "agent_id": self.agent_id_value, "name": name}
 
 
 def _code(path: Path, lines: int) -> None:
@@ -509,11 +532,11 @@ def test_runner_logging_uses_successful_counts(
 
 
 # ---------------------------------------------------------------------------
-# Root handoff: successful-only, ordered, directive-pinned
+# Root handoff: success/partial layouts, uncovered shards, pinned prose
 # ---------------------------------------------------------------------------
 
 
-def test_handoff_lists_only_successful_workers_in_shard_order(tmp_path: Path) -> None:
+def test_handoff_all_success_has_no_uncovered_section(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     _source_repo(root)
     recorder = _Recorder()
@@ -521,7 +544,10 @@ def test_handoff_lists_only_successful_workers_in_shard_order(tmp_path: Path) ->
     assert outcome.successfully_spawned == 3
     handoff = build_root_team_handoff(outcome.plan, outcome.spawned)
     assert handoff is not None
-    assert EXPECTED_HANDOFF_FRAGMENT in handoff
+    assert "Workers:" in handoff
+    assert "Active workers:" not in handoff
+    assert "Uncovered shards:" not in handoff
+    assert EXPECTED_HANDOFF_FRAGMENT_SUCCESS in handoff
     assert handoff.index("worker-0") < handoff.index("worker-1") < handoff.index("worker-2")
     for worker in outcome.spawned:
         assert worker.name in handoff
@@ -529,7 +555,7 @@ def test_handoff_lists_only_successful_workers_in_shard_order(tmp_path: Path) ->
         assert worker.agent_id in handoff
 
 
-def test_handoff_excludes_failed_workers(tmp_path: Path) -> None:
+def test_handoff_partial_lists_active_and_uncovered_shards(tmp_path: Path) -> None:
     root = tmp_path / "repo"
     _source_repo(root)
     recorder = _Recorder(fail_shard=1)
@@ -537,9 +563,31 @@ def test_handoff_excludes_failed_workers(tmp_path: Path) -> None:
     assert outcome.reason == "partial_spawn_failure"
     handoff = build_root_team_handoff(outcome.plan, outcome.spawned)
     assert handoff is not None
-    assert "worker-0" in handoff
-    assert "worker-2" in handoff
-    assert "\n- worker-1 " not in handoff  # the failed worker is absent
+    assert "Active workers:" in handoff
+    assert "Uncovered shards:" in handoff
+    # The uncovered shard appears exactly once.
+    assert handoff.count("- shard 1 → worker failed to spawn") == 1
+    # Active workers are the successful ones, ordered by shard id.
+    assert "\n- worker-0 (agent-1) → shard 0" in handoff
+    assert "\n- worker-2 (agent-2) → shard 2" in handoff
+    assert "\n- worker-1 " not in handoff  # the failed worker has no active line
+    # Both partial-failure directives are pinned present.
+    assert EXPECTED_HANDOFF_FRAGMENT_PARTIAL in handoff
+
+
+def test_handoff_partial_successful_shards_not_uncovered(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _source_repo(root)
+    recorder = _Recorder(fail_shard=1)
+    outcome = _stage(roots=[root], recorder=recorder, width=3)
+    handoff = build_root_team_handoff(outcome.plan, outcome.spawned)
+    assert handoff is not None
+    uncovered_section = handoff.split("Uncovered shards:", 1)[1]
+    assert "worker-0" not in uncovered_section
+    assert "worker-2" not in uncovered_section
+    assert "shard 0" not in uncovered_section
+    assert "shard 2" not in uncovered_section
+    assert uncovered_section.count("→ worker failed to spawn") == 1
 
 
 def test_handoff_none_when_nothing_spawned(tmp_path: Path) -> None:
@@ -549,6 +597,96 @@ def test_handoff_none_when_nothing_spawned(tmp_path: Path) -> None:
     outcome = _stage(roots=[root], recorder=recorder, width=3)
     assert outcome.successfully_spawned == 0
     assert build_root_team_handoff(outcome.plan, outcome.spawned) is None
+
+
+# ---------------------------------------------------------------------------
+# Centralized success predicate: malformed success payloads are failures
+# ---------------------------------------------------------------------------
+
+
+def test_malformed_agent_id_counts_as_spawn_failure(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _source_repo(root)
+    spawner = _MalformedSpawner("")
+    outcome = _run(
+        stage_source_team_fanout(
+            report_state=None,
+            local_sources=[{"source_path": str(root)}],
+            spawn_worker=spawner.spawn,
+            objective=OBJECTIVE,
+            team_width=3,
+        )
+    )
+    assert outcome.attempted == 3
+    assert outcome.successfully_spawned == 0
+    assert outcome.failed_to_spawn == 3
+    assert outcome.reason == "spawn_failed"
+    # Retained in the tuple for observability, but counted as failed.
+    assert len(outcome.spawned) == 3
+    assert all(worker.error is None and worker.agent_id == "" for worker in outcome.spawned)
+    # No team handoff: the legacy root path handles the scan.
+    assert build_root_team_handoff(outcome.plan, outcome.spawned) is None
+
+
+@pytest.mark.parametrize("bad_agent_id", ["", None, 123], ids=["empty", "none", "nonstring"])
+def test_malformed_success_payloads_are_failures(tmp_path: Path, bad_agent_id: Any) -> None:
+    root = tmp_path / "repo"
+    _source_repo(root)
+    spawner = _MalformedSpawner(bad_agent_id)
+    outcome = _run(
+        stage_source_team_fanout(
+            report_state=None,
+            local_sources=[{"source_path": str(root)}],
+            spawn_worker=spawner.spawn,
+            objective=OBJECTIVE,
+            team_width=3,
+        )
+    )
+    assert outcome.successfully_spawned == 0
+    assert outcome.failed_to_spawn == outcome.attempted
+    assert outcome.reason == "spawn_failed"
+    assert build_root_team_handoff(outcome.plan, outcome.spawned) is None
+
+
+def test_counters_reason_and_handoff_share_one_predicate(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    _source_repo(root)
+    spawner = _MalformedSpawner("")
+    outcome = _run(
+        stage_source_team_fanout(
+            report_state=None,
+            local_sources=[{"source_path": str(root)}],
+            spawn_worker=spawner.spawn,
+            objective=OBJECTIVE,
+            team_width=3,
+        )
+    )
+    expected_failed = sum(1 for worker in outcome.spawned if not _is_successful_spawn(worker))
+    assert outcome.failed_to_spawn == expected_failed
+    assert outcome.successfully_spawned == outcome.attempted - expected_failed
+    if outcome.successfully_spawned == 0:
+        assert outcome.reason == "spawn_failed"
+    assert (build_root_team_handoff(outcome.plan, outcome.spawned) is None) == (
+        outcome.successfully_spawned == 0
+    )
+
+
+def test_is_successful_spawn_predicate_cases() -> None:
+    def worker(**overrides: Any) -> SpawnedWorker:
+        fields: dict[str, Any] = {
+            "worker_id": 0,
+            "shard_id": 0,
+            "name": "worker-0",
+            "agent_id": "agent-1",
+        }
+        fields.update(overrides)
+        return SpawnedWorker(**fields)
+
+    assert _is_successful_spawn(worker()) is True  # success case
+    assert _is_successful_spawn(worker(error="boom")) is False
+    assert _is_successful_spawn(worker(agent_id="")) is False
+    assert _is_successful_spawn(worker(agent_id=None)) is False
+    assert _is_successful_spawn(worker(agent_id=123)) is False
 
 
 # ---------------------------------------------------------------------------
