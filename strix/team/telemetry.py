@@ -115,9 +115,9 @@ def build_stage_section(outcome: TeamStageOutcome) -> dict[str, Any]:
     assignments = _assignment_by_shard(plan)
     section: dict[str, Any] = {
         "team_width_requested": outcome.team_width,
-        "team_width_effective": (
-            plan.effective_workers if plan is not None else outcome.team_width
-        ),
+        # No plan (no source roots) means no worker could exist: effective is
+        # 0, not the requested width, which is kept in team_width_requested.
+        "team_width_effective": (plan.effective_workers if plan is not None else 0),
         "workers_attempted": outcome.attempted,
         "workers_spawned": outcome.successfully_spawned,
         "workers_failed": outcome.failed_to_spawn,

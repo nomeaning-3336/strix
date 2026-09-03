@@ -532,3 +532,104 @@ def test_worker_blocks_use_same_predicate_as_counter(tmp_path: Path) -> None:
         "rejected",
         "proof_gap",
     }
+
+
+# ---------------------------------------------------------------------------
+# Telemetry semantic correction: effective width must be 0 when no plan exists
+# ---------------------------------------------------------------------------
+
+#: Pinned no-plan effective width: zero workers could exist regardless of the
+#: requested width, so effective width is 0 (not the requested value).
+EXPECTED_NO_SOURCE_EFFECTIVE_WIDTH: int = 0
+
+
+def _no_source_outcome(*, width: int) -> TeamStageOutcome:
+    return asyncio.run(
+        stage_source_team_fanout(
+            report_state=None,
+            local_sources=[],
+            spawn_worker=_Spawner().spawn,
+            objective=OBJECTIVE,
+            team_width=width,
+        )
+    )
+
+
+def test_no_source_roots_records_effective_width_zero() -> None:
+    outcome = _no_source_outcome(width=3)
+    assert outcome.reason == "no_source_roots"
+    assert outcome.plan is None
+    state = _FakeReportState()
+    section = record_stage(state, outcome)
+    assert section["team_width_requested"] == 3
+    assert section["team_width_effective"] == EXPECTED_NO_SOURCE_EFFECTIVE_WIDTH == 0
+    assert section["workers_attempted"] == 0
+    assert section["workers_spawned"] == 0
+    assert section["workers_failed"] == 0
+    assert section["reason"] == "no_source_roots"
+    assert section["workers"] == []
+    assert section["root"] is None
+    assert section["aggregates"] is None
+
+
+def test_zero_units_records_effective_width_zero(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    outcome = asyncio.run(
+        stage_source_team_fanout(
+            report_state=None,
+            local_sources=[{"source_path": str(empty)}],
+            spawn_worker=_Spawner().spawn,
+            objective=OBJECTIVE,
+            team_width=3,
+        )
+    )
+    assert outcome.reason == "zero_units"
+    assert outcome.plan is not None
+    assert outcome.plan.effective_workers == 0
+    state = _FakeReportState()
+    section = record_stage(state, outcome)
+    assert section["team_width_requested"] == 3
+    assert section["team_width_effective"] == EXPECTED_NO_SOURCE_EFFECTIVE_WIDTH == 0
+    assert section["workers_attempted"] == 0
+    assert section["workers_spawned"] == 0
+    assert section["workers_failed"] == 0
+    assert section["reason"] == "zero_units"
+    assert section["workers"] == []
+
+
+def test_spawner_unavailable_records_effective_width_zero() -> None:
+    # Defensive path: width>1 reached the seam with no injected spawner. The
+    # real runner always injects one, so construct the outcome directly.
+    outcome = TeamStageOutcome(
+        enabled=False,
+        team_width=3,
+        plan=None,
+        spawned=(),
+        reason="spawner_unavailable",
+    )
+    state = _FakeReportState()
+    section = record_stage(state, outcome)
+    assert section["team_width_requested"] == 3
+    assert section["team_width_effective"] == EXPECTED_NO_SOURCE_EFFECTIVE_WIDTH == 0
+    assert section["workers_attempted"] == 0
+    assert section["workers_spawned"] == 0
+    assert section["workers_failed"] == 0
+    assert section["reason"] == "spawner_unavailable"
+    assert section["workers"] == []
+
+
+def test_plan_exists_effective_matches_plan(tmp_path: Path) -> None:
+    # Regression: the `plan is not None` branch must override outcome.team_width
+    # when the two disagree (e.g. a manifest with effective_workers < width).
+    root = tmp_path / "repo"
+    _repo(root)
+    outcome = _stage_outcome(root, width=3, spawner=_Spawner())
+    assert outcome.plan is not None
+    plan_effective = outcome.plan.effective_workers
+    assert plan_effective > 0
+    section = build_stage_section(outcome)
+    assert section["team_width_requested"] == outcome.team_width
+    assert section["team_width_effective"] == plan_effective
+    # Effective width comes from the plan, never from outcome.team_width.
+    assert section["team_width_effective"] != 0 or plan_effective == 0
