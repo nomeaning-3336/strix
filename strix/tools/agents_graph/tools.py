@@ -16,6 +16,7 @@ from strix.core.agents import Status, coordinator_from_context
 from strix.core.child_context import build_packet_from_task, render_packet
 from strix.core.execution import notify_parent_on_terminal
 from strix.core.hooks import LLM_TURN_KEY
+from strix.core.sessions import scrub_images_from_items
 from strix.skills import validate_requested_skills
 
 
@@ -574,6 +575,7 @@ async def _create_agent_impl(
         effective_task = task or ""
         mode = "full"
         initial_input: list[dict[str, Any]] | None = None
+        rendered_packet = ""
     else:
         parent_history = []
         packet = build_packet_from_task(
@@ -601,15 +603,24 @@ async def _create_agent_impl(
         ]
 
     inherited_items = len(parent_history)
+    # inherited_chars measures what full mode actually transmits: the
+    # scrubbed (image-free) history serialized with the same JSON options as
+    # child_initial_input uses, not the raw in-memory items.
     inherited_chars = (
-        len(json.dumps(parent_history, ensure_ascii=False, default=str)) if parent_history else 0
-    )
-    task_chars = len(effective_task or "")
-    compact_packet_chars = (
-        sum(len(part.get("content", "")) for part in initial_input)
-        if initial_input is not None
+        len(
+            json.dumps(
+                scrub_images_from_items(parent_history),
+                ensure_ascii=False,
+                default=str,
+            )
+        )
+        if parent_history
         else 0
     )
+    task_chars = len(effective_task or "")
+    # compact_packet_chars measures the deterministic packet only - the
+    # identity/termination framing around it is excluded on purpose.
+    compact_packet_chars = len(rendered_packet)
 
     try:
         spawn_kwargs: dict[str, Any] = {

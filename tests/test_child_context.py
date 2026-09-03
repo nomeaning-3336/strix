@@ -26,6 +26,7 @@ from strix.core.child_context import (
     render_packet,
 )
 from strix.core.execution import spawn_child_agent
+from strix.core.sessions import scrub_images_from_items
 from strix.tools.agents_graph.tools import _create_agent_impl, create_agent
 
 
@@ -335,7 +336,12 @@ async def test_create_agent_compact_mode_log_emits_metrics(
     assert "context_mode=compact" in record_text
     assert "inherited_items=0" in record_text
     assert "inherited_chars=0" in record_text
-    assert "compact_packet_chars=" in record_text
+    # compact_packet_chars measures ONLY the deterministic packet - the
+    # identity/termination framing around it is excluded.
+    expected_packet = render_packet(
+        build_packet_from_task(task=OBJECTIVE, scan_targets=["/workspace/api"])
+    )
+    assert f"compact_packet_chars={len(expected_packet)}" in record_text
     assert f"task_chars={len(OBJECTIVE)}" in record_text
 
 
@@ -355,8 +361,50 @@ async def test_create_agent_full_mode_log_emits_metrics(
     record_text = " ".join(record.getMessage() for record in caplog.records)
     assert "context_mode=full" in record_text
     assert "inherited_items=1" in record_text
-    # inherited_chars measures the serialized parent history (what the child
-    # actually receives in full mode), including message wrapper structure.
-    expected_serialized = len(json.dumps(parent_history, ensure_ascii=False, default=str))
+    # inherited_chars measures the SCRUBBED serialized parent history - the
+    # same representation child_initial_input transmits (images replaced by
+    # text), including message wrapper structure.
+    expected_serialized = len(
+        json.dumps(
+            scrub_images_from_items(parent_history),
+            ensure_ascii=False,
+            default=str,
+        )
+    )
     assert f"inherited_chars={expected_serialized}" in record_text
     assert "compact_packet_chars=0" in record_text
+
+
+@pytest.mark.asyncio  # type: ignore[misc]
+async def test_inherited_chars_uses_scrubbed_history(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Images are measured as their scrubbed text, matching transmitted bytes."""
+    parent_history = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "look at this"},
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64," + "A" * 4000,
+                },
+            ],
+        }
+    ]
+    ctx = _StubCtx(turn_input=parent_history)
+    with caplog.at_level("INFO", logger="strix.tools.agents_graph.tools"):
+        await _create_agent_impl(
+            ctx=ctx.as_wrapper(),
+            name="Test",
+            task=OBJECTIVE,
+            inherit_context=True,
+        )
+    record_text = " ".join(record.getMessage() for record in caplog.records)
+    scrubbed = scrub_images_from_items(parent_history)
+    assert scrubbed != parent_history  # image replaced
+    expected_serialized = len(json.dumps(scrubbed, ensure_ascii=False, default=str))
+    assert f"inherited_chars={expected_serialized}" in record_text
+    # The raw image payload must NOT be part of the measured size.
+    raw_serialized = len(json.dumps(parent_history, ensure_ascii=False, default=str))
+    assert expected_serialized < raw_serialized
