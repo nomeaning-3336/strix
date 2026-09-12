@@ -27,14 +27,15 @@ _DEFAULT_PATH: Path = Path.home() / ".strix" / "cli-config.json"
 _override: Path | None = None
 _cached: Settings | None = None
 
-# Model selection and provider credentials describe one LLM connection. When
-# the shell changes any of them, the stored values of the others no longer
-# belong together and are dropped rather than mixed with the new value. This
-# fork routes the root orchestrator and spawned subagents independently, so all
-# three model fields belong to the connection tuple alongside the credentials:
-# a new worker model must not be paired with the key/base stored for the old
-# one.
-_LINKED_LLM_FIELDS = ("model", "root_model", "subagent_model", "api_key", "api_base")
+# The LLM configuration splits into two kinds of setting, and a shell change to
+# one invalidates the other differently (see _drop_stale_llm_connection):
+#
+#   model selectors - independent role choices. This fork routes the root
+#     orchestrator and spawned subagents independently, and STRIX_LLM is the
+#     shared fallback for both, so all three are selectors.
+#   credentials - the one provider connection the selectors ride on.
+_MODEL_SELECTOR_FIELDS = ("model", "root_model", "subagent_model")
+_CREDENTIAL_FIELDS = ("api_key", "api_base")
 
 
 def load_settings() -> Settings:
@@ -146,27 +147,47 @@ def _first_alias_value(aliases: list[str], source: Mapping[str, Any]) -> Any | N
     return next((source[alias] for alias in aliases if alias in source), None)
 
 
-def _drop_stale_llm_connection(env_block: dict[str, Any]) -> dict[str, Any]:
-    """Remove every linked LLM var from ``env_block`` if the shell changed any of them.
-
-    The linked fields describe one connection (models + credentials). If the
-    shell supplies a different value for any of them, the stored values of the
-    rest are from a different configuration and must not be merged in - a new
-    worker model must not pick up the key/base stored for the previous one.
-    Unrelated stored settings (e.g. a search-provider key) are kept.
-    """
-    linked_aliases = [
+def _aliases_by_field(field_names: tuple[str, ...]) -> list[list[str]]:
+    """Upper-cased alias groups for ``field_names`` of LlmSettings, in field order."""
+    return [
         [alias.upper() for alias in _aliases_for(LlmSettings.model_fields[name])]
-        for name in _LINKED_LLM_FIELDS
+        for name in field_names
     ]
-    changed = any(
-        (env_value := _first_alias_value(aliases, os.environ)) is not None
-        and env_value != _first_alias_value(aliases, env_block)
-        for aliases in linked_aliases
-    )
-    if not changed:
+
+
+def _field_changed(aliases: list[str], env_block: Mapping[str, Any]) -> bool:
+    """True when the shell supplies this field with a value differing from the stored one."""
+    env_value = _first_alias_value(aliases, os.environ)
+    return env_value is not None and env_value != _first_alias_value(aliases, env_block)
+
+
+def _drop_stale_llm_connection(env_block: dict[str, Any]) -> dict[str, Any]:
+    """Drop stored LLM fields that a shell change invalidated.
+
+    Invalidation is asymmetric, because the two halves of this configuration
+    are not the same kind of thing:
+
+    - The model selectors (``model``, ``root_model``, ``subagent_model``) are
+      independent role choices. A changed selector invalidates the stored
+      *credentials*, since the new model may live behind a different provider
+      and pairing it with the stored key/base would resurrect a connection it
+      was never chosen for. The other stored selectors are separate choices the
+      operator did not touch, so they are preserved.
+    - The credentials (``api_key``, ``api_base``) are the single provider
+      connection the selectors ride on. A changed credential invalidates every
+      stored model selector too, because the new endpoint may serve none of them.
+
+    Unrelated stored settings (e.g. a search-provider key) are always kept.
+    """
+    model_aliases = _aliases_by_field(_MODEL_SELECTOR_FIELDS)
+    credential_aliases = _aliases_by_field(_CREDENTIAL_FIELDS)
+
+    if any(_field_changed(aliases, env_block) for aliases in credential_aliases):
+        stale = {alias for group in (*model_aliases, *credential_aliases) for alias in group}
+    elif any(_field_changed(aliases, env_block) for aliases in model_aliases):
+        stale = {alias for group in credential_aliases for alias in group}
+    else:
         return env_block
-    stale = {alias for aliases in linked_aliases for alias in aliases}
     return {k: v for k, v in env_block.items() if k not in stale}
 
 

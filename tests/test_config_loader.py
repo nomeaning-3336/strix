@@ -429,52 +429,140 @@ def test_unrelated_stored_settings_survive_a_connection_change(
 
 
 # --------------------------------------------------------------------------- #
-# Role-aware routing: all three model vars are part of the connection tuple
+# Role-aware routing: model selectors and credentials invalidate asymmetrically
+#
+# A changed model selector is an independent role choice: it invalidates the
+# stored credentials (the new model may sit behind another provider) but leaves
+# the other selectors alone. A changed credential swaps the whole connection,
+# so every stored selector goes with it.
 # --------------------------------------------------------------------------- #
 
+_STORED_CONNECTION = {
+    "STRIX_ROOT_LLM": "gpt-5.6-sol",
+    "STRIX_SUBAGENT_LLM": "deepseek-v4-pro",
+    "LLM_API_KEY": "old-key",
+    "LLM_API_BASE": "http://old-base",
+}
 
-def test_root_model_change_drops_stored_connection(
+
+def _seed_connection(tmp_path: Path) -> Path:
+    target = tmp_path / "cli-config.json"
+    target.write_text(json.dumps({"env": dict(_STORED_CONNECTION)}), encoding="utf-8")
+    loader.apply_config_override(target)
+    return target
+
+
+def _persisted(target: Path) -> dict[str, str]:
+    return json.loads(target.read_text(encoding="utf-8"))["env"]
+
+
+def test_subagent_model_change_preserves_root_and_drops_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    target = tmp_path / "cli-config.json"
-    target.write_text(
-        json.dumps({"env": {"STRIX_ROOT_LLM": "old-root", "LLM_API_KEY": "old-key"}}),
-        encoding="utf-8",
-    )
-    loader.apply_config_override(target)
-    monkeypatch.setenv("STRIX_ROOT_LLM", "new-root")
+    """Repointing workers must not resurrect the old connection - nor move the root."""
+    target = _seed_connection(tmp_path)
+    monkeypatch.setenv("STRIX_SUBAGENT_LLM", "kimi-k3")
 
     loader.persist_current()
 
-    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"STRIX_ROOT_LLM": "new-root"}}
-
-
-def test_subagent_model_change_does_not_resurrect_stored_key_base(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Repointing workers at another endpoint must not reuse the old credentials."""
-    target = tmp_path / "cli-config.json"
-    target.write_text(
-        json.dumps(
-            {
-                "env": {
-                    "STRIX_ROOT_LLM": "gpt-5.6-sol",
-                    "STRIX_SUBAGENT_LLM": "deepseek-v4-pro",
-                    "LLM_API_KEY": "old-key",
-                    "LLM_API_BASE": "http://old-base",
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
-    loader.apply_config_override(target)
-    monkeypatch.setenv("STRIX_SUBAGENT_LLM", "another-endpoint-model")
-
-    loader.persist_current()
-
-    assert json.loads(target.read_text(encoding="utf-8")) == {
-        "env": {"STRIX_SUBAGENT_LLM": "another-endpoint-model"}
+    assert _persisted(target) == {
+        "STRIX_ROOT_LLM": "gpt-5.6-sol",  # independent choice, preserved
+        "STRIX_SUBAGENT_LLM": "kimi-k3",  # replaced from the shell
     }
+
+
+def test_root_model_change_preserves_subagent_and_drops_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _seed_connection(tmp_path)
+    monkeypatch.setenv("STRIX_ROOT_LLM", "gpt-5.7-sol")
+
+    loader.persist_current()
+
+    assert _persisted(target) == {
+        "STRIX_ROOT_LLM": "gpt-5.7-sol",
+        "STRIX_SUBAGENT_LLM": "deepseek-v4-pro",  # preserved
+    }
+
+
+def test_fallback_model_change_preserves_role_overrides_and_drops_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """STRIX_LLM is a selector too: it must not clear the role overrides."""
+    target = _seed_connection(tmp_path)
+    monkeypatch.setenv("STRIX_LLM", "gpt-5.6-sol-lite")
+
+    loader.persist_current()
+
+    assert _persisted(target) == {
+        "STRIX_LLM": "gpt-5.6-sol-lite",
+        "STRIX_ROOT_LLM": "gpt-5.6-sol",
+        "STRIX_SUBAGENT_LLM": "deepseek-v4-pro",
+    }
+
+
+def test_api_key_change_drops_every_stored_selector_and_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A new connection may serve none of the stored models."""
+    target = _seed_connection(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "new-key")
+
+    loader.persist_current()
+
+    assert _persisted(target) == {"LLM_API_KEY": "new-key"}
+
+
+def test_api_base_change_drops_every_stored_selector_and_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = _seed_connection(tmp_path)
+    monkeypatch.setenv("LLM_API_BASE", "http://new-base")
+
+    loader.persist_current()
+
+    assert _persisted(target) == {"LLM_API_BASE": "http://new-base"}
+
+
+def test_unchanged_model_selector_keeps_stored_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-exporting the same selector is not a change."""
+    target = _seed_connection(tmp_path)
+    monkeypatch.setenv("STRIX_SUBAGENT_LLM", "deepseek-v4-pro")
+
+    loader.persist_current()
+
+    assert _persisted(target) == _STORED_CONNECTION
+
+
+def test_model_selector_change_drops_credentials_before_loading_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loading must not pair the new worker model with the stored connection."""
+    _seed_connection(tmp_path)
+    monkeypatch.setenv("STRIX_SUBAGENT_LLM", "kimi-k3")
+
+    settings = loader.load_settings()
+
+    assert settings.llm.subagent_model == "kimi-k3"
+    assert settings.llm.root_model == "gpt-5.6-sol"  # preserved
+    assert settings.llm.api_key is None  # not resurrected
+    assert settings.llm.api_base is None
+
+
+def test_credential_change_drops_selectors_before_loading_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_connection(tmp_path)
+    monkeypatch.setenv("LLM_API_KEY", "new-key")
+
+    settings = loader.load_settings()
+
+    assert settings.llm.api_key == "new-key"
+    assert settings.llm.root_model is None
+    assert settings.llm.subagent_model is None
+    assert settings.llm.api_base is None
 
 
 def test_role_models_load_independently_when_connection_is_unchanged(
