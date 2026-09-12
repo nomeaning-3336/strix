@@ -35,12 +35,24 @@ def report_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Re
     set_global_report_state(None)
 
 
-async def _graph(*, interactive: bool) -> AgentCoordinator:
+async def _graph(*, interactive: bool, tmp_path: Path | None = None) -> AgentCoordinator:
+    """A two-agent graph shaped like the real runner's.
+
+    An interactive run mirrors _start_child_runner, which attaches a session
+    together with resumable=interactive; a non-interactive run attaches neither
+    (its loops return when terminal). Pass ``tmp_path`` for an interactive graph
+    so the sessions are real and delivery can be counted.
+    """
     coordinator = AgentCoordinator()
     await coordinator.register("root", "strix", parent_id=None)
     await coordinator.register("child", "Validator", parent_id="root")
-    await coordinator.attach_runtime("root", resumable=interactive)
-    await coordinator.attach_runtime("child", resumable=interactive)
+    for aid in ("root", "child"):
+        session = (
+            open_agent_session(aid, tmp_path / f"{aid}.db")
+            if interactive and tmp_path is not None
+            else None
+        )
+        await coordinator.attach_runtime(aid, session=session, resumable=interactive)
     return coordinator
 
 
@@ -108,9 +120,9 @@ async def test_message_to_live_child_is_delivered(status: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_interactive_run_can_still_wake_a_completed_child() -> None:
+async def test_interactive_run_can_still_wake_a_completed_child(tmp_path: Path) -> None:
     """An interactive loop parks after a terminal state, so a message resumes it."""
-    coordinator = await _graph(interactive=True)
+    coordinator = await _graph(interactive=True, tmp_path=tmp_path)
     await coordinator.set_status("child", "completed")
 
     assert await coordinator.reachability("child") == (True, "completed")
@@ -139,6 +151,65 @@ async def test_unknown_target_is_reported_as_not_found() -> None:
     assert result["success"] is False
     assert result["target_status"] is None
     assert "not found" in result["error"]
+
+
+# --- reachability across a resume -------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_completed_child_stays_unreachable_across_snapshot_restore() -> None:
+    """The 1edafd3 bug must not come back after ``--resume``.
+
+    ``resumable`` is runtime-only: snapshot() does not persist it and restore()
+    recreates runtimes with the dataclass default (True). A non-interactive
+    resume also skips terminal children in respawn_subagents, so a completed
+    child comes back with the flag claiming "reachable" and no loop behind it.
+    """
+    coordinator = await _graph(interactive=False)
+    await coordinator.set_status("child", "completed")
+    assert await coordinator.reachability("child") == (False, "completed")
+
+    snapshot = await coordinator.snapshot()
+    resumed = AgentCoordinator()
+    await resumed.restore(snapshot)
+
+    # The flag did not survive; the missing session is what has to catch this.
+    assert resumed.runtimes["child"].resumable is True
+    assert resumed.runtimes["child"].session is None
+    assert await resumed.reachability("child") == (False, "completed")
+    assert await resumed.send("child", {"from": "root", "content": "hi"}) is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_agent_without_a_session_is_unreachable() -> None:
+    """Registered then terminal with no session: nothing can read the mailbox.
+
+    Also covers the rarer case where child creation registers an agent but
+    runner/session setup fails before a usable loop exists.
+    """
+    coordinator = AgentCoordinator()
+    await coordinator.register("root", "strix", parent_id=None)
+    await coordinator.register("child", "Validator", parent_id="root")
+    await coordinator.set_status("child", "completed")
+
+    runtime = coordinator.runtimes["child"]
+    assert runtime.resumable is True  # the flag alone would claim reachable
+    assert runtime.session is None
+    assert await coordinator.reachability("child") == (False, "completed")
+
+
+@pytest.mark.asyncio
+async def test_terminal_child_with_a_session_stays_reachable(tmp_path: Path) -> None:
+    """Positive control: the session check must not make reachability too broad.
+
+    An interactive resumed child is actually respawned, so it has both the flag
+    and a session, and a follow-up message must still reach it.
+    """
+    coordinator = await _graph(interactive=True, tmp_path=tmp_path)
+    await coordinator.set_status("child", "completed")
+
+    assert await coordinator.reachability("child") == (True, "completed")
+    assert await coordinator.send("child", {"from": "root", "content": "hi"}) is True
 
 
 # --- wait_for_agents -------------------------------------------------------------

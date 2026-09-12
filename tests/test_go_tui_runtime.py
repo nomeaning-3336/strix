@@ -16,6 +16,7 @@ from typing import Any, cast
 import pytest
 
 from strix.config.settings import DEFAULT_MAX_TURNS
+from strix.core.sessions import open_agent_session
 from strix.interface.tui import runtime as go_tui
 from strix.interface.tui import sidecar
 from strix.interface.tui.runtime import GoTuiRuntime
@@ -858,9 +859,15 @@ async def test_agent_state_sync_does_not_mask_root_failure_with_completed_report
 
 
 @pytest.mark.asyncio
-async def test_agent_state_sync_clears_root_failure_after_user_resume() -> None:
+async def test_agent_state_sync_clears_root_failure_after_user_resume(tmp_path: Path) -> None:
     runtime = GoTuiRuntime(args())
     await runtime.coordinator.register("root", "Strix", parent_id=None)
+    # In a real TUI scan the runner attaches the root's session in run_strix_scan
+    # before the loop starts; this test registers a root directly, so it must
+    # attach one itself. A terminal agent with no session has no loop to read a
+    # message and is deliberately unreachable (AgentCoordinator._unreachable_locked).
+    session = open_agent_session("root", tmp_path / "root.db")
+    await runtime.coordinator.attach_runtime("root", session=session)
     await runtime.coordinator.set_status("root", "failed", error="provider rejected request")
 
     await runtime._sync_agent_state()
@@ -875,6 +882,7 @@ async def test_agent_state_sync_clears_root_failure_after_user_resume() -> None:
     root = runtime.live_view.agents["root"]
     assert root["status"] == "waiting"
     assert "error_message" not in root
+    session.close()
 
 
 @pytest.mark.asyncio

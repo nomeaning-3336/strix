@@ -574,11 +574,20 @@ class AgentCoordinator:
             return True
 
     def _unreachable_locked(self, agent_id: str) -> bool:
-        """True when the agent is terminal and no loop will ever read its mailbox."""
+        """True when the agent is terminal and nothing will read its mailbox.
+
+        ``resumable`` is runtime-only state: ``snapshot()`` does not persist it
+        and ``restore()`` recreates every runtime with the dataclass default
+        (``True``). After a non-interactive resume, ``respawn_subagents`` skips
+        terminal children, so a completed child comes back with ``resumable=True``
+        but no session and no loop - the exact bug this guards against. A missing
+        session is therefore treated as unreachable too: no attached session means
+        nothing can consume the mailbox, whether or not the flag survived.
+        """
         if self.statuses.get(agent_id) not in TERMINAL_STATUSES:
             return False
         runtime = self.runtimes.get(agent_id)
-        return runtime is not None and not runtime.resumable
+        return runtime is None or not runtime.resumable or runtime.session is None
 
     async def reachability(self, agent_id: str) -> tuple[bool, Status | None]:
         """Whether a message to ``agent_id`` can still be acted on, plus its status.

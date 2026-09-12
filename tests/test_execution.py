@@ -459,10 +459,16 @@ async def test_non_user_send_does_not_resume_budget_pause(tmp_path: Any) -> None
 
 
 @pytest.mark.asyncio
-async def test_user_send_starts_fresh_resume_attempt_after_failure() -> None:
+async def test_user_send_starts_fresh_resume_attempt_after_failure(tmp_path: Any) -> None:
     coordinator = AgentCoordinator()
     await coordinator.register("root", "strix", parent_id=None)
     await coordinator.register("child", "recon", parent_id="root")
+    # A spawned child always carries a session (run_agent_loop /
+    # _start_child_runner attach one). Without it a terminal agent has no loop
+    # and is unreachable, so the fixture must attach one for this to model a
+    # live interactive child that a user can wake.
+    session = SQLiteSession("child", tmp_path / "agents.db")
+    await coordinator.attach_runtime("child", session=session)
     await coordinator.park_waiting("child", wait_kind="stalled")
     await coordinator.record_recovery("child")
     await coordinator.record_idle_resume("child")
@@ -479,13 +485,17 @@ async def test_user_send_starts_fresh_resume_attempt_after_failure() -> None:
     assert "child" not in coordinator.recovery_counts
     assert "child" not in coordinator.idle_resume_counts
     assert await coordinator.claim_parent_notice("child") is True
+    session.close()
 
 
 @pytest.mark.asyncio
-async def test_non_user_send_preserves_failed_resume_state() -> None:
+async def test_non_user_send_preserves_failed_resume_state(tmp_path: Any) -> None:
     coordinator = AgentCoordinator()
     await coordinator.register("root", "strix", parent_id=None)
     await coordinator.register("child", "recon", parent_id="root")
+    # See the note above: a live child carries a session.
+    session = SQLiteSession("child", tmp_path / "agents.db")
+    await coordinator.attach_runtime("child", session=session)
     await coordinator.park_waiting("child", wait_kind="stalled")
     await coordinator.record_recovery("child")
     await coordinator.record_idle_resume("child")
@@ -499,6 +509,7 @@ async def test_non_user_send_preserves_failed_resume_state() -> None:
     assert coordinator.wait_kinds["child"] == "stalled"
     assert coordinator.recovery_counts["child"] == 1
     assert coordinator.idle_resume_counts["child"] == 1
+    session.close()
 
 
 @pytest.mark.asyncio
@@ -1097,6 +1108,7 @@ async def test_interactive_subagent_exhaustion_tells_its_parent(
     await _drive(coordinator, "child", interactive=True)
 
     assert coordinator.statuses["child"] == "waiting"
+
     # Give the root a real (working) session so the parent notice is durably
     # persisted; consume_pending only reports delivery once the write succeeds.
     class _Session:

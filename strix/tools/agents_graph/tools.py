@@ -173,7 +173,10 @@ def _render_completion_report(
         lines.append("Findings:")
         lines.extend(f"- {f}" for f in findings)
     lines.append("")
-    lines.append("Vulnerability reports filed by this agent (authoritative; note the state):")
+    lines.append(
+        "Vulnerability reports filed by this agent\n"
+        "(state shown at completion; use list_reports/get_report for current state):"
+    )
     if filed_reports:
         lines.extend(_render_filed_report(r) for r in filed_reports)
     else:
