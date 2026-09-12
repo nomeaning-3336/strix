@@ -41,6 +41,7 @@ from strix.interface.update_check import (
 from strix.interface.utils import (
     build_final_stats_text,
 )
+from strix.llm.warmup import start_import_warmup, wait_for_import_warmup
 from strix.telemetry import posthog, scarf
 from strix.telemetry.logging import configure_dependency_logging
 
@@ -453,8 +454,6 @@ def main() -> None:
 
         sys.exit(run_cloud(sys.argv[2:]))
 
-    from strix.llm.warmup import start_import_warmup
-
     start_import_warmup()
 
     args = parse_arguments()
@@ -467,6 +466,9 @@ def main() -> None:
 
     check_docker_installed()
     pull_docker_image()
+
+    # Everything below imports the scan engine; do not race the warm-up thread.
+    wait_for_import_warmup()
 
     # In setup mode the TUI collects the target, then runs prepare_run(),
     # warm-up, and telemetry itself once the user starts the scan.
