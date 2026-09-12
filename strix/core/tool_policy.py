@@ -77,6 +77,7 @@ _PARALLEL_SAFE_TOOLS: frozenset[str] = frozenset(
         "describe_mcp",
         "view_agent_graph",
         "source_inspect_many",
+        "search_writeups",
         # sandbox filesystem readers
         "read_file",
         "list_dir",
@@ -87,7 +88,9 @@ _PARALLEL_SAFE_TOOLS: frozenset[str] = frozenset(
 # Tools whose result is stable for an immutable snapshot key. Only the
 # deterministic source-inspection operations qualify today: the code checkout
 # does not change between two identical calls, unlike every runtime reader.
-_CACHEABLE_TOOLS: frozenset[str] = frozenset({"source_inspect_many"})
+# ``search_writeups`` reads a local corpus index that is fixed for the run, so an
+# identical query returns an identical payload.
+_CACHEABLE_TOOLS: frozenset[str] = frozenset({"source_inspect_many", "search_writeups"})
 
 # Tools that must never overlap each other even across different names: the
 # sandbox shell pair shares one interactive/session channel.
