@@ -1,4 +1,4 @@
-.PHONY: help install dev-install format lint type-check security check-all clean pre-commit setup-dev dev viewer wheel tui-build tui-test tui-lint
+.PHONY: help install dev-install format lint type-check security check-all clean pre-commit setup-dev dev viewer writeups wheel tui-build tui-test tui-lint
 
 TUI_BINARY := build/sidecar/strix-tui$(if $(filter Windows_NT,$(OS)),.exe)
 
@@ -77,6 +77,11 @@ viewer:
 	@echo "🖥️  Building the local-viewer SPA..."
 	cd strix/interface/viewer/frontend && npm ci && npm run build
 	@echo "✅ Viewer built to strix/interface/viewer/static/ (commit the changes)."
+
+writeups:
+	@echo "📚 Building the bug-bounty writeup corpus..."
+	uv run python scripts/build_writeup_corpus.py --since-year 2024
+	@echo "✅ Corpus built to strix/knowledge/writeups.jsonl.gz (commit the changes)."
 
 wheel:
 	uv build --wheel

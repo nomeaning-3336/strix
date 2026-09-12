@@ -79,6 +79,7 @@ from strix.tools.todo.tools import (
     update_todo,
 )
 from strix.tools.web_search.tool import web_search
+from strix.tools.writeups.tool import search_writeups
 
 
 if TYPE_CHECKING:
@@ -652,6 +653,7 @@ _BASE_TOOLS: tuple[Tool, ...] = (
     list_reports,
     get_report,
     source_inspect_many,
+    search_writeups,
     list_requests,
     view_request,
     repeat_request,
@@ -756,9 +758,7 @@ def build_strix_agent(
             load_settings().llm.parallel_tool_calls is not False
             and load_settings().llm.tool_width > 1
         ):
-            instructions = (
-                f"{instructions}\n\n{wide_turn_guidance(load_settings().llm.tool_width)}"
-            )
+            instructions = f"{instructions}\n\n{wide_turn_guidance(load_settings().llm.tool_width)}"
 
     agent_tools = [*_EXTRA_TOOLS, *(extra_tools or [])]
     if interactive:
