@@ -106,6 +106,7 @@ UPDATABLE_REPORT_FIELDS = frozenset(
         "cve",
         "cwe",
         "code_locations",
+        "http_exchange_ids",
         "fix_verification",
         "fix_pr_body",
     }
@@ -374,6 +375,7 @@ class ReportState:
         cve: str | None = None,
         cwe: str | None = None,
         code_locations: list[dict[str, Any]] | None = None,
+        http_exchange_ids: list[str] | None = None,
         fix_verification: str | None = None,
         fix_pr_body: str | None = None,
         finding_class: str | None = None,
@@ -477,18 +479,25 @@ class ReportState:
             report["state"] = normalize_state(state) or "verified"
             if dependency_metadata:
                 report["dependency_metadata"] = dependency_metadata
+            if http_exchange_ids:
+                # Evidence attached to the finding, not a second definition of
+                # whether it is valid: the lifecycle state above stays the only
+                # authority on that, and exchange ids never imply a promotion.
+                report["http_exchange_ids"] = http_exchange_ids
             if agent_id:
                 report["agent_id"] = agent_id
             if agent_name:
                 report["agent_name"] = agent_name
 
+            # Persistence must accept the new finding before local state changes.
+            # A failing callback then leaves no half-registered report behind.
+            if self.vulnerability_found_callback:
+                self.vulnerability_found_callback(report)
+
             self.vulnerability_reports.append(report)
             logger.info(f"Added vulnerability report: {report_id} - {title}")
             posthog.finding(severity, cwe=cwe, is_cve=bool(cve))
             scarf.finding(severity, cwe=cwe, is_cve=bool(cve))
-
-            if self.vulnerability_found_callback:
-                self.vulnerability_found_callback(report)
 
             self.save_run_data()
             return report_id
@@ -565,11 +574,18 @@ class ReportState:
         )
         history.append(entry)
 
-        report.update(changed)
+        revised = {**report, **changed}
         for dependent in superseded:
-            report.pop(dependent, None)
-        report["update_history"] = history
-        report["updated_at"] = entry["timestamp"]
+            revised.pop(dependent, None)
+        revised["update_history"] = history
+        revised["updated_at"] = entry["timestamp"]
+
+        # Persistence must accept the revision before local state changes. A
+        # failed callback leaves the old evidence intact and the update retryable.
+        if self.vulnerability_updated_callback:
+            self.vulnerability_updated_callback(revised)
+        report.clear()
+        report.update(revised)
 
         # The markdown on disk still shows the superseded evidence, so let the
         # writer re-render it.
@@ -580,9 +596,6 @@ class ReportState:
             report_id,
             ", ".join(entry["fields"]) or "no field replaced",
         )
-
-        if self.vulnerability_updated_callback:
-            self.vulnerability_updated_callback(report)
 
         self.save_run_data()
         return report
@@ -1166,8 +1179,7 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
 
     # Prefer the endpoint this request actually used, falling back to the
     # configured one: it decides which provider bills for an id the price map
-    # does not recognise by name (a direct DeepSeek endpoint reached over the
-    # OpenAI protocol). Request routing is unaffected.
+    # does not recognise by name.
     base_url = request_base_url or configured_api_base()
 
     for candidate in candidates:

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 from agents import RunContextWrapper, function_tool
 
 from strix.tools.nullish import clean_optional
+from strix.tools.proxy.tools import existing_request_ids
 
 
 if TYPE_CHECKING:
@@ -169,12 +170,111 @@ _REQUIRED_FIELDS = {
 _VALID_FIX_EFFORT = frozenset({"trivial", "low", "medium", "high"})
 _VALID_CONFIDENCE = frozenset({"high", "medium", "low"})
 
+_MAX_HTTP_EXCHANGE_IDS = 10
+_MAX_HTTP_EXCHANGE_ID_CHARS = 128
+
 
 def _validate_required_text(fields: dict[str, str]) -> list[str]:
     """Report every ``_REQUIRED_FIELDS`` entry that arrived blank."""
     return [
         msg for name, msg in _REQUIRED_FIELDS.items() if not str(fields.get(name) or "").strip()
     ]
+
+
+def _normalize_http_exchange_ids(raw: Any) -> tuple[list[str] | None, list[str]]:
+    """Return distinct proxy exchange ids in their original order.
+
+    ``http_exchange_ids`` is evidence attached to a finding, never a second
+    definition of whether the finding is valid: this only cleans and bounds the
+    list. The finding's lifecycle state stays the sole authority on that.
+    """
+    if raw is None:
+        return None, []
+    if not isinstance(raw, list):
+        return None, ["http_exchange_ids must be a list of proxy request ids"]
+
+    normalized: list[str] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    for index, value in enumerate(raw):
+        if not isinstance(value, str):
+            errors.append(f"http_exchange_ids[{index}] must be a string")
+            continue
+        request_id = value.strip()
+        if not request_id:
+            errors.append(f"http_exchange_ids[{index}] cannot be empty")
+            continue
+        if len(request_id) > _MAX_HTTP_EXCHANGE_ID_CHARS:
+            errors.append(
+                f"http_exchange_ids[{index}] must be {_MAX_HTTP_EXCHANGE_ID_CHARS} "
+                "characters or fewer"
+            )
+            continue
+        if any(ord(char) < 0x21 or ord(char) > 0x7E for char in request_id):
+            errors.append(f"http_exchange_ids[{index}] must contain only visible ASCII characters")
+            continue
+        if not request_id.isdigit():
+            errors.append(f"http_exchange_ids[{index}] must be a numeric proxy request id")
+            continue
+        if request_id not in seen:
+            seen.add(request_id)
+            normalized.append(request_id)
+            if len(normalized) > _MAX_HTTP_EXCHANGE_IDS:
+                errors.append(
+                    f"http_exchange_ids can contain at most "
+                    f"{_MAX_HTTP_EXCHANGE_IDS} distinct request ids"
+                )
+                break
+    return normalized, errors
+
+
+_HTTP_EXCHANGE_DROPPED_WARNING = (
+    "http_exchange_ids were not stored: the proxy project could not be reached to verify "
+    "them. Attach them with update_vulnerability_report when the proxy responds again."
+)
+
+
+async def _verify_http_exchange_ids(
+    ctx: RunContextWrapper,
+    raw: Any,
+) -> tuple[list[str] | None, list[str], str | None]:
+    """Verify proxy exchange IDs against the current Caido project.
+
+    IDs the project does not know are rejected. When the proxy itself cannot be
+    queried the IDs are dropped and a warning is returned instead, so a proxy
+    outage never blocks a finding and unverified IDs are never recorded as
+    evidence.
+    """
+    request_ids, errors = _normalize_http_exchange_ids(raw)
+    if request_ids is None or errors or not request_ids:
+        return request_ids, errors, None
+
+    try:
+        existing_ids = await existing_request_ids(ctx, request_ids)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Could not verify HTTP exchange IDs against the current Caido project",
+            exc_info=True,
+        )
+        return None, [], _HTTP_EXCHANGE_DROPPED_WARNING
+
+    missing_ids = [request_id for request_id in request_ids if request_id not in existing_ids]
+    if missing_ids:
+        return (
+            None,
+            [
+                "http_exchange_ids do not exist in the current proxy project: "
+                + ", ".join(missing_ids)
+            ],
+            None,
+        )
+    return request_ids, [], None
+
+
+def _with_warning(result: dict[str, Any], warning: str | None) -> dict[str, Any]:
+    if warning and result.get("success"):
+        result["warning"] = warning
+    return result
 
 
 def _validate_cvss_breakdown(breakdown: Any) -> list[str]:
@@ -299,7 +399,7 @@ _UPDATE_TEXT_FIELDS = (
 )
 
 
-def _collect_update_changes(  # noqa: PLR0912
+def _collect_update_changes(  # noqa: PLR0912, PLR0915
     fields: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
     """Validate the fields a revision replaces and return them with any errors."""
@@ -368,6 +468,14 @@ def _collect_update_changes(  # noqa: PLR0912
     if cwe:
         changes["cwe"] = cwe
 
+    raw_http_exchange_ids = fields.get("http_exchange_ids")
+    http_exchange_ids, http_exchange_errors = _normalize_http_exchange_ids(raw_http_exchange_ids)
+    errors.extend(http_exchange_errors)
+    # An explicit empty list clears the linked exchanges; omitting the field
+    # leaves them alone. The lifecycle state is untouched either way.
+    if raw_http_exchange_ids is not None and not http_exchange_errors:
+        changes["http_exchange_ids"] = http_exchange_ids or []
+
     return changes, errors
 
 
@@ -378,6 +486,7 @@ _DYNAMIC_ONLY_UPDATE_FIELDS = (
     "method",
     "poc_description",
     "poc_script_code",
+    "http_exchange_ids",
 )
 
 # A dependency finding is rated in the context of the codebase that pins it, and
@@ -635,6 +744,7 @@ async def _do_create(
     cve: str | None,
     cwe: str | None,
     code_locations: list[dict[str, Any]] | None,
+    http_exchange_ids: list[str] | None = None,
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
@@ -680,6 +790,11 @@ async def _do_create(
     errors.extend(_validate_fix_verification(parsed_locations, fix_verification))
     cve, cwe, identifier_errors = _validate_identifiers(cve, cwe)
     errors.extend(identifier_errors)
+
+    normalized_http_exchange_ids, http_exchange_errors = _normalize_http_exchange_ids(
+        http_exchange_ids
+    )
+    errors.extend(http_exchange_errors)
 
     if errors:
         return {"success": False, "error": "Validation failed", "errors": errors}
@@ -740,6 +855,7 @@ async def _do_create(
             "cve": cve,
             "cwe": cwe,
             "code_locations": parsed_locations,
+            "http_exchange_ids": normalized_http_exchange_ids,
             "fix_verification": fix_verification,
             "fix_pr_body": fix_pr_body,
         }
@@ -748,16 +864,12 @@ async def _do_create(
             dedupe = await check_duplicate(candidate, existing)
             _raise_if_llm_duplicate(dedupe, existing, fallback_title=title)
 
-            existing_ids = frozenset(
-                r.get("id") for r in existing if isinstance(r.get("id"), str)
-            )
+            existing_ids = frozenset(r.get("id") for r in existing if isinstance(r.get("id"), str))
             # Deterministic commit-time re-check: only reports that landed after
             # the LLM-dedupe snapshot (the concurrent filing window) are compared,
             # inside the same lock that appends — no second LLM call, and no gap
             # between the re-check and the append for another filing to slip into.
-            fingerprint = finding_fingerprint(
-                {**report_fields, "finding_class": "dynamic"}
-            )
+            fingerprint = finding_fingerprint({**report_fields, "finding_class": "dynamic"})
             duplicate_guard = (existing_ids, fingerprint) if fingerprint else None
 
             report_id = report_state.add_vulnerability_report(
@@ -837,6 +949,7 @@ async def create_vulnerability_report(
     cve: str | None = None,
     cwe: str | None = None,
     code_locations: list[dict[str, Any]] | None = None,
+    http_exchange_ids: list[str] | None = None,
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
@@ -1081,6 +1194,13 @@ async def create_vulnerability_report(
         cve: ``CVE-YYYY-NNNNN`` if certain, else omit.
         cwe: ``CWE-NNN`` (most specific child) if certain, else omit.
         code_locations: White-box findings — list of location objects.
+        http_exchange_ids: Proxy request IDs that prove this finding. When
+            exploitation or validation used captured proxy traffic, attach the
+            request IDs that prove the result — normally the exploit request and
+            its relevant baseline/control. Copy them from ``list_requests`` or
+            ``view_request``; never invent IDs. Findings proven without captured
+            HTTP (source analysis, local framework/runtime tests, dependency
+            CVEs) may omit this field.
 
             **How ``fix_before`` / ``fix_after`` work**: they're used as
             literal GitHub/GitLab PR suggestion blocks. When a reviewer
@@ -1230,6 +1350,18 @@ async def create_vulnerability_report(
     """
     agent_id, agent_name = _caller_identity(ctx)
 
+    (
+        http_exchange_ids,
+        http_exchange_errors,
+        http_exchange_warning,
+    ) = await _verify_http_exchange_ids(ctx, http_exchange_ids)
+    if http_exchange_errors:
+        return json.dumps(
+            {"success": False, "error": "Validation failed", "errors": http_exchange_errors},
+            ensure_ascii=False,
+            default=str,
+        )
+
     result = await _do_create(
         title=title,
         description=description,
@@ -1252,12 +1384,13 @@ async def create_vulnerability_report(
         cve=cve,
         cwe=cwe,
         code_locations=code_locations,
+        http_exchange_ids=http_exchange_ids,
         fix_verification=fix_verification,
         fix_pr_body=fix_pr_body,
         agent_id=agent_id,
         agent_name=agent_name,
     )
-    return json.dumps(result, ensure_ascii=False, default=str)
+    return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
 
 
 @function_tool(timeout=60, strict_mode=False)
@@ -1286,6 +1419,7 @@ async def update_vulnerability_report(
     cve: str | None = None,
     cwe: str | None = None,
     code_locations: list[dict[str, Any]] | None = None,
+    http_exchange_ids: list[str] | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
     contextual_cvss_reasoning: str | None = None,
@@ -1358,6 +1492,9 @@ async def update_vulnerability_report(
         cve: Replacement CVE id.
         cwe: Replacement CWE id.
         code_locations: Replacement code locations.
+        http_exchange_ids: Replacement proxy request ids. Pass an empty list
+            to remove all linked exchanges; omit the field to leave them
+            untouched. IDs are verified against the current proxy project.
         fix_verification: Verification statement for an applyable fix.
         fix_pr_body: Replacement fix PR body.
         contextual_cvss_reasoning: Dependency findings only. What you
@@ -1365,40 +1502,68 @@ async def update_vulnerability_report(
             ``cvss_breakdown``.
     """
     agent_id, agent_name = _caller_identity(ctx)
+
+    # Verified before the "nothing to update" decision below: when the only
+    # field supplied is http_exchange_ids and the proxy is unreachable, the ids
+    # are dropped and the caller must be told, not handed "no fields to update".
+    (
+        http_exchange_ids,
+        http_exchange_errors,
+        http_exchange_warning,
+    ) = await _verify_http_exchange_ids(ctx, http_exchange_ids)
+    if http_exchange_errors:
+        return json.dumps(
+            {"success": False, "error": "Validation failed", "errors": http_exchange_errors},
+            ensure_ascii=False,
+            default=str,
+        )
+
+    fields: dict[str, Any] = {
+        "title": title,
+        "description": description,
+        "impact": impact,
+        "target": target,
+        "technical_analysis": technical_analysis,
+        "poc_description": poc_description,
+        "poc_script_code": poc_script_code,
+        "remediation_steps": remediation_steps,
+        "evidence": evidence,
+        "assumptions": assumptions,
+        "counterevidence": counterevidence,
+        "confidence": confidence,
+        "confidence_rationale": confidence_rationale,
+        "severity_change_conditions": severity_change_conditions,
+        "fix_effort": fix_effort,
+        "cvss_breakdown": cvss_breakdown,
+        "endpoint": endpoint,
+        "method": method,
+        "cve": cve,
+        "cwe": cwe,
+        "code_locations": code_locations,
+        "http_exchange_ids": http_exchange_ids,
+        "fix_verification": fix_verification,
+        "fix_pr_body": fix_pr_body,
+        "contextual_cvss_reasoning": contextual_cvss_reasoning,
+    }
+
+    # Unverified ids were dropped: if nothing else was asked for, say so rather
+    # than reporting an empty revision.
+    if http_exchange_warning and all(value is None for value in fields.values()):
+        return json.dumps(
+            {"success": False, "error": http_exchange_warning, "report_id": report_id},
+            ensure_ascii=False,
+            default=str,
+        )
+
     result = await asyncio.to_thread(
         _do_update,
         report_id=report_id,
         update_reason=update_reason,
-        fields={
-            "title": title,
-            "description": description,
-            "impact": impact,
-            "target": target,
-            "technical_analysis": technical_analysis,
-            "poc_description": poc_description,
-            "poc_script_code": poc_script_code,
-            "remediation_steps": remediation_steps,
-            "evidence": evidence,
-            "assumptions": assumptions,
-            "counterevidence": counterevidence,
-            "confidence": confidence,
-            "confidence_rationale": confidence_rationale,
-            "severity_change_conditions": severity_change_conditions,
-            "fix_effort": fix_effort,
-            "cvss_breakdown": cvss_breakdown,
-            "endpoint": endpoint,
-            "method": method,
-            "cve": cve,
-            "cwe": cwe,
-            "code_locations": code_locations,
-            "fix_verification": fix_verification,
-            "fix_pr_body": fix_pr_body,
-            "contextual_cvss_reasoning": contextual_cvss_reasoning,
-        },
+        fields=fields,
         agent_id=agent_id,
         agent_name=agent_name,
     )
-    return json.dumps(result, ensure_ascii=False, default=str)
+    return json.dumps(_with_warning(result, http_exchange_warning), ensure_ascii=False, default=str)
 
 
 _DEP_SEVERITY_FROM_CVSS = {
@@ -1425,9 +1590,7 @@ def _do_set_finding_state(  # noqa: PLR0911 - validation branches return distinc
     reason_text = (reason or "").strip()
     errors: list[str] = []
     if state not in FINDING_STATES:
-        errors.append(
-            f"Invalid state {new_state!r}. Must be one of: {sorted(FINDING_STATES)}"
-        )
+        errors.append(f"Invalid state {new_state!r}. Must be one of: {sorted(FINDING_STATES)}")
     if not reason_text:
         errors.append("reason is required: a lifecycle change must be documented")
     if errors:
@@ -1909,9 +2072,7 @@ async def _do_create_dependency(  # noqa: PLR0912, PLR0915
             dedupe = await check_duplicate(candidate, existing)
             _raise_if_llm_duplicate(dedupe, existing, fallback_title=title)
 
-            existing_ids = frozenset(
-                r.get("id") for r in existing if isinstance(r.get("id"), str)
-            )
+            existing_ids = frozenset(r.get("id") for r in existing if isinstance(r.get("id"), str))
             fingerprint = finding_fingerprint(
                 {
                     "title": title,

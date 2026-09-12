@@ -48,6 +48,17 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _revision_count(report: dict[str, Any]) -> int:
+    """How many times a report has been revised in place.
+
+    The sync fingerprint has to notice an in-place revision (attaching HTTP
+    exchange evidence, a re-rating, a corrected PoC) — the id alone is
+    unchanged by one, so the viewer would keep showing the stale revision.
+    """
+    history = report.get("update_history")
+    return len(history) if isinstance(history, list) else 0
+
+
 class GoTuiPreActivationError(RuntimeError):
     """A sidecar failure raised before the Go TUI activates."""
 
@@ -283,7 +294,9 @@ class GoTuiRuntime:
         if self.report_state is not None:
             usage = dict(self.report_state.get_total_llm_usage())
             vulnerabilities = [
-                report.get("id", index) if isinstance(report, dict) else index
+                (report.get("id", index), _revision_count(report))
+                if isinstance(report, dict)
+                else index
                 for index, report in enumerate(self.report_state.vulnerability_reports)
             ]
         return json.dumps(
