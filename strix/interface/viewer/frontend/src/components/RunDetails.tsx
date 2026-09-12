@@ -114,6 +114,16 @@ export function RunDetails({
   const totalTokens = num(usage.total_tokens);
   const cost = num(usage.cost);
   const subscription = str(raw.auth_mode) === "subscription";
+  // The scan budget (--max-budget) is persisted on the run record; the ceiling
+  // is a USD cap on LLM spend, so show spend against it.
+  const budget = num(raw.max_budget_usd);
+  const hasBudget = budget != null && budget > 0;
+  const spent = cost ?? 0;
+  const budgetPct = hasBudget ? Math.round((spent / budget) * 100) : null;
+  // A non-zero token count with zero cost means the model has no entry in
+  // LiteLLM's price map (custom routes/gateways), not that the run was free.
+  const unpriced =
+    !subscription && cost === 0 && (totalTokens ?? 0) > 0;
 
   const sub = (n: number, word: string) => (
     <span className="text-[#666]"> ({formatNumber(n)} {word})</span>
@@ -226,7 +236,20 @@ export function RunDetails({
                   <span className="text-[#666]"> (subscription)</span>
                 </Field>
               ) : (
-                cost != null && <Field label="Cost">${cost.toFixed(2)}</Field>
+                cost != null && (
+                  <Field label="Cost">
+                    ${cost.toFixed(2)}
+                    {unpriced && (
+                      <span className="text-[#666]"> (no price for this model)</span>
+                    )}
+                  </Field>
+                )
+              )}
+              {hasBudget && (
+                <Field label="Budget">
+                  ${spent.toFixed(2)} / ${budget.toFixed(2)}
+                  <span className="text-[#666]"> ({budgetPct}%)</span>
+                </Field>
               )}
               {agents.length > 0 && <Field label="Agents">{formatNumber(agents.length)}</Field>}
             </dl>

@@ -429,6 +429,12 @@ async def run_strix_scan(
             max_turns=max_turns,
             interactive=interactive,
         )
+        # The ceiling is otherwise runtime-only (it lives on the hooks), so the
+        # viewer has nothing to show spend against. Record the same value the
+        # hooks enforce, on every path that starts a scan (CLI, TUI, resume).
+        _budget_state = get_global_report_state()
+        if _budget_state is not None:
+            _budget_state.run_record["max_budget_usd"] = max_budget_usd
         if interactive:
             coordinator.set_budget_extender(hooks.extend_budget)
 
