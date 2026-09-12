@@ -264,5 +264,8 @@ def _persist_run_record(args: argparse.Namespace) -> None:
         "diff_scope": getattr(args, "diff_scope", {"active": False}),
         "scope_mode": args.scope_mode,
         "diff_base": args.diff_base,
+        # Persisted up front so the viewer can show spend against the ceiling
+        # from the first refresh, before the runner records it.
+        "max_budget_usd": getattr(args, "max_budget_usd", None),
     }
     write_run_record(run_dir, run_record)
