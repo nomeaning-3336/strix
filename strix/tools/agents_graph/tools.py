@@ -12,7 +12,7 @@ from typing import Any, Literal, get_args
 
 from agents import RunContextWrapper, function_tool
 
-from strix.core.agents import Status, coordinator_from_context
+from strix.core.agents import TERMINAL_STATUSES, Status, coordinator_from_context
 from strix.core.child_context import build_packet_from_task, render_packet
 from strix.core.execution import notify_parent_on_terminal
 from strix.core.hooks import LLM_TURN_KEY
@@ -76,6 +76,67 @@ def _wait_timeout_payload(
     )
 
 
+def _filed_reports_by(agent_id: str) -> list[dict[str, Any]]:
+    """Vulnerability reports the agent actually filed, from report state.
+
+    The narrative ``findings`` an agent hands to ``agent_finish`` is prose; a
+    parent that wants to act on a child's work needs the report ids and, in this
+    fork, their current lifecycle state - a child's finding may have been
+    retracted or rejected after it was filed, and a parent must not treat such a
+    report as active. Read both from the report state rather than trusting the
+    child's description.
+
+    ``strix.report`` is imported lazily on purpose: this module sits on the boot
+    path, and the boot cycle depends on the report package staying out of it.
+    """
+    from strix.report.state import get_global_report_state  # noqa: PLC0415 - boot cycle
+
+    state = get_global_report_state()
+    if state is None:
+        return []
+    filed: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for report in state.get_existing_vulnerabilities():
+        if report.get("agent_id") != agent_id:
+            continue
+        report_id = str(report.get("id") or "")
+        if not report_id or report_id in seen:
+            continue
+        seen.add(report_id)
+        filed.append(report)
+    return filed
+
+
+def _report_state_of(report: dict[str, Any]) -> str:
+    """Current lifecycle state of a filed report (dependency-free module)."""
+    from strix.report.finding_state import state_of  # noqa: PLC0415 - boot cycle
+
+    return state_of(report)
+
+
+def _render_filed_report(report: dict[str, Any]) -> str:
+    line = f"- {report.get('id')}"
+    state = _report_state_of(report)
+    if state:
+        line += f" [{state}]"
+    severity = report.get("severity")
+    if severity:
+        line += f" [{str(severity).upper()}]"
+    title = report.get("title")
+    if title:
+        line += f" {title}"
+    return line
+
+
+def _filed_report_summary(report: dict[str, Any]) -> dict[str, Any]:
+    """Report identity plus its current lifecycle state (fork extension).
+
+    Upstream returns bare ids; a parent needs the state too, because only
+    ``candidate`` and ``verified`` count as active findings.
+    """
+    return {"id": str(report.get("id") or ""), "state": _report_state_of(report)}
+
+
 def _render_completion_report(
     *,
     agent_name: str,
@@ -86,6 +147,7 @@ def _render_completion_report(
     findings: list[str],
     recommendations: list[str],
     open_items: list[str],
+    filed_reports: list[dict[str, Any]] | None = None,
 ) -> str:
     """Render a child's completion report as plain structured text.
 
@@ -110,6 +172,12 @@ def _render_completion_report(
         lines.append("")
         lines.append("Findings:")
         lines.extend(f"- {f}" for f in findings)
+    lines.append("")
+    lines.append("Vulnerability reports filed by this agent (authoritative; note the state):")
+    if filed_reports:
+        lines.extend(_render_filed_report(r) for r in filed_reports)
+    else:
+        lines.append("- (none)")
     lines.append("")
     lines.append("Open items (unresolved, need follow-up):")
     if open_items:
@@ -197,8 +265,11 @@ async def send_message_to_agent(
     **Don't** use for routine "hello/status" pings, for context the
     target already has (children inherit parent history), or when
     parent/child completion via ``agent_finish`` already covers the
-    flow. Messages to any registered agent wake it, regardless of
+    flow. In interactive runs a message wakes the target regardless of
     status, so a follow-up can restart a completed/stopped/failed agent.
+    In non-interactive runs a finished agent is gone for good: the call
+    fails with the target's status, and you should read its filed
+    reports (``list_reports``) or spawn a new agent instead of waiting.
 
     Args:
         target_agent_id: Recipient's 8-char id.
@@ -243,10 +314,23 @@ async def send_message_to_agent(
         },
     )
     if not delivered:
+        _, status = await coordinator.reachability(target_agent_id)
+        if status is None:
+            error = f"Target agent '{target_agent_id}' not found"
+        else:
+            error = (
+                f"Target agent '{target_agent_id}' is '{status}' and cannot be woken in "
+                "this run; it will never read this message. Its filed reports are in "
+                "list_reports / get_report. Do not wait_for_agents on it - spawn a new "
+                "agent if more work is needed."
+            )
         return json.dumps(
             {
                 "success": False,
-                "error": f"Target agent '{target_agent_id}' not found or message delivery failed",
+                "error": error,
+                "target_agent_id": target_agent_id,
+                "target_status": status,
+                "delivery_status": "not_delivered",
             },
             ensure_ascii=False,
             default=str,
@@ -416,6 +500,39 @@ async def wait_for_agents(  # noqa: PLR0911
                 "wait_outcome": "waiting",
                 "reason": reason,
                 "note": "Agent parked; execution will resume when a message arrives.",
+            },
+            ensure_ascii=False,
+            default=str,
+        )
+
+    # Non-interactive agents cannot be woken once terminal, so a parent whose
+    # children have ALL finished has no report left to wait for and should not
+    # sit out the timeout. Two conditions keep that honest in this fork:
+    #
+    #   * there must be other agents at all - a user, ``respond_to_user``, or a
+    #     peer can message this agent directly, so an empty graph is not settled;
+    #   * every other agent must be TERMINAL - ``budget_paused`` is neither
+    #     terminal nor active, and a budget-paused child can still resume.
+    #
+    # (The interactive case returned above: the user can still wake this agent.)
+    _, statuses, names, _ = await coordinator.graph_snapshot()
+    others = [aid for aid in statuses if aid != me]
+    if not interactive and others and all(statuses.get(aid) in TERMINAL_STATUSES for aid in others):
+        return json.dumps(
+            {
+                "success": True,
+                "wait_outcome": "no_active_agents",
+                "reason": reason,
+                "agents": [
+                    {"agent_id": aid, "name": names.get(aid, aid), "status": statuses.get(aid)}
+                    for aid in others
+                ],
+                "note": (
+                    "No other agent is running or waiting, so no message can arrive. "
+                    "Finished agents' results are in list_reports / get_report and their "
+                    "completion reports are already in your history. Continue your own "
+                    "work, spawn a new agent, or finish."
+                ),
             },
             ensure_ascii=False,
             default=str,
@@ -747,6 +864,9 @@ async def agent_finish(
             default=str,
         )
 
+    filed_reports = _filed_reports_by(me)
+    filed_report_ids = [str(r.get("id")) for r in filed_reports]
+
     parent_notified = False
     if report_to_parent and await coordinator.claim_parent_notice(me):
         async with coordinator._lock:
@@ -760,6 +880,7 @@ async def agent_finish(
             findings=list(findings or []),
             recommendations=list(final_recommendations or []),
             open_items=list(open_items or []),
+            filed_reports=filed_reports,
         )
         await coordinator.send(
             parent_id,
@@ -769,6 +890,10 @@ async def agent_finish(
                 "content": report,
                 "type": "completion",
                 "priority": "high",
+                # Bare ids plus the current lifecycle state: a parent must not
+                # treat a report the child later retracted as active.
+                "filed_report_ids": filed_report_ids,
+                "filed_reports": [_filed_report_summary(r) for r in filed_reports],
             },
         )
         parent_notified = True
@@ -779,10 +904,11 @@ async def agent_finish(
         await notify_parent_on_terminal(coordinator, me, "completed")
 
     logger.info(
-        "agent_finish: %s success=%s findings=%d parent_notified=%s",
+        "agent_finish: %s success=%s findings=%d filed_reports=%d parent_notified=%s",
         me,
         success,
         len(findings or []),
+        len(filed_report_ids),
         parent_notified,
     )
 
@@ -793,6 +919,8 @@ async def agent_finish(
             "parent_notified": parent_notified,
             "agent_id": me,
             "summary": result_summary,
+            "filed_report_ids": filed_report_ids,
+            "filed_reports": [_filed_report_summary(r) for r in filed_reports],
             "findings_count": len(findings or []),
             "open_items_count": len(open_items or []),
             "has_recommendations": bool(final_recommendations),
