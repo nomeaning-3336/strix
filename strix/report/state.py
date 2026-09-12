@@ -23,7 +23,6 @@ from strix.report.finding_state import (
     state_of,
     transition_allowed,
 )
-from strix.report.pricing import resolve_litellm_model
 from strix.report.sarif import write_sarif
 from strix.report.writer import (
     read_run_record,
@@ -65,6 +64,7 @@ class DuplicateVulnerabilityError(Exception):
         self.duplicate_title = duplicate_title
         self.reason = reason
         self.confidence = confidence
+
 
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]+")
 
@@ -615,17 +615,14 @@ class ReportState:
         state = normalize_state(new_state)
         if state is None:
             raise ValueError(
-                f"Invalid finding state {new_state!r}. Must be one of: "
-                f"{sorted(FINDING_STATES)}"
+                f"Invalid finding state {new_state!r}. Must be one of: {sorted(FINDING_STATES)}"
             )
         reason_text = (reason or "").strip()
         if not reason_text:
             raise ValueError("A lifecycle change needs a reason.")
 
         with self._reports_lock:
-            report = next(
-                (r for r in self.vulnerability_reports if r.get("id") == report_id), None
-            )
+            report = next((r for r in self.vulnerability_reports if r.get("id") == report_id), None)
             if report is None:
                 logger.warning("cannot change the state of unknown report %s", report_id)
                 return None
@@ -653,7 +650,9 @@ class ReportState:
                 entry["agent_name"] = changed_by_agent_name
 
             history = report.get("update_history")
-            history = [e for e in history if isinstance(e, dict)] if isinstance(history, list) else []
+            history = (
+                [e for e in history if isinstance(e, dict)] if isinstance(history, list) else []
+            )
             history.append(entry)
 
             report["update_history"] = history
@@ -1145,8 +1144,12 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
 
     provider = None
     litellm_params = kwargs.get("litellm_params") if isinstance(kwargs, dict) else None
+    request_base_url = None
     if isinstance(litellm_params, dict):
         provider = litellm_params.get("custom_llm_provider")
+        candidate_base = litellm_params.get("api_base")
+        if isinstance(candidate_base, str) and candidate_base.strip():
+            request_base_url = candidate_base
 
     usage_payload = _usage_payload(completion_response)
     if usage_payload is None:
@@ -1159,8 +1162,16 @@ def _estimate_response_cost(kwargs: Any, completion_response: Any) -> float | No
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
+    from strix.report.pricing import configured_api_base, resolve_priced_model
+
+    # Prefer the endpoint this request actually used, falling back to the
+    # configured one: it decides which provider bills for an id the price map
+    # does not recognise by name (a direct DeepSeek endpoint reached over the
+    # OpenAI protocol). Request routing is unaffected.
+    base_url = request_base_url or configured_api_base()
+
     for candidate in candidates:
-        resolved = resolve_litellm_model(candidate)
+        resolved = resolve_priced_model(candidate, base_url)
         if not resolved:
             continue
         try:
