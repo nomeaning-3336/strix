@@ -7,7 +7,7 @@ from typing import Any
 
 from agents.usage import Usage, deserialize_usage, serialize_usage
 
-from strix.report.pricing import resolve_litellm_model
+from strix.report.pricing import configured_api_base, resolve_priced_model
 
 
 logger = logging.getLogger(__name__)
@@ -243,8 +243,11 @@ def _estimate_litellm_entry_cost(entry: Any, model: str) -> float | None:
     if "/" in model:
         candidates.append(model.rsplit("/", 1)[-1])
 
+    # The endpoint decides who bills for a model id that the price map does not
+    # recognise by name (a direct DeepSeek endpoint over the OpenAI protocol).
+    base_url = configured_api_base()
     for candidate in candidates:
-        resolved = resolve_litellm_model(candidate)
+        resolved = resolve_priced_model(candidate, base_url)
         if not resolved:
             continue
         try:
