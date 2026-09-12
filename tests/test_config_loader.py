@@ -19,6 +19,9 @@ if TYPE_CHECKING:
 
 _LLM_ENV_KEYS = [
     "STRIX_LLM",
+    # Role-aware routing: part of the linked LLM connection tuple.
+    "STRIX_ROOT_LLM",
+    "STRIX_SUBAGENT_LLM",
     "LLM_API_KEY",
     "OPENAI_API_KEY",
     "LLM_API_BASE",
@@ -216,3 +219,303 @@ def test_persist_current_sets_0600_mode(tmp_path: Path, monkeypatch: pytest.Monk
     loader.persist_current()
 
     assert target.stat().st_mode & 0o777 == 0o600
+
+
+# --------------------------------------------------------------------------- #
+# persist_current merges into the stored env block instead of overwriting it
+# --------------------------------------------------------------------------- #
+
+
+def test_persist_current_keeps_file_values_when_env_is_unset(tmp_path: Path) -> None:
+    """A run configured from the file must not erase it on the way out."""
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps({"env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    assert loader.load_settings().llm.model == "file-model"
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}
+    }
+
+
+def test_persist_current_env_overrides_file_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps({"env": {"STRIX_LLM": "file-model", "PERPLEXITY_API_KEY": "file-pplx"}}),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("PERPLEXITY_API_KEY", "env-pplx")
+
+    loader.persist_current()
+
+    # The untouched model survives; the overridden unrelated key is updated.
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"STRIX_LLM": "file-model", "PERPLEXITY_API_KEY": "env-pplx"}
+    }
+
+
+def test_persist_current_empty_env_clears_file_value(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(json.dumps({"env": {"STRIX_LLM": "file-model"}}), encoding="utf-8")
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {}}
+
+
+def test_persist_current_empty_primary_alias_does_not_save_sibling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty LLM_API_KEY must not persist a non-empty OPENAI_API_KEY sibling."""
+    target = tmp_path / "cli-config.json"
+    target.write_text(json.dumps({"env": {"PERPLEXITY_API_KEY": "pplx"}}), encoding="utf-8")
+    loader.apply_config_override(target)
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "sibling-key")
+
+    assert loader.load_settings().llm.api_key == ""
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"PERPLEXITY_API_KEY": "pplx"}}
+
+
+def test_persist_current_replaces_corrupt_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text("{not json", encoding="utf-8")
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "recovered-model")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"STRIX_LLM": "recovered-model"}
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Linked LLM connection: a shell change drops the whole stored connection
+# --------------------------------------------------------------------------- #
+
+
+def test_linked_llm_model_change_drops_stored_key_and_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "STRIX_LLM": "file-model",
+                    "LLM_API_KEY": "file-key",
+                    "LLM_API_BASE": "http://file-base",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "shell-model")
+
+    assert loader.load_settings().llm.model == "shell-model"
+    # The stored key/base belong to the previous model; they must not load.
+    assert loader.load_settings().llm.api_key is None
+    assert loader.load_settings().llm.api_base is None
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"STRIX_LLM": "shell-model"}}
+
+
+def test_linked_llm_key_change_drops_stored_model_and_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "STRIX_LLM": "file-model",
+                    "LLM_API_KEY": "file-key",
+                    "LLM_API_BASE": "http://file-base",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("LLM_API_KEY", "shell-key")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"LLM_API_KEY": "shell-key"}}
+
+
+def test_linked_llm_base_change_drops_stored_model_and_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps({"env": {"STRIX_LLM": "file-model", "LLM_API_KEY": "file-key"}}),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("LLM_API_BASE", "http://shell-base")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"LLM_API_BASE": "http://shell-base"}
+    }
+
+
+def test_linked_llm_unchanged_keeps_stored_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Re-exporting the same value is not a change: the connection survives."""
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps({"env": {"STRIX_LLM": "same-model", "LLM_API_KEY": "file-key"}}),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "same-model")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"STRIX_LLM": "same-model", "LLM_API_KEY": "file-key"}
+    }
+
+
+def test_unrelated_stored_settings_survive_a_connection_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "STRIX_LLM": "file-model",
+                    "LLM_API_KEY": "file-key",
+                    "PERPLEXITY_API_KEY": "pplx",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "shell-model")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"STRIX_LLM": "shell-model", "PERPLEXITY_API_KEY": "pplx"}
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Role-aware routing: all three model vars are part of the connection tuple
+# --------------------------------------------------------------------------- #
+
+
+def test_root_model_change_drops_stored_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps({"env": {"STRIX_ROOT_LLM": "old-root", "LLM_API_KEY": "old-key"}}),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_ROOT_LLM", "new-root")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {"env": {"STRIX_ROOT_LLM": "new-root"}}
+
+
+def test_subagent_model_change_does_not_resurrect_stored_key_base(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Repointing workers at another endpoint must not reuse the old credentials."""
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "STRIX_ROOT_LLM": "gpt-5.6-sol",
+                    "STRIX_SUBAGENT_LLM": "deepseek-v4-pro",
+                    "LLM_API_KEY": "old-key",
+                    "LLM_API_BASE": "http://old-base",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_SUBAGENT_LLM", "another-endpoint-model")
+
+    loader.persist_current()
+
+    assert json.loads(target.read_text(encoding="utf-8")) == {
+        "env": {"STRIX_SUBAGENT_LLM": "another-endpoint-model"}
+    }
+
+
+def test_role_models_load_independently_when_connection_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    """Without a shell change both role models resolve from the file."""
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "STRIX_ROOT_LLM": "gpt-5.6-sol",
+                    "STRIX_SUBAGENT_LLM": "deepseek-v4-pro",
+                    "LLM_API_KEY": "file-key",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+
+    settings = loader.load_settings()
+
+    assert settings.llm.root_model == "gpt-5.6-sol"
+    assert settings.llm.subagent_model == "deepseek-v4-pro"
+    assert settings.llm.api_key == "file-key"
+
+
+def test_read_json_overrides_drops_stale_connection_before_loading(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loading must not mix a shell model with the file's stored key/base."""
+    target = tmp_path / "cli-config.json"
+    target.write_text(
+        json.dumps({"env": {"STRIX_LLM": "old-model", "LLM_API_KEY": "old-key"}}),
+        encoding="utf-8",
+    )
+    loader.apply_config_override(target)
+    monkeypatch.setenv("STRIX_LLM", "new-model")
+
+    settings = loader.load_settings()
+
+    assert settings.llm.model == "new-model"
+    assert settings.llm.api_key is None
