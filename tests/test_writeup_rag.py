@@ -6,10 +6,14 @@ built into ``tmp_path``. No network, no model calls.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import json
 import sys
-from typing import TYPE_CHECKING, Any
+import threading
+import time
+from pathlib import Path
+from typing import Any
 
 import pytest
 from agents.tool_context import ToolContext
@@ -17,10 +21,6 @@ from agents.tool_context import ToolContext
 from strix.core.tool_policy import is_parallel_safe, policy_for
 from strix.tools.writeups import corpus
 from strix.tools.writeups.tool import search_writeups
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 def _writeup(
@@ -200,8 +200,10 @@ async def test_tool_returns_prior_art_with_a_verification_caveat(
     first = payload["writeups"][0]
     assert first["url"].startswith("https://hackerone.com/reports/")
     assert first["classes"] == ["graphql", "info_disclosure"]
-    # The tool must not present prior art as evidence about the current target.
+    # The tool must not present prior art as evidence about the current target,
+    # and must warn that the quoted excerpts are untrusted text.
     assert "not evidence about the current target" in payload["note"]
+    assert "untrusted" in payload["note"]
 
 
 @pytest.mark.asyncio
@@ -248,6 +250,215 @@ def test_classify_is_word_bounded() -> None:
     # Multi-word phrases still match as phrases.
     assert "cache_poisoning" in builder.classify("web cache poisoning on the CDN")
     assert "rce" in builder.classify("achieved command injection")
+
+
+def test_concurrent_first_use_builds_the_index_once(
+    fixture_corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`search_writeups` is parallel-safe, so first use must be serialized.
+
+    Several agents can call the tool before any index exists. Without a lock each
+    of them decides the index needs building and they race on the same SQLite
+    file; with it, exactly one build happens and the rest observe the finished
+    index.
+    """
+    source, index = fixture_corpus
+    real_build = corpus.build_index
+    builds: list[int] = []
+    build_started = threading.Event()
+
+    def slow_build(corpus_file: Path, index_file: Path) -> int:
+        builds.append(1)
+        build_started.set()
+        time.sleep(0.05)  # widen the window so a lockless build would collide
+        return real_build(corpus_file, index_file)
+
+    monkeypatch.setattr(corpus, "build_index", slow_build)
+
+    results: list[tuple[Path | None, str]] = []
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(4)
+
+    def worker() -> None:
+        try:
+            barrier.wait(timeout=10)
+            results.append(corpus.ensure_index(corpus=source, index=index))
+        except BaseException as exc:  # noqa: BLE001 - surfaced through `errors`
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert not errors, errors
+    assert len(builds) == 1, f"expected a single build, got {len(builds)}"
+    assert len(results) == 4
+    for index_file, status in results:
+        assert index_file == index
+        assert status in {"rebuilt", "ready"}
+        assert index.is_file()
+    # The index is usable afterwards, not a half-written file.
+    assert corpus.stats(corpus=source, index=index)["writeups"] == 3
+
+
+def test_in_process_lock_alone_serializes_first_use(
+    fixture_corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The in-process lock must serialize first use on its own.
+
+    The cross-process lock is disabled here, so this pins `_BUILD_LOCK`
+    specifically: without it, four threads in one process all decide the index
+    needs building and race on the same database file.
+    """
+    source, index = fixture_corpus
+    real_build = corpus.build_index
+    builds: list[int] = []
+
+    def slow_build(corpus_file: Path, index_file: Path) -> int:
+        builds.append(1)
+        time.sleep(0.05)
+        return real_build(corpus_file, index_file)
+
+    monkeypatch.setattr(corpus, "build_index", slow_build)
+    monkeypatch.setattr(
+        corpus, "_cross_process_build_lock", lambda _index: contextlib.nullcontext()
+    )
+
+    results: list[str] = []
+    barrier = threading.Barrier(4)
+
+    def worker() -> None:
+        barrier.wait(timeout=10)
+        results.append(corpus.ensure_index(corpus=source, index=index)[1])
+
+    threads = [threading.Thread(target=worker) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert len(builds) == 1, f"expected a single build, got {len(builds)}"
+    assert sorted(results) == ["ready", "ready", "ready", "rebuilt"]
+    assert corpus.stats(corpus=source, index=index)["writeups"] == 3
+
+
+def test_lost_replace_race_is_reconciled_when_a_current_index_exists(
+    fixture_corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A replace failure after a competing build must not surface as an error.
+
+    Windows cannot replace a database another process still holds open, so the
+    build can fail *after* another process produced a valid index. That outcome
+    is what the caller wanted, so it is reported as ready rather than raised.
+    """
+    source, index = fixture_corpus
+    real_build = corpus.build_index
+
+    def build_then_lose_the_race(corpus_file: Path, index_file: Path) -> int:
+        # The competing process finishes first and installs a current index...
+        real_build(corpus_file, index_file)
+        # ...then this process's replace fails.
+        raise PermissionError(13, "the file is in use by another process")
+
+    monkeypatch.setattr(corpus, "build_index", build_then_lose_the_race)
+
+    index_file, status = corpus.ensure_index(corpus=source, index=index)
+
+    assert status == "ready"
+    assert index_file == index
+    assert corpus.stats(corpus=source, index=index)["writeups"] == 3
+
+
+def test_lost_replace_race_still_raises_without_a_usable_index(
+    fixture_corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, index = fixture_corpus
+
+    def always_fails(_corpus_file: Path, _index_file: Path) -> int:
+        raise PermissionError(13, "the file is in use by another process")
+
+    monkeypatch.setattr(corpus, "build_index", always_fails)
+
+    with pytest.raises(PermissionError):
+        corpus.ensure_index(corpus=source, index=index)
+
+
+def test_transient_replace_failure_is_retried(
+    fixture_corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reader holding the database open is transient, so the build is retried."""
+    source, index = fixture_corpus
+    real_build = corpus.build_index
+    attempts: list[int] = []
+
+    def fail_once(corpus_file: Path, index_file: Path) -> int:
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise PermissionError(13, "the file is in use by another process")
+        return real_build(corpus_file, index_file)
+
+    monkeypatch.setattr(corpus, "build_index", fail_once)
+
+    index_file, status = corpus.ensure_index(corpus=source, index=index)
+
+    assert status == "rebuilt"
+    assert index_file == index
+    assert len(attempts) == 2
+    assert corpus.stats(corpus=source, index=index)["writeups"] == 3
+
+
+def test_forced_rebuild_does_not_swallow_a_replace_failure(
+    fixture_corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`rebuild=True` asked for a rebuild, so a failure to rebuild is an error."""
+    source, index = fixture_corpus
+    corpus.build_index(source, index)  # a current index already exists
+
+    def refuse(_corpus_file: Path, _index_file: Path) -> int:
+        raise PermissionError(13, "in use")
+
+    monkeypatch.setattr(corpus, "build_index", refuse)
+
+    with pytest.raises(PermissionError):
+        corpus.ensure_index(corpus=source, index=index, rebuild=True)
+
+
+def test_cross_process_lock_is_taken_and_released(fixture_corpus: tuple[Path, Path]) -> None:
+    source, index = fixture_corpus
+
+    # The lock is the unit under test here.
+    with corpus._cross_process_build_lock(index):
+        assert (index.parent / f"{index.name}.lock").is_file()
+
+    # Released on exit: the same lock can be taken again in this process.
+    with corpus._cross_process_build_lock(index):
+        pass
+
+    corpus.ensure_index(corpus=source, index=index)
+    assert index.is_file()
+
+
+def test_build_still_works_when_the_lock_file_cannot_be_created(
+    fixture_corpus: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unwritable lock path must degrade to the unlocked build, not fail."""
+    source, index = fixture_corpus
+    real_open = Path.open
+
+    def refuse_lock_file(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self.name.endswith(".lock"):
+            raise PermissionError(13, "lock file not writable")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", refuse_lock_file)
+
+    index_file, status = corpus.ensure_index(corpus=source, index=index)
+
+    assert status == "rebuilt"
+    assert index_file == index
+    assert corpus.stats(corpus=source, index=index)["writeups"] == 3
 
 
 def _ctx() -> ToolContext:

@@ -13,14 +13,18 @@ override, then the shipped default.
 
 from __future__ import annotations
 
+import contextlib
 import gzip
 import hashlib
+import importlib
 import json
 import logging
 import os
 import re
 import sqlite3
 import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +36,19 @@ logger = logging.getLogger(__name__)
 SCHEMA_VERSION = 3
 CORPUS_ENV = "STRIX_WRITEUPS_CORPUS"
 INDEX_ENV = "STRIX_WRITEUPS_DB"
+
+# Serializes first-use index construction inside this process. `search_writeups`
+# is declared parallel-safe, so several agents can call it at once; without this
+# lock every one of them could decide the index needs building and race on the
+# same SQLite file. Not reentrant on purpose: `ensure_index` never calls itself,
+# and a reentrant acquire would only hide that.
+_BUILD_LOCK = threading.Lock()
+
+# A replace can lose a race twice over: another process may have installed a
+# current index (accepted, not an error), or a reader may hold the database open
+# for the moment its query runs (transient). Retry briefly before surfacing.
+_REPLACE_ATTEMPTS = 3
+_REPLACE_RETRY_DELAY = 0.1
 
 _COLUMNS = (
     "doc_id",
@@ -205,6 +222,63 @@ def _index_is_current(index: Path, corpus: Path) -> bool:
     ) == _corpus_fingerprint(corpus)
 
 
+def _lock_file(handle: Any, *, blocking: bool) -> None:
+    # Loaded through importlib rather than `import fcntl` / `import msvcrt`: each
+    # module exists on only one platform, and importing them conditionally makes
+    # the other platform's stubs reject attributes that are real on that platform.
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+    else:
+        fcntl = importlib.import_module("fcntl")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+
+
+def _unlock_file(handle: Any) -> None:
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl = importlib.import_module("fcntl")
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _cross_process_build_lock(index: Path) -> Any:
+    """Advisory lock so two Strix processes do not build the index at once.
+
+    The in-process lock already serializes threads; this covers two scans sharing
+    ``~/.strix/writeups.db``. Losing the lock (an unwritable directory, or
+    contention past the platform's wait) is deliberately not fatal: the caller
+    still builds into a private temp file and replaces atomically, and reconciles
+    a lost replacement race by re-checking whether a current index now exists.
+    """
+    try:
+        index.parent.mkdir(parents=True, exist_ok=True)
+        handle = (index.parent / f"{index.name}.lock").open("a+b")
+    except OSError:
+        logger.debug("writeup index lock file unavailable", exc_info=True)
+        yield
+        return
+
+    try:
+        try:
+            _lock_file(handle, blocking=True)
+        except OSError:
+            logger.debug("writeup index lock not acquired; proceeding unlocked", exc_info=True)
+            yield
+            return
+        try:
+            yield
+        finally:
+            with contextlib.suppress(OSError):
+                _unlock_file(handle)
+    finally:
+        handle.close()
+
+
 def ensure_index(
     *,
     corpus: Path | None = None,
@@ -215,6 +289,11 @@ def ensure_index(
 
     ``status`` is ``ready``, ``rebuilt``, or ``missing_corpus`` — callers surface
     the last one rather than raising, so a scan without the corpus still runs.
+
+    The unsynchronized fast path is read-only and covers the steady state. Every
+    path that can build takes the in-process lock and re-checks freshness inside
+    it, so a second caller that arrived while the first was building finds the
+    finished index instead of starting a competing build.
     """
     corpus_file = corpus_path(corpus)
     index_file = index_path(index)
@@ -222,8 +301,46 @@ def ensure_index(
         return None, "missing_corpus"
     if not rebuild and _index_is_current(index_file, corpus_file):
         return index_file, "ready"
-    build_index(corpus_file, index_file)
-    return index_file, "rebuilt"
+
+    with _BUILD_LOCK:
+        if not rebuild and _index_is_current(index_file, corpus_file):
+            return index_file, "ready"
+        with _cross_process_build_lock(index_file):
+            # Second check inside the cross-process lock: another process may
+            # have finished building while this one waited.
+            if not rebuild and _index_is_current(index_file, corpus_file):
+                return index_file, "ready"
+            built_here = _build_with_replace_race_recovery(
+                corpus_file, index_file, rebuild=rebuild
+            )
+    return index_file, "rebuilt" if built_here else "ready"
+
+
+def _build_with_replace_race_recovery(
+    corpus_file: Path, index_file: Path, *, rebuild: bool
+) -> bool:
+    """Build the index, tolerating a lost replace race.
+
+    Returns True when this call built the index and False when a competing build
+    had already installed a current one. Two things can make the final `replace`
+    fail on Windows: that competing build (the outcome we wanted, so it is
+    reconciled rather than raised), or a reader in another process holding the
+    database open for the moment its query takes (transient, so it is retried
+    briefly). Only a failure with no usable index after those retries surfaces.
+    """
+    for attempt in range(_REPLACE_ATTEMPTS):
+        try:
+            build_index(corpus_file, index_file)
+        except OSError:
+            if not rebuild and _index_is_current(index_file, corpus_file):
+                logger.debug("writeup index was built by another process", exc_info=True)
+                return False
+            if attempt + 1 >= _REPLACE_ATTEMPTS:
+                raise
+            time.sleep(_REPLACE_RETRY_DELAY)
+        else:
+            return True
+    return True
 
 
 def _connect(index: Path) -> sqlite3.Connection:
