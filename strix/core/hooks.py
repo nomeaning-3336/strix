@@ -11,7 +11,7 @@ from agents.lifecycle import RunHooks
 
 from strix.core.agents import action_fingerprint
 from strix.report.state import get_global_report_state
-from strix.report.usage import cached_input_tokens
+from strix.report.usage import cached_input_tokens, format_cost_usd, format_spend_percent
 
 
 if TYPE_CHECKING:
@@ -269,27 +269,30 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
         stage = _crossed_stage(cost / self._max_budget_usd, bands)
         if stage is None:
             return
-        pct = round(100 * cost / self._max_budget_usd)
+        pct = format_spend_percent(cost, self._max_budget_usd)
         reserve_pct = round(_SUBAGENT_BUDGET_RESERVE * 100)
         if self._interactive:
             content = (
-                f"[{_urgency(stage)}] Scan cost budget: ${cost:.2f}/${self._max_budget_usd:.2f} "
-                f"spent ({pct}%). This budget is shared across every agent in the scan; when it "
+                f"[{_urgency(stage)}] Scan cost budget: "
+                f"{format_cost_usd(cost)}/{format_cost_usd(self._max_budget_usd)} "
+                f"spent ({pct}). This budget is shared across every agent in the scan; when it "
                 "is reached all agents are paused until the user chooses to continue. "
                 f"{_wrapup_directive(context, stage)}"
             )
         elif is_root:
             content = (
-                f"[{_urgency(stage)}] Scan cost budget: ${cost:.2f}/${self._max_budget_usd:.2f} "
-                f"spent ({pct}%). This budget is shared across every agent in the scan; when it "
+                f"[{_urgency(stage)}] Scan cost budget: "
+                f"{format_cost_usd(cost)}/{format_cost_usd(self._max_budget_usd)} "
+                f"spent ({pct}). This budget is shared across every agent in the scan; when it "
                 "is reached the whole scan is stopped immediately, and sub-agents are stopped at "
                 f"{reserve_pct}% to reserve the remainder for your final report. "
                 f"{_wrapup_directive(context, stage)}"
             )
         else:
             content = (
-                f"[{_urgency(stage)}] Scan cost budget: ${cost:.2f}/${self._max_budget_usd:.2f} "
-                f"spent ({pct}%). This budget is shared across every agent in the scan; "
+                f"[{_urgency(stage)}] Scan cost budget: "
+                f"{format_cost_usd(cost)}/{format_cost_usd(self._max_budget_usd)} "
+                f"spent ({pct}). This budget is shared across every agent in the scan; "
                 f"sub-agents are stopped at {reserve_pct}% to leave the remainder for the root "
                 f"agent's final report. {_wrapup_directive(context, stage)}"
             )
@@ -342,19 +345,20 @@ class ReportUsageHooks(RunHooks[dict[str, Any]]):
             if cost >= self._max_budget_usd:
                 if self._interactive:
                     raise BudgetPausedError(
-                        f"Scan budget of ${self._max_budget_usd:.2f} reached "
-                        f"(spent ${cost:.4f}); pausing until the user continues"
+                        f"Scan budget of {format_cost_usd(self._max_budget_usd)} reached "
+                        f"(spent {format_cost_usd(cost)}); pausing until the user continues"
                     )
                 raise BudgetExceededError(
-                    f"Token budget of ${self._max_budget_usd:.2f} exceeded (spent ${cost:.4f})"
+                    f"Token budget of {format_cost_usd(self._max_budget_usd)} exceeded "
+                    f"(spent {format_cost_usd(cost)})"
                 )
             is_root = ctx.get("parent_id") is None
             if not self._interactive and not is_root:
                 reserve_limit = self._max_budget_usd * _SUBAGENT_BUDGET_RESERVE
                 if cost >= reserve_limit:
                     raise SubagentBudgetReservedError(
-                        f"Sub-agent budget reserve reached: spent ${cost:.4f} of "
-                        f"${self._max_budget_usd:.2f} "
+                        f"Sub-agent budget reserve reached: spent {format_cost_usd(cost)} of "
+                        f"{format_cost_usd(self._max_budget_usd)} "
                         f"(>= {round(_SUBAGENT_BUDGET_RESERVE * 100)}% reserve); stopping this "
                         "sub-agent so the root agent can finish the scan."
                     )

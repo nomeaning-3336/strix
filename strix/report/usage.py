@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from agents.usage import Usage, deserialize_usage, serialize_usage
@@ -307,3 +308,61 @@ def _float_or_zero(value: Any) -> float:
 
 def _round_cost(cost: float) -> float:
     return round(max(0.0, cost), 10)
+
+
+# Cost display -----------------------------------------------------------------
+# A fixed two-decimal format renders a genuinely cheap run -- a few thousand
+# mostly-cached tokens on an inexpensive model -- as "$0.00", which reads as
+# "free" or "cost tracking is broken". It is worse than cosmetic in the budget
+# notices below, which tell the agent how much of its ceiling it has used: the
+# agent is then told it has spent nothing while it is really spending. One rule is
+# shared by the CLI/TUI stats, those notices, and the web viewer
+# (frontend/src/lib/display-number.ts keeps the same thresholds).
+
+
+def format_cost_usd(cost: float) -> str:
+    """Render a USD amount with precision that scales with magnitude.
+
+    0                 -> "$0.00"        (genuinely nothing spent)
+    0 < cost < 0.01   -> "$0.0014"      (sub-cent: 4 decimals)
+    cost < 0.0001     -> "$0.000012"    (6 decimals)
+    cost >= 0.01      -> "$1.23"        (2 decimals)
+    rounds away even at 6 decimals -> "<$0.000001"
+    """
+    if not math.isfinite(cost) or cost <= 0:
+        return "$0.00"
+    if cost >= 0.01:
+        return f"${cost:.2f}"
+    if cost >= 0.0001:
+        return f"${cost:.4f}"
+    if cost >= 0.000001:
+        return f"${cost:.6f}"
+    return "<$0.000001"
+
+
+def format_spend_percent(spent: float, ceiling: float) -> str:
+    """Budget consumption, without collapsing real spend to a bare "0%".
+
+    "0.06%" is not information anyone needs, but "0%" for a run that has spent
+    money is actively misleading, so anything under a tenth of a percent is
+    reported as "<0.1%" rather than rounded down to zero.
+
+    Rounding is explicit half-up rather than Python's default half-to-even,
+    because the viewer's TypeScript twin rounds with ``Math.round`` and the two
+    must not disagree (2.5% -> "3%" in both, not "2%" in one).
+    """
+    if not math.isfinite(spent) or not math.isfinite(ceiling) or ceiling <= 0:
+        return "0%"
+    if spent <= 0:
+        return "0%"
+    percent = (spent / ceiling) * 100
+    if percent < 0.1:
+        return "<0.1%"
+    if percent < 1:
+        return f"{_round_half_up(percent, 1):.1f}%"
+    return f"{int(_round_half_up(percent, 0))}%"
+
+
+def _round_half_up(value: float, digits: int) -> float:
+    factor = 10.0**digits
+    return math.floor(value * factor + 0.5) / factor

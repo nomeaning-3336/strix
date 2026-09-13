@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { ChevronDown, ChevronUp, Info } from "lucide-react";
-import { formatNumber } from "@/lib/display-number";
+import { formatCostUsd, formatNumber, formatSpendPercent } from "@/lib/display-number";
 
 /**
  * "Run details" card for the Overview tab: the launch configuration the run was
@@ -117,9 +117,8 @@ export function RunDetails({
   // The scan budget (--max-budget) is persisted on the run record; the ceiling
   // is a USD cap on LLM spend, so show spend against it.
   const budget = num(raw.max_budget_usd);
-  const hasBudget = budget != null && budget > 0;
+  const spendCeiling = budget != null && budget > 0 ? budget : null;
   const spent = cost ?? 0;
-  const budgetPct = hasBudget ? Math.round((spent / budget) * 100) : null;
   // A non-zero token count with zero cost means the model has no entry in
   // LiteLLM's price map (custom routes/gateways), not that the run was free.
   const unpriced =
@@ -238,17 +237,17 @@ export function RunDetails({
               ) : (
                 cost != null && (
                   <Field label="Cost">
-                    ${cost.toFixed(2)}
+                    {formatCostUsd(cost)}
                     {unpriced && (
                       <span className="text-[#666]"> (no price for this model)</span>
                     )}
                   </Field>
                 )
               )}
-              {hasBudget && (
+              {spendCeiling != null && (
                 <Field label="Budget">
-                  ${spent.toFixed(2)} / ${budget.toFixed(2)}
-                  <span className="text-[#666]"> ({budgetPct}%)</span>
+                  {formatCostUsd(spent)} / {formatCostUsd(spendCeiling)}
+                  <span className="text-[#666]"> ({formatSpendPercent(spent, spendCeiling)})</span>
                 </Field>
               )}
               {agents.length > 0 && <Field label="Agents">{formatNumber(agents.length)}</Field>}

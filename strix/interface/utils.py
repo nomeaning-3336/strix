@@ -20,6 +20,7 @@ from rich.text import Text
 
 from strix.config import load_settings
 from strix.report.finding_state import active_reports
+from strix.report.usage import format_cost_usd
 from strix.utils.api_spec import detect_spec_format
 
 
@@ -386,7 +387,7 @@ def _build_llm_usage_stats(
     elif live or cost > 0:
         stats_text.append("  ·  ", style="dim white")
         stats_text.append("Cost ", style="dim")
-        stats_text.append(f"${cost:.4f}", style="#fbbf24")
+        stats_text.append(f"{format_cost_usd(cost)}", style="#fbbf24")
 
 
 def build_final_stats_text(report_state: Any) -> Text:
@@ -468,7 +469,7 @@ def build_tui_stats_text(report_state: Any) -> Text:
             stats_text.append("$0.00", style="white")
         elif cost > 0:
             stats_text.append(" · ", style="white")
-            stats_text.append(f"${cost:.2f}", style="white")
+            stats_text.append(f"{format_cost_usd(cost)}", style="white")
 
     caido_url = getattr(report_state, "caido_url", None)
     if caido_url:
