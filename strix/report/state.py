@@ -108,6 +108,17 @@ UPDATABLE_REPORT_FIELDS = frozenset(
         "code_locations",
         "fix_verification",
         "fix_pr_body",
+        # Developer-intent block. Updatable so a finding filed before the intent
+        # gate existed can be completed (or corrected) in place rather than
+        # re-filed as a duplicate.
+        "intent_check_status",
+        "intent_search_scope",
+        "intent_evidence",
+        "known_issue_or_duplicate_search",
+        "alternative_semantics_check",
+        "security_contract_conflict",
+        "intent_review",
+        "intent_gate",
     }
 )
 
@@ -194,6 +205,23 @@ def _git_head(repo_path: str) -> tuple[str | None, str | None]:
     if branch == "HEAD":  # detached HEAD carries no branch name
         branch = None
     return commit, branch
+
+
+def _persist_intent_fields(report: dict[str, Any], **fields: Any) -> None:
+    """Attach the developer-intent block to a report, omitting empty values.
+
+    Only what the caller actually supplied is stored, so an older report is never
+    handed a synthetic "checked, found nothing" intent record it did not earn, and
+    a reader can tell "not recorded" apart from "recorded and empty".
+
+    ``intent_gate`` is the computed verdict (disposition, reasons, warnings)
+    rather than model input: the reporting tool writes it, and downstream surfaces
+    render it verbatim.
+    """
+    for key, value in fields.items():
+        if value in (None, "", [], {}):
+            continue
+        report[key] = value
 
 
 def get_global_report_state() -> Optional["ReportState"]:
@@ -378,6 +406,14 @@ class ReportState:
         fix_pr_body: str | None = None,
         finding_class: str | None = None,
         dependency_metadata: dict[str, str] | None = None,
+        intent_check_status: str | None = None,
+        intent_search_scope: list[str] | None = None,
+        intent_evidence: list[dict[str, Any]] | None = None,
+        known_issue_or_duplicate_search: str | None = None,
+        alternative_semantics_check: str | None = None,
+        security_contract_conflict: dict[str, Any] | None = None,
+        intent_review: dict[str, Any] | None = None,
+        intent_gate: dict[str, Any] | None = None,
         agent_id: str | None = None,
         agent_name: str | None = None,
         state: str | None = None,
@@ -477,6 +513,17 @@ class ReportState:
             report["state"] = normalize_state(state) or "verified"
             if dependency_metadata:
                 report["dependency_metadata"] = dependency_metadata
+            _persist_intent_fields(
+                report,
+                intent_check_status=intent_check_status,
+                intent_search_scope=intent_search_scope,
+                intent_evidence=intent_evidence,
+                known_issue_or_duplicate_search=known_issue_or_duplicate_search,
+                alternative_semantics_check=alternative_semantics_check,
+                security_contract_conflict=security_contract_conflict,
+                intent_review=intent_review,
+                intent_gate=intent_gate,
+            )
             if agent_id:
                 report["agent_id"] = agent_id
             if agent_name:

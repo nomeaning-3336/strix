@@ -57,6 +57,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, cast
 
 from strix.report.finding_state import active_reports
+from strix.report.intent import intent_block_for_output
 
 
 logger = logging.getLogger(__name__)
@@ -577,6 +578,15 @@ def _result_properties(
         if poc_script:
             poc["script_available"] = True
         strix["poc"] = poc
+
+    # Developer-intent gate: the canonical projection is stored as-is so
+    # downstream tooling (dashboards, ASPM ingest, the viewer) can read the
+    # disposition and the evidence sources that decided it without parsing the
+    # finding's markdown. Absent for black-box findings and for reports filed
+    # before the gate existed — those documents are unchanged.
+    intent = intent_block_for_output(report)
+    if intent is not None:
+        strix["intent"] = intent
 
     if strix:
         properties["strix"] = strix

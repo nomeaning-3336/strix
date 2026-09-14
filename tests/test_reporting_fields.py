@@ -189,6 +189,39 @@ async def test_create_report_rejects_invalid_fix_effort(report_state: ReportStat
     assert not report_state.vulnerability_reports
 
 
+# The developer-intent record a source-aware filing has to carry: the search that
+# was run, what it found, and the independent review of it. Kept minimal here —
+# tests/test_intent_gate.py covers the gate's own decisions.
+_SOURCE_AWARE_INTENT: dict[str, object] = {
+    "intent_check_status": "completed",
+    "intent_search_scope": [
+        "doc/ and docs/ (grep for the symbol and the feature name)",
+        "spec/ and *_test.* for the route",
+        "git log -S <symbol> over the last two years",
+    ],
+    "intent_evidence": [
+        {
+            "source": "app/views.py:12",
+            "authority": "comment",
+            "supports": "A comment describes the helper as internal-only.",
+        }
+    ],
+    "known_issue_or_duplicate_search": (
+        "Searched the changelog, ADRs and issue references for this behaviour: nothing found."
+    ),
+    "alternative_semantics_check": (
+        "The handler takes a single code path with no any-of boundary semantics, so the "
+        "observed behaviour is not one branch of an OR."
+    ),
+    "intent_review": {
+        "reviewer_kind": "independent_agent",
+        "reviewed_by": "reviewer-1",
+        "verdict": "conflict_confirmed",
+        "notes": "Read the same code path and searches independently; no design note found.",
+    },
+}
+
+
 async def _create_with(report_state: ReportState, **overrides: object) -> dict[str, Any]:
     kwargs: dict[str, object] = {
         "title": "X",
@@ -213,6 +246,12 @@ async def _create_with(report_state: ReportState, **overrides: object) -> dict[s
         "code_locations": None,
     }
     kwargs.update(overrides)
+    if kwargs.get("code_locations") is not None:
+        # A finding that points at code is source-aware, so it also carries the
+        # developer-intent record the reporting gate requires. These tests are
+        # about other fields, so a minimal but complete record is supplied here
+        # rather than in every call.
+        kwargs.update(_SOURCE_AWARE_INTENT)
     assert report_state is not None
     return await _do_create(**kwargs)  # type: ignore[arg-type]
 

@@ -40,9 +40,12 @@ def _resolve_skills(
     5. ``analysis/counterevidence`` and ``analysis/severity_calibration``
        (always — closure discipline and severity rubric apply to every
        agent that can open or close a candidate, or file a report).
-    6. ``coordination/root_agent`` for the root agent only — orchestration
+    6. ``analysis/developer_intent`` (always — every filing agent needs the
+       authority hierarchy and the rebuttable presumption, because a
+       source-aware finding is rejected without an intent record).
+    7. ``coordination/root_agent`` for the root agent only — orchestration
        guidance for delegating to specialist subagents.
-    7. Whitebox-specific skills if applicable, including
+    8. Whitebox-specific skills if applicable, including
        ``analysis/fix_verification`` (only whitebox agents can attach an
        applyable ``fix_after``) and ``analysis/source_aware_discovery``.
     """
@@ -54,6 +57,7 @@ def _resolve_skills(
     ordered.append("tooling/python")
     ordered.append("analysis/counterevidence")
     ordered.append("analysis/severity_calibration")
+    ordered.append("analysis/developer_intent")
     if is_root:
         ordered.append("coordination/root_agent")
     if is_whitebox:

@@ -206,6 +206,19 @@ Not worth it: "this could use more validation" with no path, style and
 maintainability complaints, and cosmetic variants of a candidate you
 already opened.
 
+**Read the code as a contract before you call it a bug.** Source-aware
+candidates that survive the sweep still have to clear the intent bar:
+authorization and permission semantics in particular are frequently deliberate —
+a check that accepts *any one* of several boundaries is satisfied, a scope that is
+narrower than you expected but documented, a route that resolves its boundary from
+the token rather than the URL. Before filing, run the pass in
+`analysis/developer_intent`: docs for that endpoint or feature, the
+request/integration specs that exercise it, the commit that introduced it. If the
+repository's own authoritative evidence describes the behaviour you observed, it
+is intended behaviour — record it as such, or report the docs-vs-code conflict.
+An unexpected-but-documented authorization model is not a bypass, and a
+source-aware report is rejected without that intent record.
+
 Keep reading until no distinct plausible candidate remains — then record
 what you swept with `record_coverage`, including the families that came
 back clean.

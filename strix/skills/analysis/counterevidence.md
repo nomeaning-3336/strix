@@ -89,9 +89,26 @@ move on to the next candidate — not reasons to mark it clean. Do not let
 one hard environment setup consume the budget you need for sibling
 candidates.
 
-**Operator configurability.** "An operator *could* configure a filter",
-"this is a documented feature", "it's off by default" are not controls.
-What ships and what is reachable is what matters.
+**Operator configurability, without a contract.** "An operator *could*
+configure a filter" or "it's off by default" does not close a candidate on its
+own: what ships and what is reachable is what matters. This does **not** extend to
+authoritative evidence of intent — see below, and `analysis/developer_intent`.
+
+**Documentation of a dangerous primitive.** A doc, blog post or comment that
+merely *describes* a powerful or risky feature ("this endpoint can import from a
+URL", "this flag disables verification") never sanitizes the behaviour. Describing
+a primitive is not defining when it may be used, by whom, or against what.
+
+**Authoritative intent — the exception that *does* close a candidate.** Evidence
+that defines the exact behavior you observed as the intended contract closes it:
+a security policy or published promise, or the implementation spec/documentation
+of that route, permission, boundary or flag — including the request/integration
+specs that assert it. That is not "the docs mention it"; it is "the docs say this
+exact outcome is the contract". If you gathered or cited such evidence and it
+contradicts your finding, the candidate is closed as intended behaviour, or
+reported *as the docs-vs-code conflict* — never as a bypass. The authority order,
+the rebuttable presumption and what counts as a real override are in
+`analysis/developer_intent`.
 
 **Being internal.** Internal-only, admin-only, or authenticated-only
 reduces severity — it does not make the finding unreal. Downgrade it;
@@ -147,6 +164,14 @@ endpoint is broken/unreachable for unrelated reasons".
 Run this pass on every finding before calling
 `create_vulnerability_report`:
 
+0. **Ask what the project intended.** For a source-aware finding, search the
+   repository for authoritative intent — docs for that endpoint or feature, the
+   request/integration specs that exercise it, the commit that introduced it. If
+   that evidence describes the exact behaviour you observed, you do not have a
+   finding: record it as intended behaviour, or (when docs and code genuinely
+   disagree) report the conflict. The full pass, the authority hierarchy and the
+   `intent_*` fields the tool requires are in `analysis/developer_intent`. An
+   independent agent must review it before you file.
 1. **Argue the other side.** Spend real effort building the strongest
    case that this is *not* exploitable, or not as severe as you think.
    Look for the guard you might have missed, the deployment context that

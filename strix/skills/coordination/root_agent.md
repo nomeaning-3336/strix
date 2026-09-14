@@ -87,6 +87,21 @@ Complex findings warrant specialized subagents:
 - Discovery agent finds potential vulnerability
 - Validation agent confirms exploitability
 - Reporting agent documents with reproduction steps AND supplies the fix inline (the report tool carries the patch via `code_locations`/`fix_pr_body`) — do not add a separate fix agent that re-derives the same patch
+- **Intent reviewer** for every source-aware finding: a different agent that re-reads the evidence and its searches and returns a verdict (`intent_confirmed`, `conflict_confirmed`, `unresolved`). The filing agent cannot review its own case, and the reporting tool rejects a source-aware report without that review recorded.
+
+**Intent before findings on source-available targets**
+
+On a white-box run, a finding that merely shows the code does something unexpected
+is not a finding yet. Before it is filed, the repository's own authoritative
+evidence has to be checked: docs for that endpoint or feature, the
+request/integration specs that exercise it, the commit that introduced it. If
+those describe the observed behaviour as the contract, it is intended behaviour —
+route it to `record_coverage(outcome="not_applicable", evidence="<source> defines
+this behaviour")`. If docs and code genuinely conflict, that conflict is the
+finding. Unresolved intent becomes `needs_follow_up`, never a filed vulnerability.
+The pass, the authority hierarchy and the required `intent_*` report fields are in
+`analysis/developer_intent`; assign the review the same way you assign validation,
+and do not accept "the docs mention it" as either an excuse or a closure.
 
 **Resource Efficiency**
 

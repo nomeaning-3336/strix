@@ -265,3 +265,144 @@ def test_render_vulnerability_md_surfaces_calibration_metadata() -> None:
     assert "## Confidence Rationale" in md
     assert "## What Would Change This Severity" in md
     assert "## Fix Verification" in md
+
+
+def _intent_report(**overrides: Any) -> dict[str, Any]:
+    """A source-aware finding carrying the full developer-intent block."""
+    base = _sample_report(
+        intent_check_status="completed",
+        intent_search_scope=[
+            "doc/development/permissions (grep for import boundary)",
+            "spec/requests/api/imports_spec.rb",
+            "git log -S import_source_user",
+        ],
+        intent_evidence=[
+            {
+                "source": (
+                    "doc/development/permissions/granular_access/rest_api_implementation_guide.md"
+                ),
+                "authority": "implementation_spec",
+                "supports": "import endpoints may resolve a group or a user boundary",
+                "contradicts": "",
+                "stale": False,
+                "note": "lines 181-199",
+            },
+            {
+                "source": "CHANGELOG.md",
+                "authority": "history",
+                "supports": "",
+                "contradicts": "the route was tightened to project owners",
+                "stale": True,
+                "note": "",
+            },
+        ],
+        known_issue_or_duplicate_search=(
+            "Searched CHANGELOG and the issue tracker for PAT scope handling on imports; no entry."
+        ),
+        alternative_semantics_check=(
+            "Access is granted when any one resolved boundary is satisfied, so the user "
+            "boundary is a satisfied alternative rather than a bypass."
+        ),
+        security_contract_conflict={
+            "kind": "conflicting_security_invariant",
+            "invariant": (
+                "A fine-grained PAT scoped to a user must never reach a group the token was not "
+                "scoped to."
+            ),
+            "source": "SECURITY.md (fine-grained token promises)",
+            "impact": "A user-scoped token reads and writes every project under the target group.",
+        },
+        intent_review={
+            "reviewer_kind": "independent_agent",
+            "reviewed_by": "reviewer-agent-2",
+            "verdict": "intent_confirmed",
+            "notes": "Re-read the guide and both route files; the OR semantics are explicit.",
+        },
+        intent_gate={
+            "applies": True,
+            "disposition": "report_conflict",
+            "reasons": [],
+            "warnings": ["Only non-authoritative evidence supports the remaining claim."],
+            "evidence_count": 2,
+            "authoritative_support": [
+                "doc/development/permissions/granular_access/rest_api_implementation_guide.md",
+            ],
+            "authoritative_contradict": [],
+            "weak_support": [],
+            "stale": ["CHANGELOG.md"],
+        },
+    )
+    base.update(overrides)
+    return base
+
+
+def test_render_vulnerability_md_surfaces_the_intent_block() -> None:
+    """A triager must be able to see the disposition and which sources decided it
+    without opening vulnerabilities.json."""
+    md = render_vulnerability_md(_intent_report())
+
+    assert "## Intent & known-issue check" in md
+    assert "**Status:** completed · **Disposition:** report_conflict" in md
+    # Evidence: source + authority + the claim, with stale entries marked.
+    assert (
+        "- doc/development/permissions/granular_access/rest_api_implementation_guide.md "
+        "(implementation_spec) — supports: import endpoints may resolve a group or a user boundary "
+        "— note: lines 181-199"
+    ) in md
+    assert (
+        "- CHANGELOG.md (history) — contradicts: the route was tightened to project owners "
+        "**(STALE)**"
+    ) in md
+    assert (
+        "**Search scope:** doc/development/permissions (grep for import boundary); "
+        "spec/requests/api/imports_spec.rb; git log -S import_source_user"
+    ) in md
+    assert "**Known-issue search:** Searched CHANGELOG and the issue tracker" in md
+    assert (
+        "**Alternative semantics:** Access is granted when any one resolved boundary is satisfied"
+    ) in md
+    assert (
+        "**Conflict:** `conflicting_security_invariant` — A fine-grained PAT scoped to a user"
+    ) in md
+    assert "**Conflict source:** SECURITY.md (fine-grained token promises)" in md
+    assert "**Conflict impact:** A user-scoped token reads and writes every project" in md
+    assert "**Review:** intent_confirmed by reviewer-agent-2 (independent_agent)" in md
+    assert "**Warnings:**" in md
+
+
+def _section_blocks(md: str) -> list[str]:
+    """Split a rendered report into its ``## `` sections (headings included)."""
+    return ["## " + part for part in md.split("## ")[1:]]
+
+
+def test_render_vulnerability_md_omits_the_intent_section_without_metadata() -> None:
+    """Finding files written before the gate existed must render exactly as before."""
+    plain = render_vulnerability_md(_sample_report())
+    with_intent = render_vulnerability_md(_intent_report())
+
+    assert "Intent & known-issue check" not in plain
+    assert "**Disposition:**" not in plain
+    # The intent-bearing render is the plain one plus exactly that one section:
+    # the header/description block and every other section are byte-identical.
+    assert plain.split("## ")[0] == with_intent.split("## ")[0]
+    assert _section_blocks(plain) == [
+        block
+        for block in _section_blocks(with_intent)
+        if not block.startswith("## Intent & known-issue check")
+    ]
+
+
+def test_render_vulnerability_md_survives_partial_intent_metadata() -> None:
+    # A partially filled block (older agent, or a search that could not run) still
+    # renders, naming what is missing instead of raising.
+    md = render_vulnerability_md(
+        _sample_report(
+            intent_check_status="unavailable",
+            intent_evidence=[{"source": "docs/security-model.md"}],
+        ),
+    )
+
+    assert "**Status:** unavailable · **Disposition:** not_recorded" in md
+    assert "- docs/security-model.md (authority not recorded) — no claim recorded" in md
+    assert "**Evidence:**" in md
+    assert "**Review:**" not in md  # absent review renders nothing, not a blank row

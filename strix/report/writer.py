@@ -25,6 +25,7 @@ from strix.report.finding_state import (
     state_of,
     state_reason,
 )
+from strix.report.intent import intent_block_for_output
 
 
 if TYPE_CHECKING:
@@ -330,6 +331,8 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
     lines.append(report.get("description") or "No description provided.")
     lines.append("")
 
+    lines.extend(render_intent_section(report))
+
     if report.get("evidence"):
         lines.append("## Evidence\n")
         lines.append(str(report["evidence"]))
@@ -426,6 +429,104 @@ def render_vulnerability_md(report: dict[str, Any]) -> str:  # noqa: PLR0912, PL
     lines.extend(render_update_history(report.get("update_history")))
 
     return "\n".join(lines)
+
+
+def render_intent_section(report: dict[str, Any]) -> list[str]:
+    """Render the developer-intent / known-issue gate verdict for a finding.
+
+    Deliberately terse — a human triaging the report needs the disposition, the
+    sources the intent search actually found (and how authoritative they are),
+    and any conflict that overrode them, not the whole gate payload. Returns no
+    lines when the report carries no intent metadata, so findings written before
+    the gate existed (and black-box findings) render exactly as they did before.
+    """
+    block = intent_block_for_output(report)
+    if block is None:
+        return []
+
+    lines = [
+        "## Intent & known-issue check",
+        "",
+        f"**Status:** {block['status']} · **Disposition:** {block['disposition']}",
+    ]
+
+    evidence: list[Any] = block.get("evidence") or []
+    if evidence:
+        lines.append("**Evidence:**")
+        lines.extend(f"- {_intent_evidence_line(entry)}" for entry in evidence)
+
+    scope: list[Any] = block.get("search_scope") or []
+    if scope:
+        lines.append(f"**Search scope:** {'; '.join(str(item) for item in scope)}")
+
+    if block.get("known_issue_search"):
+        lines.append(f"**Known-issue search:** {block['known_issue_search']}")
+
+    if block.get("alternative_semantics_check"):
+        lines.append(f"**Alternative semantics:** {block['alternative_semantics_check']}")
+
+    conflict = block.get("conflict")
+    if isinstance(conflict, dict) and conflict:
+        conflict_fields = cast("dict[str, Any]", conflict)
+        lines.append(
+            f"**Conflict:** `{conflict_fields.get('kind') or 'kind not recorded'}` — "
+            f"{conflict_fields.get('invariant') or 'invariant not stated'}",
+        )
+        if conflict_fields.get("source"):
+            lines.append(f"**Conflict source:** {conflict_fields['source']}")
+        if conflict_fields.get("impact"):
+            lines.append(f"**Conflict impact:** {conflict_fields['impact']}")
+
+    review = block.get("review")
+    if isinstance(review, dict) and review:
+        review_fields = cast("dict[str, Any]", review)
+        lines.append(f"**Review:** {_intent_review_line(review_fields)}")
+        if review_fields.get("notes"):
+            lines.append(f"**Review notes:** {review_fields['notes']}")
+
+    reasons: list[Any] = block.get("reasons") or []
+    if reasons:
+        # A blocking disposition (needs_follow_up / report_conflict) is only
+        # actionable when the report says what blocked it.
+        lines.append("**Blocking issues:**")
+        lines.extend(f"- {reason}" for reason in reasons)
+
+    warnings: list[Any] = block.get("warnings") or []
+    if warnings:
+        lines.append("**Warnings:**")
+        lines.extend(f"- {warning}" for warning in warnings)
+
+    lines.append("")
+    return lines
+
+
+def _intent_evidence_line(entry: Any) -> str:
+    """One line per intent-evidence entry: source, authority, then its claim."""
+    item: dict[str, Any] = cast("dict[str, Any]", entry) if isinstance(entry, dict) else {}
+    claims = [
+        f"{label}: {item[key]}"
+        for key, label in (("supports", "supports"), ("contradicts", "contradicts"))
+        if item.get(key)
+    ]
+    line = (
+        f"{item.get('source') or 'source not recorded'} "
+        f"({item.get('authority') or 'authority not recorded'}) — "
+        f"{'; '.join(claims) or 'no claim recorded'}"
+    )
+    if item.get("note"):
+        line = f"{line} — note: {item['note']}"
+    if item.get("stale"):
+        line = f"{line} **(STALE)**"
+    return line
+
+
+def _intent_review_line(review: dict[str, Any]) -> str:
+    """``<verdict> by <reviewer> (<reviewer_kind>)`` for the review sub-block."""
+    verdict = review.get("verdict") or "verdict not recorded"
+    reviewed_by = review.get("reviewed_by") or "reviewer not recorded"
+    reviewer_kind = review.get("reviewer_kind")
+    who = f"{reviewed_by} ({reviewer_kind})" if reviewer_kind else str(reviewed_by)
+    return f"{verdict} by {who}"
 
 
 def render_update_history(history: Any) -> list[str]:

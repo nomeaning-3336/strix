@@ -371,3 +371,128 @@ def test_calibration_metadata_survives_into_result_properties(tmp_path: Path) ->
     assert strix["confidence_rationale"] == "Reproduced once out of three attempts."
     assert strix["severity_change_conditions"] == "Critical if the WAF rule is removed."
     assert strix["fix_verification"] == "Not retested."
+
+
+def _intent_fields(**overrides: Any) -> dict[str, Any]:
+    """The persisted developer-intent block, as the reporting tool writes it."""
+    fields: dict[str, Any] = {
+        "intent_check_status": "completed",
+        "intent_search_scope": [
+            "doc/development/permissions (grep for import boundary)",
+            "spec/requests/api/imports_spec.rb",
+            "git log -S import_source_user",
+        ],
+        "intent_evidence": [
+            {
+                "source": "doc/development/permissions/granular_access/"
+                "rest_api_implementation_guide.md",
+                "authority": "implementation_spec",
+                "supports": "import endpoints may resolve a group or a user boundary",
+                "contradicts": "",
+                "stale": False,
+                "note": "lines 181-199",
+            },
+            {
+                "source": "CHANGELOG.md",
+                "authority": "history",
+                "supports": "",
+                "contradicts": "the route was tightened to project owners",
+                "stale": True,
+                "note": "",
+            },
+        ],
+        "known_issue_or_duplicate_search": (
+            "Searched CHANGELOG and the issue tracker for PAT scope handling on imports; no entry."
+        ),
+        "alternative_semantics_check": (
+            "Access is granted when any one resolved boundary is satisfied, so the user "
+            "boundary is a satisfied alternative rather than a bypass."
+        ),
+        "security_contract_conflict": {
+            "kind": "conflicting_security_invariant",
+            "invariant": (
+                "A fine-grained PAT scoped to a user must never reach a group the token was not "
+                "scoped to."
+            ),
+            "source": "SECURITY.md (fine-grained token promises)",
+            "impact": "A user-scoped token reads and writes every project under the target group.",
+        },
+        "intent_review": {
+            "reviewer_kind": "independent_agent",
+            "reviewed_by": "reviewer-agent-2",
+            "verdict": "intent_confirmed",
+            "notes": "Re-read the guide and both route files; the OR semantics are explicit.",
+        },
+        "intent_gate": {
+            "applies": True,
+            "disposition": "report_conflict",
+            "reasons": [],
+            "warnings": ["Only non-authoritative evidence supports the remaining claim."],
+        },
+    }
+    fields.update(overrides)
+    return fields
+
+
+def test_result_properties_carry_the_intent_block(tmp_path: Path) -> None:
+    """Downstream tooling reads the disposition and evidence sources from the
+    property bag, without parsing the finding's markdown."""
+    write_sarif(tmp_path, [_finding(**_intent_fields())])
+
+    strix = _read(tmp_path)["runs"][0]["results"][0]["properties"]["strix"]
+    intent = strix["intent"]
+
+    assert intent["status"] == "completed"
+    assert intent["disposition"] == "report_conflict"
+    assert intent["search_scope"] == [
+        "doc/development/permissions (grep for import boundary)",
+        "spec/requests/api/imports_spec.rb",
+        "git log -S import_source_user",
+    ]
+    assert intent["evidence"][0]["source"] == (
+        "doc/development/permissions/granular_access/rest_api_implementation_guide.md"
+    )
+    assert intent["evidence"][0]["authority"] == "implementation_spec"
+    assert intent["evidence"][0]["stale"] is False
+    assert intent["evidence"][1] == {
+        "source": "CHANGELOG.md",
+        "authority": "history",
+        "supports": "",
+        "contradicts": "the route was tightened to project owners",
+        "stale": True,
+        "note": "",
+    }
+    assert intent["conflict"]["kind"] == "conflicting_security_invariant"
+    assert intent["conflict"]["source"] == "SECURITY.md (fine-grained token promises)"
+    assert intent["review"]["verdict"] == "intent_confirmed"
+    assert intent["review"]["reviewed_by"] == "reviewer-agent-2"
+    assert intent["warnings"] == ["Only non-authoritative evidence supports the remaining claim."]
+    # The intent evidence is not duplicated into the flat property list.
+    assert "intent_gate" not in strix
+
+
+def test_result_properties_omit_intent_without_metadata(tmp_path: Path) -> None:
+    """A black-box finding (or one filed before the gate) keeps its old shape."""
+    write_sarif(tmp_path, [_finding()])
+
+    result = _read(tmp_path)["runs"][0]["results"][0]
+    strix = result["properties"]["strix"]
+
+    assert "intent" not in strix
+    assert "intent_gate" not in strix
+    assert "intent_evidence" not in strix
+    # Still a valid document with the same property shape as before.
+    assert strix["id"] == "vuln-0001"
+    assert result["properties"]["security-severity"] == "9.5"
+
+
+def test_result_properties_survive_partial_intent_metadata(tmp_path: Path) -> None:
+    write_sarif(tmp_path, [_finding(intent_check_status="unavailable")])
+
+    intent = _read(tmp_path)["runs"][0]["results"][0]["properties"]["strix"]["intent"]
+
+    assert intent["status"] == "unavailable"
+    assert intent["disposition"] == "not_recorded"
+    assert intent["evidence"] == []
+    assert intent["conflict"] is None
+    assert intent["review"] is None

@@ -368,6 +368,13 @@ def _collect_update_changes(  # noqa: PLR0912
     if cwe:
         changes["cwe"] = cwe
 
+    # Developer-intent block. An explicit value replaces it (an empty one clears
+    # it); omitting the field leaves the recorded intent evidence alone. Shape and
+    # sufficiency are the gate's business, not this collector's.
+    for name in _INTENT_UPDATE_FIELDS:
+        if name in fields and fields[name] is not None:
+            changes[name] = fields[name]
+
     return changes, errors
 
 
@@ -383,6 +390,19 @@ _DYNAMIC_ONLY_UPDATE_FIELDS = (
 # A dependency finding is rated in the context of the codebase that pins it, and
 # that rating is only shown with the reasoning behind it.
 _DEPENDENCY_ONLY_UPDATE_FIELDS = ("contextual_cvss_reasoning",)
+
+# The developer-intent block, as revised by an update. Supplying one of these
+# replaces it; the gate is re-evaluated against the merged report so intent
+# evidence can be completed (or corrected) in place instead of re-filing.
+_INTENT_UPDATE_FIELDS = (
+    "intent_check_status",
+    "intent_search_scope",
+    "intent_evidence",
+    "known_issue_or_duplicate_search",
+    "alternative_semantics_check",
+    "security_contract_conflict",
+    "intent_review",
+)
 
 
 def _reject_cross_class_revision(
@@ -519,7 +539,69 @@ def _read_revision(
     return changes, None
 
 
-def _do_update(
+def _revision_intent_gate(
+    report_state: Any,
+    existing: dict[str, Any],
+    changes: dict[str, Any],
+    *,
+    agent_id: str | None,
+) -> dict[str, Any] | None:
+    """Re-evaluate the intent gate for a revision, or ``None`` to let it through.
+
+    Two ways a revision can matter to the gate:
+
+    * the report is source-aware and already carries intent metadata, so the
+      revision is judged against the merged evidence;
+    * the revision *adds* intent evidence, or adds code locations to a report
+      that had none — filing a dynamic finding and then attaching source to it
+      would otherwise be a way around the gate.
+
+    A source-aware report that predates this gate and is being revised for
+    something unrelated is intentionally left alone: retroactively refusing an
+    unrelated correction would strand findings that were filed legitimately.
+    """
+    if not existing.get("id"):
+        return None
+
+    from strix.report.intent import is_source_aware
+
+    merged = {**existing, **changes}
+    source_aware = is_source_aware(
+        local_sources=report_state.run_record.get("local_sources"),
+        code_locations=merged.get("code_locations"),
+        finding_class=str(merged.get("finding_class") or "dynamic"),
+    )
+    intent_supplied = any(name in changes for name in _INTENT_UPDATE_FIELDS)
+    gated_before = bool(existing.get("intent_gate")) or bool(existing.get("intent_check_status"))
+
+    if not source_aware or not (intent_supplied or gated_before):
+        return None
+    if str(merged.get("finding_class") or "").strip().lower() == "dependency_cve":
+        return None
+
+    gate = _filing_intent_gate(
+        report_state,
+        finding_class=str(merged.get("finding_class") or "dynamic"),
+        code_locations=merged.get("code_locations"),
+        intent_check_status=merged.get("intent_check_status"),
+        intent_search_scope=merged.get("intent_search_scope"),
+        intent_evidence=merged.get("intent_evidence"),
+        known_issue_or_duplicate_search=merged.get("known_issue_or_duplicate_search"),
+        alternative_semantics_check=merged.get("alternative_semantics_check"),
+        security_contract_conflict=merged.get("security_contract_conflict"),
+        intent_review=merged.get("intent_review"),
+        assumptions=merged.get("assumptions"),
+        caller_agent_id=agent_id,
+    )
+    if gate.blocks_filing:
+        return _intent_gate_rejection(gate)
+    # Record the re-evaluated verdict with the revision so the stored disposition
+    # never describes an older state of the evidence.
+    changes["intent_gate"] = gate.as_record()
+    return None
+
+
+def _do_update(  # noqa: PLR0911 - one return per rejection reason
     *,
     report_id: str,
     update_reason: str,
@@ -550,6 +632,21 @@ def _do_update(
     class_error = _fit_revision_to_class(report_state, report_id, changes)
     if class_error is not None:
         return class_error
+
+    existing_report = next(
+        (r for r in report_state.vulnerability_reports if r.get("id") == report_id), None
+    )
+    if existing_report is None:
+        return {"success": False, "error": f"Report with id '{report_id}' not found"}
+
+    gate_rejection = _revision_intent_gate(
+        report_state,
+        existing_report,
+        changes,
+        agent_id=agent_id,
+    )
+    if gate_rejection is not None:
+        return gate_rejection
 
     updated = report_state.update_vulnerability_report(
         report_id,
@@ -613,7 +710,66 @@ def _raise_if_llm_duplicate(
     )
 
 
-async def _do_create(
+def _filing_intent_gate(
+    report_state: Any,
+    *,
+    finding_class: str,
+    code_locations: Any,
+    intent_check_status: str | None,
+    intent_search_scope: list[str] | None,
+    intent_evidence: list[dict[str, Any]] | None,
+    known_issue_or_duplicate_search: str | None,
+    alternative_semantics_check: str | None,
+    security_contract_conflict: dict[str, Any] | None,
+    intent_review: dict[str, Any] | None,
+    assumptions: str | None,
+    caller_agent_id: str | None,
+) -> Any:
+    """Evaluate the developer-intent gate for one filing attempt.
+
+    "Source-aware" means the finding rests on the target's own code: either the
+    scan mounted a local source tree, or the finding itself points at code. A
+    dynamic-only finding keeps its previous contract, and so does a dependency
+    CVE (its validity is defined by an advisory, not by this repo's design).
+    """
+    from strix.report.intent import evaluate_intent_gate, is_source_aware
+
+    source_aware = is_source_aware(
+        local_sources=report_state.run_record.get("local_sources"),
+        code_locations=code_locations,
+        finding_class=finding_class,
+    )
+    return evaluate_intent_gate(
+        source_aware=source_aware,
+        finding_class=finding_class,
+        intent_check_status=intent_check_status,
+        intent_search_scope=intent_search_scope,
+        intent_evidence=intent_evidence,
+        known_issue_or_duplicate_search=known_issue_or_duplicate_search,
+        alternative_semantics_check=alternative_semantics_check,
+        security_contract_conflict=security_contract_conflict,
+        intent_review=intent_review,
+        assumptions=assumptions,
+        caller_agent_id=caller_agent_id,
+    )
+
+
+def _intent_gate_rejection(gate: Any) -> dict[str, Any]:
+    """The retryable tool result for a filing the intent gate refused."""
+    return {
+        "success": False,
+        "error": (
+            "Intent gate blocked this filing: the developer-intent and known-issue check is "
+            "missing, incomplete, or contradicted by the repository's own authoritative "
+            "evidence. Address the items below, or record the candidate in the coverage "
+            "ledger instead of filing it."
+        ),
+        "intent_gate": gate.as_record(),
+        "errors": list(gate.errors),
+    }
+
+
+async def _do_create(  # noqa: PLR0911 - one branch per filing outcome
     *,
     title: str,
     description: str,
@@ -638,6 +794,13 @@ async def _do_create(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    intent_check_status: str | None = None,
+    intent_search_scope: list[str] | None = None,
+    intent_evidence: list[dict[str, Any]] | None = None,
+    known_issue_or_duplicate_search: str | None = None,
+    alternative_semantics_check: str | None = None,
+    security_contract_conflict: dict[str, Any] | None = None,
+    intent_review: dict[str, Any] | None = None,
     agent_id: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
@@ -704,6 +867,30 @@ async def _do_create(
         from strix.report.dedupe import check_duplicate, finding_fingerprint
         from strix.report.state import DuplicateVulnerabilityError
 
+        # Developer-intent gate. Runs before the (slow, LLM-backed) duplicate
+        # check so a finding that cannot be filed yet costs no model call.
+        gate = _filing_intent_gate(
+            report_state,
+            finding_class="dynamic",
+            code_locations=code_locations,
+            intent_check_status=intent_check_status,
+            intent_search_scope=intent_search_scope,
+            intent_evidence=intent_evidence,
+            known_issue_or_duplicate_search=known_issue_or_duplicate_search,
+            alternative_semantics_check=alternative_semantics_check,
+            security_contract_conflict=security_contract_conflict,
+            intent_review=intent_review,
+            assumptions=assumptions,
+            caller_agent_id=agent_id,
+        )
+        if gate.blocks_filing:
+            logger.info(
+                "intent gate blocked a filing (%s): %s",
+                gate.disposition,
+                "; ".join(gate.errors)[:500],
+            )
+            return _intent_gate_rejection(gate)
+
         existing = report_state.get_existing_vulnerabilities()
         candidate = {
             "title": title,
@@ -742,6 +929,16 @@ async def _do_create(
             "code_locations": parsed_locations,
             "fix_verification": fix_verification,
             "fix_pr_body": fix_pr_body,
+            "intent_check_status": intent_check_status,
+            "intent_search_scope": intent_search_scope,
+            "intent_evidence": intent_evidence,
+            "known_issue_or_duplicate_search": known_issue_or_duplicate_search,
+            "alternative_semantics_check": alternative_semantics_check,
+            "security_contract_conflict": security_contract_conflict,
+            "intent_review": intent_review,
+            # Computed, not model input: the verdict travels with the finding so a
+            # later reader can see what the gate decided and on what evidence.
+            "intent_gate": gate.as_record(),
         }
 
         try:
@@ -840,6 +1037,13 @@ async def create_vulnerability_report(
     confidence_rationale: str | None = None,
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
+    intent_check_status: str | None = None,
+    intent_search_scope: list[str] | None = None,
+    intent_evidence: list[dict[str, Any]] | None = None,
+    known_issue_or_duplicate_search: str | None = None,
+    alternative_semantics_check: str | None = None,
+    security_contract_conflict: dict[str, Any] | None = None,
+    intent_review: dict[str, Any] | None = None,
 ) -> str:
     """File a vulnerability report — one report per fully-verified finding.
 
@@ -1182,6 +1386,54 @@ async def create_vulnerability_report(
             fix (summary + rationale). Prose/markdown only — the code
             change itself belongs in ``code_locations``. Omit for
             black-box findings.
+        intent_check_status: REQUIRED for a source-aware finding (one
+            whose evidence is code, or that came from a white-box scan):
+            ``completed`` when the intent search ran — including when it
+            found nothing — or ``unavailable`` when the source and its
+            documentation could not be searched. Record where you looked
+            in ``intent_search_scope``.
+        intent_search_scope: REQUIRED for a source-aware finding. The
+            places you searched for design intent, e.g. ``doc/``,
+            ``docs/adr/``, ``CHANGELOG.md``, ``spec/requests/``,
+            ``git log -S <symbol>``. List what you actually ran or read.
+        intent_evidence: The intent evidence you found, one entry per
+            source: ``{source, authority, supports, contradicts, stale,
+            note}``. ``authority`` is how much design intent that source
+            can establish, strongest first: ``security_contract`` (a
+            published security policy or promise), ``implementation_spec``
+            (the exact authorization/route/API semantics — guides, request
+            specs, schemas), ``operator_doc``, ``history`` (changelog,
+            ADR, the commit that introduced it with its docs/tests), or
+            ``comment``. Put the exact behaviour it establishes in
+            ``supports`` or the behaviour it rules out in ``contradicts``.
+        known_issue_or_duplicate_search: REQUIRED for a source-aware
+            finding. Where you looked for a known issue, an existing
+            report, or a deliberate design note for this behaviour, and
+            what the search returned.
+        alternative_semantics_check: REQUIRED for a source-aware finding.
+            Whether this path's semantics allow access when *any one* of
+            several boundaries or conditions is satisfied, and why the
+            observed case is not simply a narrower-but-satisfied
+            alternative. Matching one branch of an OR is not a bypass.
+        security_contract_conflict: The override, required when the
+            repository's own authoritative evidence describes the
+            observed behaviour as intended. ``{kind, invariant, source,
+            impact}``: ``kind`` is one of ``conflicting_security_invariant``,
+            ``external_security_promise``, ``cross_tenant_harm``,
+            ``exploitable_boundary_not_waivable``; ``invariant`` is the
+            specific security guarantee that is broken; ``source`` is
+            where that guarantee comes from (not the document that
+            establishes the intent you are overriding); ``impact`` is the
+            concrete harm documentation cannot waive. "A stricter model
+            would be better" is not a conflict.
+        intent_review: REQUIRED for a source-aware finding: an independent
+            pre-filing review by a *different* agent that read the same
+            evidence. ``{reviewer_kind: "independent_agent", reviewed_by,
+            verdict, notes}`` where ``verdict`` is ``intent_confirmed``,
+            ``conflict_confirmed`` or ``unresolved``. An unresolved
+            verdict means record the candidate as
+            ``record_coverage(outcome="needs_follow_up")`` instead of
+            filing it.
 
     Example (abbreviated — mirror this structure)::
 
@@ -1254,6 +1506,13 @@ async def create_vulnerability_report(
         code_locations=code_locations,
         fix_verification=fix_verification,
         fix_pr_body=fix_pr_body,
+        intent_check_status=intent_check_status,
+        intent_search_scope=intent_search_scope,
+        intent_evidence=intent_evidence,
+        known_issue_or_duplicate_search=known_issue_or_duplicate_search,
+        alternative_semantics_check=alternative_semantics_check,
+        security_contract_conflict=security_contract_conflict,
+        intent_review=intent_review,
         agent_id=agent_id,
         agent_name=agent_name,
     )
@@ -1289,6 +1548,13 @@ async def update_vulnerability_report(
     fix_verification: str | None = None,
     fix_pr_body: str | None = None,
     contextual_cvss_reasoning: str | None = None,
+    intent_check_status: str | None = None,
+    intent_search_scope: list[str] | None = None,
+    intent_evidence: list[dict[str, Any]] | None = None,
+    known_issue_or_duplicate_search: str | None = None,
+    alternative_semantics_check: str | None = None,
+    security_contract_conflict: dict[str, Any] | None = None,
+    intent_review: dict[str, Any] | None = None,
 ) -> str:
     """Revise a vulnerability report that is already filed, keeping its id.
 

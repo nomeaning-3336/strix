@@ -1,4 +1,6 @@
 import type {
+  IntentBlock,
+  IntentEvidence,
   Vulnerability,
   VulnerabilitySeverity,
   VulnerabilityStatus,
@@ -63,6 +65,84 @@ function asStringOrNull(v: unknown): string | null {
 
 function asNumberOrNull(v: unknown): number | null {
   return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+}
+
+function asTrimmedText(v: unknown): string {
+  return typeof v === "string" ? v.trim() : "";
+}
+
+function asTextList(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.map((item) => asTrimmedText(item)).filter((item) => item.length > 0);
+}
+
+/**
+ * Project the persisted developer-intent fields into the shape the finding
+ * detail renders. Mirrors `strix.report.intent.intent_block_for_output`: returns
+ * null when the report carries no intent metadata at all, so a black-box finding
+ * (or one filed before the gate existed) renders exactly as it did before.
+ *
+ * Every string is read defensively — a report written by an older agent, or one
+ * carrying a partially filled block, must not break the detail view.
+ */
+export function parseIntentBlock(raw: Record<string, unknown>): IntentBlock | null {
+  const gate = asRecord(raw.intent_gate);
+  const gatePresent = gate !== null && Object.keys(gate).length > 0;
+  const status = asTrimmedText(raw.intent_check_status);
+  const evidenceRaw = raw.intent_evidence;
+  const evidencePresent = Array.isArray(evidenceRaw)
+    ? evidenceRaw.length > 0
+    : Boolean(evidenceRaw);
+  if (!status && !gatePresent && !evidencePresent) return null;
+
+  const evidence: IntentEvidence[] = [];
+  if (Array.isArray(evidenceRaw)) {
+    for (const item of evidenceRaw) {
+      const entry = asRecord(item);
+      if (!entry) continue;
+      evidence.push({
+        source: asTrimmedText(entry.source),
+        authority: asTrimmedText(entry.authority),
+        supports: asTrimmedText(entry.supports),
+        contradicts: asTrimmedText(entry.contradicts),
+        stale: entry.stale === true,
+        note: asTrimmedText(entry.note),
+      });
+    }
+  }
+
+  const conflict = asRecord(raw.security_contract_conflict);
+  const review = asRecord(raw.intent_review);
+  return {
+    status: status || "not_recorded",
+    disposition: asTrimmedText(gate?.disposition) || "not_recorded",
+    search_scope: asTextList(raw.intent_search_scope),
+    known_issue_search: asTrimmedText(raw.known_issue_or_duplicate_search),
+    alternative_semantics_check: asTrimmedText(raw.alternative_semantics_check),
+    evidence,
+    conflict: conflict
+      ? {
+          kind: asTrimmedText(conflict.kind),
+          invariant: asTrimmedText(conflict.invariant),
+          source: asTrimmedText(conflict.source),
+          impact: asTrimmedText(conflict.impact),
+        }
+      : null,
+    review: review
+      ? {
+          reviewer_kind: asTrimmedText(review.reviewer_kind),
+          reviewed_by: asTrimmedText(review.reviewed_by),
+          verdict: asTrimmedText(review.verdict),
+          notes: asTrimmedText(review.notes),
+        }
+      : null,
+    warnings: asTextList(gate?.warnings),
+    reasons: asTextList(gate?.reasons),
+  };
 }
 
 function parseJson(text: string, label: string): unknown {
@@ -226,6 +306,7 @@ function parseOneVulnerability(
     assumptions: asStringOrNull(raw.assumptions),
     fix_effort: (asStringOrNull(raw.fix_effort) as Vulnerability["fix_effort"]) ?? null,
     cvss_breakdown: (raw.cvss_breakdown as Vulnerability["cvss_breakdown"]) ?? null,
+    intent: parseIntentBlock(raw),
   };
 }
 

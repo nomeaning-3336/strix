@@ -88,6 +88,50 @@ export interface CVSSBreakdown {
   availability: string | null;
 }
 
+/* ─── Developer-intent gate (mirrors strix.report.intent.intent_block_for_output) ─── */
+
+export interface IntentEvidence {
+  source: string;
+  authority: string;
+  supports: string;
+  contradicts: string;
+  stale: boolean;
+  note: string;
+}
+
+export interface IntentConflict {
+  kind: string;
+  invariant: string;
+  source: string;
+  impact: string;
+}
+
+export interface IntentReview {
+  reviewer_kind: string;
+  reviewed_by: string;
+  verdict: string;
+  notes: string;
+}
+
+/**
+ * The intent block a finding carries when the agent had to justify the observed
+ * behaviour against the target repo's own docs/specs. Absent for black-box
+ * findings and for findings filed before the gate existed; `intent` stays
+ * undefined in both cases so the detail view renders exactly as before.
+ */
+export interface IntentBlock {
+  status: string;
+  disposition: string;
+  search_scope: string[];
+  known_issue_search: string;
+  alternative_semantics_check: string;
+  evidence: IntentEvidence[];
+  conflict: IntentConflict | null;
+  review: IntentReview | null;
+  warnings: string[];
+  reasons: string[];
+}
+
 export interface Vulnerability {
   id: string;
   scan_id: string | null;
@@ -141,6 +185,11 @@ export interface Vulnerability {
   fix_pr_eligible?: boolean;
   fix_pr_reason?: string | null;
   fix_pr_url?: string | null;
+  /**
+   * Developer-intent gate verdict. Optional because a finding may have no
+   * intent metadata at all (black-box scans, runs before the gate existed).
+   */
+  intent?: IntentBlock | null;
 }
 
 export interface VulnerabilityFilters {
