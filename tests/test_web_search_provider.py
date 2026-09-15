@@ -205,7 +205,7 @@ def test_parse_keeps_page_age_when_present() -> None:
 
 
 def test_parse_skips_non_result_items_in_result_block() -> None:
-    # A result block can carry an error object instead of results.
+    # A result block can carry an error object alongside real results.
     data = _deepseek_response(
         [
             {"type": "web_search_tool_error", "error_code": "max_uses_exceeded"},
@@ -218,14 +218,53 @@ def test_parse_skips_non_result_items_in_result_block() -> None:
     assert [s["url"] for s in sources] == ["https://example.test/a"]
 
 
-def test_parse_tolerates_result_block_with_non_list_content() -> None:
-    data = _deepseek_response([])
+def test_parse_result_block_with_non_list_content_is_an_error() -> None:
+    # Grounding guarantee: a result block alone is not a successful search.
+    # Nothing was retrieved, so the synthesized text must not be returned as one.
+    data = _deepseek_response([], text="model-generated explanation")
     data["content"][2]["content"] = {"error": "unavailable"}
+
+    with pytest.raises(provider.ProviderError) as excinfo:
+        provider.parse_response(data)
+
+    assert excinfo.value.kind == "shape"
+
+
+def test_parse_result_block_with_only_error_items_is_an_error() -> None:
+    data = _deepseek_response(
+        [{"type": "web_search_tool_error", "error_code": "unavailable"}],
+        text="model-generated explanation",
+    )
+
+    with pytest.raises(provider.ProviderError) as excinfo:
+        provider.parse_response(data)
+
+    assert excinfo.value.kind == "shape"
+
+
+def test_parse_result_block_with_empty_content_is_an_error() -> None:
+    data = _deepseek_response([], text="model-generated explanation")
+
+    with pytest.raises(provider.ProviderError):
+        provider.parse_response(data)
+
+
+def test_parse_result_items_without_urls_are_an_error() -> None:
+    # Items that are the right type but carry no usable url cannot ground a result.
+    data = _deepseek_response([{"type": "web_search_result", "title": "no url here"}])
+
+    with pytest.raises(provider.ProviderError):
+        provider.parse_response(data)
+
+
+def test_parse_single_retrieved_url_is_a_success() -> None:
+    # The boundary: exactly one real URL is enough to be grounded.
+    data = _deepseek_response([_result_item("https://example.test/a", "A")])
 
     result = provider.parse_response(data)
 
     assert result["success"] is True
-    assert result["sources"] == []
+    assert len(result["sources"]) == 1
 
 
 def test_parse_without_result_blocks_is_an_error() -> None:
@@ -354,6 +393,58 @@ def test_search_maps_server_error_to_unavailable(monkeypatch: pytest.MonkeyPatch
 
     assert result["success"] is False
     assert "unavailable" in result["error"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_search_maps_auth_failure_to_credential_advice(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    # Rephrasing a query cannot fix a rejected credential.
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(provider.requests, "post", _post_returning(status))
+
+    result = provider.search("q")
+
+    assert result["success"] is False
+    assert "authentication failed" in result["error"]
+    assert "DEEPSEEK_SEARCH_API_KEY" in result["error"]
+    assert "rejected the query" not in result["error"]
+
+
+@pytest.mark.parametrize("status", [404, 405])
+def test_search_maps_endpoint_failure_to_config_advice(
+    monkeypatch: pytest.MonkeyPatch, status: int
+) -> None:
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(provider.requests, "post", _post_returning(status))
+
+    result = provider.search("q")
+
+    assert result["success"] is False
+    assert "endpoint appears misconfigured" in result["error"]
+    assert "DEEPSEEK_SEARCH_API_BASE" in result["error"]
+
+
+def test_search_maps_rate_limit_to_retry_advice(monkeypatch: pytest.MonkeyPatch) -> None:
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(provider.requests, "post", _post_returning(429))
+
+    result = provider.search("q")
+
+    assert result["success"] is False
+    assert "rate limited" in result["error"]
+    assert "rejected the query" not in result["error"]
+
+
+@pytest.mark.parametrize("status", [400, 422])
+def test_search_maps_query_rejection(monkeypatch: pytest.MonkeyPatch, status: int) -> None:
+    _patch_settings(monkeypatch)
+    monkeypatch.setattr(provider.requests, "post", _post_returning(status))
+
+    result = provider.search("q")
+
+    assert result["success"] is False
+    assert "rejected the query" in result["error"]
 
 
 def test_search_never_raises_on_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:

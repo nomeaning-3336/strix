@@ -60,11 +60,6 @@ _SEARCH_INSTRUCTIONS = (
     "Query: {query}"
 )
 
-_NO_RESULT_BLOCKS = (
-    "DeepSeek returned no web_search_tool_result blocks; the request may not have "
-    "triggered native web search"
-)
-
 
 ErrorKind = Literal["not_configured", "timeout", "http", "network", "shape"]
 
@@ -210,8 +205,12 @@ def _search_requests(usage: Any) -> int:
 def parse_response(data: Any) -> dict[str, Any]:
     """Turn a Messages response body into the tool's normalized result.
 
+    Success requires at least one *retrieved* page. A result block that carries
+    only an error, or no usable item at all, is a failure: model prose on its own
+    must never be reported as a successful search.
+
     Raises:
-        ProviderError: when the body is malformed or carried no search results.
+        ProviderError: when the body is malformed, or carried no retrieved pages.
     """
     if not isinstance(data, dict):
         raise ProviderError(
@@ -224,28 +223,54 @@ def parse_response(data: Any) -> dict[str, Any]:
             "Web search returned an unexpected response. Try again",
             "shape",
         )
-    if not any(
-        isinstance(block, dict) and block.get("type") == "web_search_tool_result"
-        for block in blocks
-    ):
-        # Deliberately an error: silently returning synthesized prose here would
-        # present model recall as if it were retrieved search results.
-        raise ProviderError(f"{_NO_RESULT_BLOCKS}. Try rephrasing the query", "shape")
 
     sources = extract_sources(blocks)
-    answer = _answer_text(blocks)
+    if not sources:
+        # Covers both "no result block at all" and "result block with zero
+        # usable URLs". Either way nothing was actually retrieved, so returning
+        # the synthesized text here would present model recall as search output.
+        raise ProviderError(
+            "Web search returned no usable retrieved sources. Try rephrasing the query",
+            "shape",
+        )
+
     result: dict[str, Any] = {
         "success": True,
         "sources": sources,
         "search_requests": _search_requests(data.get("usage")),
     }
+    answer = _answer_text(blocks)
     if answer:
         result["content"] = answer
     return result
 
 
 def _http_error(status: int) -> ProviderError:
-    """Map an HTTP failure to a model-facing recovery instruction."""
+    """Map an HTTP failure to the recovery step that can actually fix it.
+
+    The distinction matters: telling the agent to rephrase its query is useless
+    advice for a rejected credential or a rate limit.
+    """
+    if status in {401, 403}:
+        return ProviderError(
+            "Web search authentication failed. The operator needs to check "
+            "DEEPSEEK_SEARCH_API_KEY (or DEEPSEEK_API_KEY). Proceed without web search",
+            "http",
+            status=status,
+        )
+    if status in {404, 405}:
+        return ProviderError(
+            "Web search endpoint appears misconfigured. The operator needs to check "
+            "DEEPSEEK_SEARCH_API_BASE. Proceed without web search",
+            "http",
+            status=status,
+        )
+    if status == 429:
+        return ProviderError(
+            "Web search was rate limited. Wait and retry later",
+            "http",
+            status=status,
+        )
     if 400 <= status < 500:
         return ProviderError(
             "Web search rejected the query. Refine it "
