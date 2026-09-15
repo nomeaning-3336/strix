@@ -29,7 +29,8 @@ _LLM_ENV_KEYS = [
     "STRIX_REASONING_EFFORT",
     "STRIX_FORCE_REQUIRED_TOOL_CHOICE",
     "LLM_TIMEOUT",
-    "PERPLEXITY_API_KEY",
+    "DEEPSEEK_SEARCH_API_KEY",
+    "DEEPSEEK_API_KEY",
     # RuntimeSettings
     "STRIX_IMAGE",
     "STRIX_RUNTIME_BACKEND",
@@ -71,12 +72,12 @@ def test_read_json_overrides_non_dict_env(tmp_path: Path) -> None:
 def test_read_json_overrides_maps_to_nested_settings(tmp_path: Path) -> None:
     path = tmp_path / "cli-config.json"
     path.write_text(
-        json.dumps({"env": {"STRIX_LLM": "my-model", "PERPLEXITY_API_KEY": "pk"}}),
+        json.dumps({"env": {"STRIX_LLM": "my-model", "DEEPSEEK_SEARCH_API_KEY": "pk"}}),
         encoding="utf-8",
     )
     assert loader._read_json_overrides(path) == {
         "llm": {"model": "my-model"},
-        "integrations": {"perplexity_api_key": "pk"},
+        "integrations": {"deepseek_search_api_key": "pk"},
     }
 
 
@@ -161,10 +162,29 @@ def test_aliases_for_no_alias() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_deepseek_search_key_falls_back_to_shared_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # DEEPSEEK_SEARCH_API_KEY is the dedicated credential; DEEPSEEK_API_KEY is the
+    # documented fallback for operators who only export the shared key.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "shared-key")
+    assert loader.load_settings().integrations.deepseek_search_api_key == "shared-key"
+
+
+def test_deepseek_search_key_prefers_dedicated_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The first alias must win when both are present, so a search-specific
+    # gateway credential is not clobbered by the shared inference key.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "shared-key")
+    monkeypatch.setenv("DEEPSEEK_SEARCH_API_KEY", "search-key")
+    assert loader.load_settings().integrations.deepseek_search_api_key == "search-key"
+
+
 def test_apply_override_and_load_settings_round_trip(tmp_path: Path) -> None:
     path = tmp_path / "cli-config.json"
     path.write_text(
-        json.dumps({"env": {"STRIX_LLM": "round-trip-model", "PERPLEXITY_API_KEY": "pk"}}),
+        json.dumps({"env": {"STRIX_LLM": "round-trip-model", "DEEPSEEK_SEARCH_API_KEY": "pk"}}),
         encoding="utf-8",
     )
 
@@ -172,7 +192,7 @@ def test_apply_override_and_load_settings_round_trip(tmp_path: Path) -> None:
     settings = loader.load_settings()
 
     assert settings.llm.model == "round-trip-model"
-    assert settings.integrations.perplexity_api_key == "pk"
+    assert settings.integrations.deepseek_search_api_key == "pk"
     # Second call is memoized -> same object.
     assert loader.load_settings() is settings
 

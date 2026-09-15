@@ -46,8 +46,8 @@ def validate_environment() -> None:
     if not settings.llm.api_base:
         missing_optional_vars.append("LLM_API_BASE")
 
-    if not settings.integrations.perplexity_api_key:
-        missing_optional_vars.append("PERPLEXITY_API_KEY")
+    if not settings.integrations.deepseek_search_api_key:
+        missing_optional_vars.append("DEEPSEEK_SEARCH_API_KEY")
 
     if missing_required_vars:
         error_text = Text()
@@ -87,11 +87,12 @@ def validate_environment() -> None:
                         " - Custom API base URL if using local models (e.g., Ollama, LMStudio)\n",
                         style="white",
                     )
-                elif var == "PERPLEXITY_API_KEY":
+                elif var == "DEEPSEEK_SEARCH_API_KEY":
                     error_text.append("• ", style="white")
-                    error_text.append("PERPLEXITY_API_KEY", style="bold cyan")
+                    error_text.append("DEEPSEEK_SEARCH_API_KEY", style="bold cyan")
                     error_text.append(
-                        " - API key for Perplexity AI web search (enables real-time research)\n",
+                        " - DeepSeek API key for native web search "
+                        "(enables real-time research; falls back to DEEPSEEK_API_KEY)\n",
                         style="white",
                     )
                 elif var == "STRIX_REASONING_EFFORT":
@@ -114,9 +115,11 @@ def validate_environment() -> None:
                         "# needed for local models only\n",
                         style="dim white",
                     )
-                elif var == "PERPLEXITY_API_KEY":
+                elif var == "DEEPSEEK_SEARCH_API_KEY":
                     error_text.append(
-                        "export PERPLEXITY_API_KEY='your-perplexity-key-here'\n", style="dim white"
+                        "export DEEPSEEK_SEARCH_API_KEY='your-deepseek-key-here'  "
+                        "# optional: enables web search\n",
+                        style="dim white",
                     )
                 elif var == "STRIX_REASONING_EFFORT":
                     error_text.append(

@@ -135,10 +135,43 @@ class TelemetrySettings(BaseSettings):
 class IntegrationSettings(BaseSettings):
     model_config = _BASE_CONFIG
 
-    perplexity_api_key: str | None = Field(
+    # Web search runs on DeepSeek's native search (Anthropic-compatible Messages
+    # API). A dedicated key is supported so search can point at a different
+    # gateway/credential than normal model inference; DEEPSEEK_API_KEY is the
+    # fallback, matching what most operators already have exported.
+    deepseek_search_api_key: str | None = Field(
         default=None,
-        alias="PERPLEXITY_API_KEY",
+        validation_alias=AliasChoices(
+            "DEEPSEEK_SEARCH_API_KEY",
+            "DEEPSEEK_API_KEY",
+        ),
         repr=False,
+    )
+    # Endpoint base; ``/messages`` is appended.
+    deepseek_search_api_base: str = Field(
+        default="https://api.deepseek.com/anthropic/v1",
+        alias="DEEPSEEK_SEARCH_API_BASE",
+    )
+    # Anthropic-format model name. Anthropic's alias mapping sends the
+    # ``claude-sonnet``/``claude-haiku`` names here, so both spellings resolve.
+    deepseek_search_model: str = Field(
+        default="deepseek-v4-flash",
+        alias="DEEPSEEK_SEARCH_MODEL",
+    )
+    deepseek_search_max_uses: int = Field(
+        default=5,
+        gt=0,
+        alias="DEEPSEEK_SEARCH_MAX_USES",
+    )
+    deepseek_search_max_tokens: int = Field(
+        default=4_096,
+        gt=0,
+        alias="DEEPSEEK_SEARCH_MAX_TOKENS",
+    )
+    deepseek_search_timeout: int = Field(
+        default=300,
+        gt=0,
+        alias="DEEPSEEK_SEARCH_TIMEOUT",
     )
     postman_api_key: str | None = Field(
         default=None,

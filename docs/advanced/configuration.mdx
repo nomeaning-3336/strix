@@ -76,8 +76,16 @@ affecting the agents that do the actual testing.
 
 ## Optional Features
 
-<ParamField path="PERPLEXITY_API_KEY" type="string">
-  API key for Perplexity AI. Enables real-time web search during scans for OSINT and vulnerability research.
+<ParamField path="DEEPSEEK_SEARCH_API_KEY" type="string">
+  DeepSeek API key used for native web search. Enables real-time web search during scans for OSINT and vulnerability research. Falls back to `DEEPSEEK_API_KEY` when unset, so a single key can cover both inference and search.
+</ParamField>
+
+<ParamField path="DEEPSEEK_SEARCH_API_BASE" default="https://api.deepseek.com/anthropic/v1" type="string">
+  Endpoint base for web search; `/messages` is appended. Point this at a trusted Anthropic-compatible Messages API to route search through a different gateway than chat.
+</ParamField>
+
+<ParamField path="DEEPSEEK_SEARCH_MODEL" default="deepseek-v4-flash" type="string">
+  Model that performs the search and summarizes the retrieved pages.
 </ParamField>
 
 <ParamField path="POSTMAN_API_KEY" type="string">
@@ -160,7 +168,7 @@ export STRIX_LLM="openai/gpt-5.4"
 export LLM_API_KEY="sk-..."
 
 # Optional: Enable web search
-export PERPLEXITY_API_KEY="pplx-..."
+export DEEPSEEK_SEARCH_API_KEY="sk-..."  # falls back to DEEPSEEK_API_KEY
 
 # Optional: Custom timeouts
 export LLM_TIMEOUT="600"
