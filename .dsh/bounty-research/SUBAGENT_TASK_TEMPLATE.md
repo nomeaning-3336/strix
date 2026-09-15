@@ -40,4 +40,3 @@ freshness reason,
 duplicate/intent signal,
 bounded impact,
 and one next decisive action.
-

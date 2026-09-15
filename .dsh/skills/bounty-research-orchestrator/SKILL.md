@@ -581,4 +581,3 @@ Exact copy-paste prompts.
 ## 7. Recommendation
 One sentence:
 > "Run Strix on X first because Y."
-

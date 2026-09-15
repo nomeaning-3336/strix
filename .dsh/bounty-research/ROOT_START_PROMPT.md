@@ -37,4 +37,3 @@ Important:
 - Do not inflate severity from hypothetical composition.
 - Public silence is not proof of novelty.
 - A majority of subagents is not evidence; source/runtime facts are.
-

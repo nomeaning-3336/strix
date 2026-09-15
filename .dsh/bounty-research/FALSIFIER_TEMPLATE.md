@@ -37,4 +37,3 @@ Try to disprove it by checking:
 - public known/duplicate signals.
 
 Return PROMOTE only if the chain still holds after these checks. Otherwise HOLD or KILL with the decisive contradiction.
-
