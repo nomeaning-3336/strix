@@ -139,6 +139,16 @@ def test_state_populates_model_warning_for_non_frontier_model() -> None:
     assert "not a recommended frontier model" in warning
 
 
+def test_state_leaves_model_warning_empty_for_deepseek_flash() -> None:
+    # Regression: this is the live config. DeepSeek V4.1 Flash was flagged as
+    # weak purely because it is routed through the OpenAI-compatible endpoint
+    # and the allowlist entry was provider-qualified.
+    os.environ["STRIX_LLM"] = "openai/deepseek-flash"
+    loader._cached = None
+
+    assert TuiController(args()).snapshot()["model_warning"] == ""
+
+
 def test_setup_restores_prepared_cli_targets() -> None:
     setup_args = args()
     setup_args.targets_info = [

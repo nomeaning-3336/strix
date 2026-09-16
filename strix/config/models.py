@@ -580,6 +580,13 @@ RECOMMENDED_MODEL_NAMES = (
     "gemini/gemini-3.6-flash",
     "deepseek/deepseek-v4-pro",
     "deepseek/deepseek-v4-flash",
+    # ``deepseek-flash`` is the documented API name for DeepSeek V4.1 Flash (the
+    # V4 Flash name is retained only as a compatibility alias). It is listed bare
+    # because it is reached through several prefixes: ``deepseek/`` natively, and
+    # ``openai/`` via the OpenAI-compatible endpoint or a gateway. A bare entry
+    # keeps this capability classification identical on every route to the model.
+    "deepseek-flash",
+    "deepseek-v4-pro",
     "dashscope/qwen3.8-max",
     "dashscope/qwen3.7-max-2026-06-08",
     "moonshot/kimi-k3",
@@ -829,9 +836,14 @@ def is_recommended_or_frontier_model(model_name: str) -> bool:
     name = _normalized_model_name(model_name)
     if not name:
         return False
-    if name in _RECOMMENDED_MODEL_NAME_SET:
-        return True
     provider_name, bare_model_name = _split_model_provider(name)
+    # The allowlist holds provider-qualified names ("deepseek/deepseek-v4-flash"),
+    # so match the bare model name too. A model's capability does not change with
+    # the route used to reach it: "openai/deepseek-flash" (the OpenAI-compatible
+    # endpoint) and "deepseek/deepseek-flash" are the same model, and neither may
+    # be reported as weaker than the other.
+    if name in _RECOMMENDED_MODEL_NAME_SET or bare_model_name in _RECOMMENDED_MODEL_NAME_SET:
+        return True
     return any(
         _matches_frontier_family(provider_name, bare_model_name, provider_markers, prefixes)
         for provider_markers, prefixes in FRONTIER_MODEL_FAMILIES

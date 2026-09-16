@@ -81,6 +81,31 @@ def test_frontier_model_families_are_accepted(model_name: str) -> None:
 @pytest.mark.parametrize(
     "model_name",
     [
+        # The same model reached through different endpoints must classify
+        # identically. ``openai/deepseek-flash`` is the live config: DeepSeek
+        # served through the OpenAI-compatible endpoint. It previously warned
+        # that the model was weak purely because the allowlist entry was
+        # provider-qualified while the route was not.
+        "openai/deepseek-flash",
+        "deepseek/deepseek-flash",
+        "deepseek-flash",
+        "openai/deepseek-v4-pro",
+    ],
+)
+def test_deepseek_flash_is_accepted_regardless_of_route(model_name: str) -> None:
+    assert is_recommended_or_frontier_model(model_name)
+
+
+def test_bare_allowlist_entry_does_not_bless_unknown_deepseek_models() -> None:
+    # Widening the match to the bare name must not turn every ``deepseek-*``
+    # model on a third-party provider into a recommended one.
+    for model_name in ("openai/deepseek-v4.1-flash", "openai/deepseek-v5-tiny"):
+        assert not is_recommended_or_frontier_model(model_name)
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
         "",
         "openai/gpt-4.1",
         "anthropic/claude-3-5-sonnet-latest",
